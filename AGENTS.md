@@ -5,7 +5,7 @@
 - Mintlify docs for **Nuxt I18n Micro** (`nuxt-i18n-micro` on npm)
 - Pages are MDX with YAML frontmatter (`title`, `description`)
 - Configuration: `docs.json`
-- Content is synced from `s00d/nuxt-i18n-micro` via `pnpm run docs:mintlify-sync`
+- VitePress docs in `s00d/nuxt-i18n-micro` are the upstream reference; edit MDX in this repo when publishing
 
 ## Terminology
 
@@ -28,12 +28,6 @@
 - Do not duplicate full changelog — link to `CHANGELOG.md`
 - `index.mdx` uses CardGroup landing layout; do not replace with VitePress marketing charts
 
-## Sync workflow
+## Publishing
 
-After editing VitePress docs in the main repo:
-
-```bash
-pnpm run docs:mintlify-sync -- --out /path/to/s00d/docs
-```
-
-Then commit and push this repository.
+After editing pages, run `mint dev` locally, then commit and push to `main`.

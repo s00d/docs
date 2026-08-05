@@ -4,14 +4,7 @@ Public documentation for [Nuxt I18n Micro](https://github.com/s00d/nuxt-i18n-mic
 
 ## Source of truth
 
-Page content is generated from the VitePress docs in the main module repository:
-
-```bash
-cd ../nuxt-i18n-next
-pnpm run docs:mintlify-sync -- --out ../docs
-```
-
-This runs `docs:generate` (API snapshots, module options) and writes `.mdx` files into this repo.
+VitePress docs in the [main module repository](https://github.com/s00d/nuxt-i18n-micro/tree/main/docs) remain the primary source. This Mintlify site is maintained as a separate deployment; update MDX here when publishing doc changes.
 
 ## Local preview
 
@@ -34,5 +27,6 @@ Push to `main`. Mintlify deploys via the GitHub app connected in the [Mintlify d
 - `api/` — module API, composables, components, package APIs
 - `integrations/` — framework packages
 - `migration/` — migration guides
+- `.mintlify/Assistant.md` — Mintlify AI assistant instructions
 
 Maintainer-only docs (contribution, release smoke, maintenance commands) and full release news stay in the [GitHub repo](https://github.com/s00d/nuxt-i18n-micro/tree/main/docs).
