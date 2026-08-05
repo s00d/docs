@@ -1,0 +1,225 @@
+---
+title: "Server-side translations"
+description: "Translate content and read locale metadata inside Nitro API routes and server middleware."
+---
+
+Nuxt I18n Micro supports server-side translations and locale information so you can translate content and access locale details on the server. This is useful for API routes, server middleware, and any server-rendered response where localization has to run before reaching the client.
+
+Translations use the same locale messages defined in your module configuration and are resolved from the detected locale on the incoming request.
+
+## How server translations are loaded
+
+By default (`translationPayloads.mode: 'premerged'`), root-level files are baked into every page payload at build time as `{page}/{locale}/data.json`. The server loads the same pre-built files the client fetches from `/{apiBaseUrl}/...`, so all keys (both shared and page-specific) are available in server handlers.
+
+With `translationPayloads.mode: 'source'`, compact source files are merged at runtime when the loader (or the `/_locales` route) is called. On Edge this happens through Nitro `serverAssets`; on Node from the optional public copy.
+
+See the [performance guide](/guides/performance) for the payload architecture and the [cache API](/api/cache) for cache internals.
+
+## Available helpers
+
+Two auto-imported helpers are provided in every server route:
+
+- `useTranslationServerMiddleware(event, ...)` for translating content.
+- `useLocaleServerMiddleware(event, ...)` for reading locale metadata.
+
+Locale detection is shared between them through an internal `detectCurrentLocale` utility so both helpers pick the same locale for a given request.
+
+## Translating in an event handler
+
+```typescript server/api/greeting.ts
+import { defineEventHandler } from 'h3'
+
+export default defineEventHandler(async (event) => {
+  const t = await useTranslationServerMiddleware(event)
+
+  return {
+    message: t('greeting'),
+  }
+})
+```
+
+The user's locale is detected automatically, and `t()` returns the translation for the resolved locale.
+
+## Reading locale info
+
+```typescript server/api/locale.ts
+import { defineEventHandler } from 'h3'
+
+export default defineEventHandler((event) => {
+  const localeInfo = useLocaleServerMiddleware(event)
+
+  return {
+    success: true,
+    data: localeInfo,
+    timestamp: new Date().toISOString(),
+  }
+})
+```
+
+The middleware returns a `LocaleInfo` object:
+
+```typescript
+interface LocaleInfo {
+  current: string           // Current detected locale code
+  default: string           // Default locale code
+  fallback: string          // Fallback locale code
+  available: string[]       // All available locale codes
+  locale: Locale | null     // Full locale configuration object
+  isDefault: boolean        // Whether current is the default
+  isFallback: boolean       // Whether current is the fallback
+}
+```
+
+Example response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "current": "ru",
+    "default": "en",
+    "fallback": "en",
+    "available": ["en", "ru", "de"],
+    "locale": {
+      "code": "ru",
+      "iso": "ru-RU",
+      "dir": "ltr",
+      "displayName": "Русский"
+    },
+    "isDefault": false,
+    "isFallback": false
+  },
+  "timestamp": "2024-01-15T10:30:00.000Z"
+}
+```
+
+## Forcing a specific locale
+
+Both helpers accept optional overrides. The second argument is the fallback locale and the third argument is the forced/default locale:
+
+```typescript server/api/forced.ts
+import { defineEventHandler } from 'h3'
+
+export default defineEventHandler(async (event) => {
+  // Force German with English as fallback
+  const t = await useTranslationServerMiddleware(event, 'en', 'de')
+
+  return {
+    message: t('welcome'),
+  }
+})
+```
+
+You can also drive detection from your own signal (for example, a `?locale=` query):
+
+```typescript server/api/from-query.ts
+import { defineEventHandler } from 'h3'
+
+function detectLocale(event): string | null {
+  const params = new URLSearchParams(event.node.req.url?.split('?')[1])
+  return params.get('locale') || 'en'
+}
+
+export default defineEventHandler(async (event) => {
+  const t = await useTranslationServerMiddleware(event, 'en', detectLocale(event))
+
+  return {
+    message: t('welcome'),
+  }
+})
+```
+
+## Locale detection order
+
+Both middleware helpers resolve the locale in this priority order:
+
+1. URL query parameter, for example `?locale=ru`.
+2. Route parameter, for example `/ru/api/endpoint`.
+3. Cookie (the `localeCookie` name configured in module options).
+4. `Accept-Language` header.
+5. Configured `fallbackLocale`.
+6. Configured `defaultLocale`.
+7. Hardcoded `'en'` as a last resort.
+
+<Note>
+Detection logic is shared between `useLocaleServerMiddleware` and `useTranslationServerMiddleware` for consistency across the module.
+</Note>
+
+## Conditional responses
+
+You can branch on the detected locale to shape the response payload:
+
+```typescript server/api/greeting.ts
+import { defineEventHandler } from 'h3'
+
+export default defineEventHandler((event) => {
+  const { current, isDefault } = useLocaleServerMiddleware(event)
+
+  if (current === 'ru') {
+    return { message: 'Привет, мир!', locale: current, isDefault }
+  }
+
+  if (current === 'de') {
+    return { message: 'Hallo, Welt!', locale: current, isDefault }
+  }
+
+  return { message: 'Hello, World!', locale: current, isDefault }
+})
+```
+
+## Validating the requested locale
+
+Reject requests for locales you do not support:
+
+```typescript server/api/localized.ts
+import { defineEventHandler, createError } from 'h3'
+
+export default defineEventHandler((event) => {
+  const { current, available, locale } = useLocaleServerMiddleware(event)
+
+  if (!available.includes(current)) {
+    throw createError({
+      statusCode: 400,
+      statusMessage: `Unsupported locale: ${current}. Available: ${available.join(', ')}`,
+    })
+  }
+
+  return {
+    locale: current,
+    direction: locale?.dir || 'ltr',
+    displayName: locale?.displayName || current,
+    availableLocales: available,
+  }
+})
+```
+
+## Combining both helpers
+
+```typescript server/api/welcome.ts
+import { defineEventHandler } from 'h3'
+
+export default defineEventHandler(async (event) => {
+  const localeInfo = useLocaleServerMiddleware(event)
+  const t = await useTranslationServerMiddleware(event)
+
+  return {
+    locale: localeInfo.current,
+    message: t('welcome_message'),
+    availableLocales: localeInfo.available,
+    isDefault: localeInfo.isDefault,
+  }
+})
+```
+
+## Best practices
+
+- **Validate the locale.** Check that the detected locale is in your available list before using it.
+- **Provide a sensible fallback.** Pass a fallback code to both helpers so you never render an unknown locale.
+- **Combine locale info with translations** for a complete i18n response.
+- **Handle unsupported locales explicitly** with `createError` rather than silently rendering `en`.
+
+## Performance notes
+
+- Both helpers are lightweight and execute synchronously except where translation loading is required.
+- Detection uses efficient fallback chains and does not make external calls.
+- Loaded translations live in a process-global cache. See the [performance guide](/guides/performance) for details.

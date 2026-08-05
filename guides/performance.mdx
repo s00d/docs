@@ -1,0 +1,182 @@
+---
+title: "Performance"
+description: "Translation storage, payload modes, caching, and cache-busting in Nuxt I18n Micro."
+---
+
+Nuxt I18n Micro is built to keep builds fast and runtime memory small even with large translation catalogs. This guide explains the architecture that powers those properties: the process-global storage singleton, the two payload modes, the split between server and public assets, and the cache layers that sit in front of runtime requests.
+
+## Translation storage architecture
+
+Starting from v3, the module uses a `globalThis` singleton pattern with `Symbol.for` to guarantee a single cache instance across the entire Node.js process. This prevents:
+
+- Cache duplication when the same module is bundled multiple times.
+- Per-request object recreation that adds garbage-collection pressure.
+- Memory leaks from orphaned cache instances.
+
+```typescript
+// Internal implementation pattern
+const CACHE_KEY = Symbol.for('__NUXT_I18N_STORAGE_CACHE__')
+if (!globalThis[CACHE_KEY]) {
+  globalThis[CACHE_KEY] = new Map()
+}
+```
+
+Every SSR request in the same Node process reuses the same `Map`, keyed by `locale:routeName`.
+
+## Optimized translation lookups
+
+The `$t()` function uses a direct-lookup strategy:
+
+1. **Pre-computed context.** Locale and route name are calculated once during navigation, not on every `$t()` call.
+2. **Single-source lookup.** All translations (root, page-specific, and fallback) are pre-merged at build time into a single file per page. There is no layered search on the hot path.
+3. **Cumulative deep merge on navigation.** When navigating within the same locale, new page translations are deep-merged (two levels deep) into the active dictionary. Keys from the previous page stay visible during transition animations, even when pages share overlapping prefixes like `common.*`.
+4. **Garbage collection via `page:transition:finish`.** Once the transition completes, the merged dictionary is replaced with the clean translations for the new page only.
+5. **Direct property access.** Uses `obj[key]` instead of `Map` lookups for hot paths.
+
+```typescript
+// Simplified lookup logic on the single active dictionary
+let val = cachedTranslations[key]
+if (val === undefined && key.includes('.')) {
+  val = getByPath(cachedTranslations, key)
+}
+```
+
+## Payload modes
+
+Two `translationPayloads.mode` values change how translations are packaged and delivered.
+
+### `premerged` (default)
+
+Root + page-specific + fallback data is merged at build time into per-page files under `public/<apiBaseUrl>/{page}/{locale}/data.json`. The server reads these files directly with `readFile`, and the client fetches the same URLs.
+
+```typescript nuxt.config.ts
+export default defineNuxtConfig({
+  i18n: {
+    translationPayloads: {
+      mode: 'premerged',   // default
+      serverAssets: true,  // default
+      publicAssets: true,  // default in premerged mode
+    },
+  },
+})
+```
+
+Pros: fast lookups, no runtime merging. Works cleanly on Node hosts.
+
+### `source`
+
+Compact source files are kept as-is and merged at runtime through the built-in `/_locales` route (or Edge `assets:i18n`). This keeps the Edge server bundle small and is the recommended mode for large catalogs deployed on Edge.
+
+```typescript nuxt.config.ts
+export default defineNuxtConfig({
+  i18n: {
+    translationPayloads: {
+      mode: 'source',
+    },
+  },
+})
+```
+
+By default, `source` mode disables `publicAssets` and prerendered payload routes to keep the deployable output small.
+
+## Server assets and public assets
+
+- **`serverAssets`**: on Node, SSR reads translation JSON from `public/<apiBaseUrl>` using `readFile` (no Nitro `serverAssets` / Rollup `raw:` embedding). On Edge, Nitro `serverAssets` embeds the same tree (prefer `mode: 'source'` for large catalogs).
+- **`publicAssets`**: copies payloads to `public/<apiBaseUrl>/{page}/{locale}/data.json` so static hosts can serve them without going through Nitro.
+
+```typescript nuxt.config.ts
+export default defineNuxtConfig({
+  i18n: {
+    translationPayloads: {
+      serverAssets: true, // Node → public copy; Edge → serverAssets embed
+      publicAssets: true, // static output for static hosts
+    },
+  },
+})
+```
+
+<Warning>
+**Static hosting / pure SSG.** `prerenderRoutes` defaults to `false`. With `mode: 'source'`, `publicAssets` also defaults to `false`. Pure static hosting without a Nitro or Edge runtime cannot load translations on the client unless you enable one of these outputs, keep `serverHandler` available at runtime, or host payloads externally.
+
+Default premerged with `publicAssets` already places `/{apiBaseUrl}/{page}/{locale}/data.json` under `public/`, so static hosts serve client fetches without needing Nitro.
+</Warning>
+
+### External CDN hosts
+
+Host payloads on an external origin by disabling local outputs and pointing the module at that host:
+
+```typescript nuxt.config.ts
+export default defineNuxtConfig({
+  i18n: {
+    apiBaseClientHost: 'https://cdn.example.com',
+    apiBaseServerHost: 'https://cdn.example.com',
+    translationPayloads: {
+      serverHandler: false,
+      publicAssets: false,
+      prerenderRoutes: false,
+    },
+  },
+})
+```
+
+Keep `serverHandler` enabled when you rely on the built-in local `/{apiBaseUrl}/:page/:locale/data.json` route. Disable it when payloads live on an external origin.
+
+## HTML stays small
+
+Translations loaded during SSR stay in **server memory** for `$t()` during render. They are not copied into `nuxtApp.payload` or the HTML document. On the client, `01.plugin.ts` awaits `switchContext`, which fetches `/{apiBaseUrl}/:page/:locale/data.json` before the app continues. That is one request, not an inline blob embedded in HTML.
+
+The active merged dictionary (`cachedTranslations`) is still kept for `$t()` and `$has()`. Same-locale navigations deep-merge page chunks until `page:transition:finish` cleans up stale keys.
+
+## Caching layers
+
+Translations pass through four cache layers, in the order a request meets them:
+
+| Layer            | Where                                            | Lifetime                                | Cleared by                                       |
+| ---------------- | ------------------------------------------------ | --------------------------------------- | ------------------------------------------------ |
+| Browser / CDN    | `Cache-Control` on `/{apiBaseUrl}/**`            | `httpCacheDuration`, optionally `immutable` | A new `?v=` (a deploy that changed translations) |
+| Nitro route cache | `routeRules['/{apiBaseUrl}/**'].cache`          | 60 s, stale-while-revalidate            | Server restart                                   |
+| Server loader    | in-process `CacheControl`, keyed `locale:routeName` | Process lifetime, or `cacheTtl`      | Server restart or HMR in dev                     |
+| Client store     | `translationStorage` and the active chunk in `NuxtI18n` | Page lifetime                        | Reload                                           |
+
+Two rules keep the layers from contradicting each other:
+
+- **The Nitro route cache exists only when `?v=` does.** With a cache-buster each URL is unique to its content, so caching it server-side is free of staleness. Set `dateBuild: 0` and this layer is switched off, because the URL is then stable and the response says `must-revalidate`.
+- **`immutable` also requires `?v=`.** Without a buster the header becomes `public, max-age=0, must-revalidate`, whatever `httpCacheDuration` says. A long `max-age` on a URL that never changes would pin the first response a browser ever saw.
+
+<Warning>
+**Static hosting bypasses the first two layers.** With `translationPayloads.publicAssets` (default in premerged mode), payloads are copied to `public/<apiBaseUrl>/{page}/{locale}/data.json`. Platforms that serve that directory themselves (Cloudflare Pages, Firebase Hosting, `npx serve`) apply their own headers. Set cache policy for those static files in the platform's own configuration.
+</Warning>
+
+## Pre-rendering
+
+In premerged mode, `publicAssets` already writes the client URL tree into `public/`, so `prerenderRoutes` is usually redundant. Enable it only when you need Nitro to materialize the handler routes because the public copy is disabled.
+
+## Compressed public payloads
+
+When `nitro.compressPublicAssets` is enabled, the translation payloads copied into `public/` get `.gz` and `.br` siblings:
+
+```typescript nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: { compressPublicAssets: true },
+})
+```
+
+Nitro compresses public assets before the hook that copies payloads, so without this they would be the one uncompressed part of a static build. The module does not turn compression on by itself. Per-encoding selection (`{ gzip: true, brotli: false }`) is respected.
+
+For reference, the playground index payload measures 6.65 MB raw, 1.01 MB gzip, and 822 KB brotli.
+
+## Build-time warnings
+
+During build, the module warns when generated payload output exceeds:
+
+- `translationPayloads.warnFileCount` (default 500).
+- `translationPayloads.warnSizeBytes` (default 10 MB).
+
+It also warns when **all** local outputs are disabled without external payload hosts configured, since the client would then have nothing to fetch.
+
+## Tips for maximizing performance
+
+- **Limit locale data.** Only include the locales you actually ship.
+- **Use page-specific translations.** Organize by page so each request loads only the keys it needs.
+- **Enable HTTP caching.** Configure `httpCacheDuration` and `dateBuild` together so cache-busting stays consistent.
+- **Prefer `mode: 'source'` for Edge.** Keeps server bundles small on Cloudflare Workers, Vercel Edge, and similar targets.

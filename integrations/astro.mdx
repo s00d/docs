@@ -1,0 +1,467 @@
+---
+title: "Astro"
+description: "Server-rendered i18n for Astro apps with @i18n-micro/astro, including framework islands."
+---
+
+`@i18n-micro/astro` is an Astro 5 integration built on the shared Nuxt I18n Micro core. It combines a middleware, an integration, ready-made `.astro` components, and per-framework island adapters (Vue, React, Preact, Svelte, Solid) so translations flow from your server render into hydrated islands.
+
+- **SSR-first** with automatic locale detection (URL, cookie, `Accept-Language`).
+- **Router-agnostic** through an `I18nRoutingStrategy` adapter.
+- **Islands ready** with framework-specific client adapters.
+- **SEO helpers** for hreflang, canonical, and Open Graph tags.
+
+## Install
+
+<CodeGroup>
+```bash npm
+npm install @i18n-micro/astro
+```
+
+```bash pnpm
+pnpm add @i18n-micro/astro
+```
+
+```bash yarn
+yarn add @i18n-micro/astro
+```
+
+```bash bun
+bun add @i18n-micro/astro
+```
+</CodeGroup>
+
+Peer dependency: `astro ^5.0.0`.
+
+## Add the integration
+
+Register `i18nIntegration()` in `astro.config.mjs`. Provide the locales, default locale, and the folder containing translation JSON files.
+
+```typescript astro.config.mjs
+import { defineConfig } from 'astro/config'
+import { i18nIntegration, createAstroRouterAdapter } from '@i18n-micro/astro'
+
+const locales = [
+  { code: 'en', displayName: 'English', iso: 'en-US' },
+  { code: 'fr', displayName: 'Français', iso: 'fr-FR' },
+  { code: 'de', displayName: 'Deutsch', iso: 'de-DE' },
+]
+
+export default defineConfig({
+  integrations: [
+    i18nIntegration({
+      locale: 'en',
+      fallbackLocale: 'en',
+      locales,
+      translationDir: 'src/locales',
+      routingStrategy: createAstroRouterAdapter(locales, 'en'),
+    }),
+  ],
+})
+```
+
+### Integration options
+
+| Option              | Type                              | Default          | Description |
+| ------------------- | --------------------------------- | ---------------- | ----------- |
+| `locale`            | `string`                          | required         | Default locale code. |
+| `fallbackLocale`    | `string`                          | same as `locale` | Locale used when a key is missing. |
+| `locales`           | `Locale[]`                        | `[]`             | Locale metadata (`code`, `iso`, `displayName`, `dir`, ...). |
+| `messages`          | `Record<string, Translations>`    | `{}`             | Inline messages for the default instance. |
+| `translationDir`    | `string`                          | `'src/locales'`  | Directory with JSON translation files. |
+| `disablePageLocales`| `boolean`                         | `false`          | Treat every file as root-level; ignore `pages/`. |
+| `plural`            | `PluralFunc`                      | default rules    | Custom pluralization function. |
+| `missingWarn`       | `boolean`                         | `false`          | Warn about missing keys. |
+| `missingHandler`    | `(locale, key, routeName) => void`| -                | Callback for missing translations. |
+| `localeCookie`      | `string \| null`                  | `'i18n-locale'`  | Cookie used for locale persistence. `null` disables it. |
+| `autoDetect`        | `boolean`                         | `true`           | Enable header/cookie/path detection. |
+| `redirectToDefault` | `boolean`                         | `false`          | Redirect to default locale when none matches. |
+| `routingStrategy`   | `I18nRoutingStrategy`             | -                | Router adapter (see below). |
+
+## Translations directory
+
+Root files provide global translations; the `pages/<route>/<locale>.json` subtree adds route-scoped strings:
+
+```bash
+src/locales/
+├── en.json
+├── fr.json
+├── de.json
+└── pages/
+    ├── home/
+    │   ├── en.json
+    │   └── fr.json
+    └── about/
+        ├── en.json
+        └── fr.json
+```
+
+Route names come from folder names (`home`, `about`). Setting `disablePageLocales: true` disables this behavior and treats everything as root translations.
+
+## Configure the middleware
+
+Add `src/middleware.ts` to load translations, attach a shared i18n instance to every request, and populate `Astro.locals`.
+
+<Tabs>
+  <Tab title="Node.js runtime">
+    ```typescript src/middleware.ts
+    import {
+      createI18nMiddleware,
+      createI18n,
+      createAstroRouterAdapter,
+      loadTranslationsIntoI18n,
+    } from '@i18n-micro/astro'
+    import { config } from 'virtual:i18n-micro/config'
+
+    const globalI18n = createI18n({
+      locale: config.defaultLocale,
+      fallbackLocale: config.fallbackLocale,
+      messages: {},
+    })
+
+    // Uses node:fs, Node.js runtime only.
+    if (config.translationDir) {
+      loadTranslationsIntoI18n(globalI18n, {
+        translationDir: config.translationDir,
+        rootDir: process.cwd(),
+      })
+    }
+
+    const routingStrategy = createAstroRouterAdapter(config.locales, config.defaultLocale)
+
+    export const onRequest = createI18nMiddleware({
+      i18n: globalI18n,
+      defaultLocale: config.defaultLocale,
+      locales: config.localeCodes,
+      localeObjects: config.locales,
+      routingStrategy,
+    })
+    ```
+  </Tab>
+  <Tab title="Edge runtime">
+    ```typescript src/middleware.ts
+    import {
+      createI18nMiddleware,
+      createI18n,
+      createAstroRouterAdapter,
+    } from '@i18n-micro/astro'
+    import { config } from 'virtual:i18n-micro/config'
+
+    // Loaded at build time; works in Cloudflare/Vercel/Deno edges.
+    const translationModules = import.meta.glob('/src/locales/**/*.json', { eager: true })
+
+    const globalI18n = createI18n({
+      locale: config.defaultLocale,
+      fallbackLocale: config.fallbackLocale,
+      messages: {},
+    })
+
+    for (const [path, module] of Object.entries(translationModules)) {
+      const translations = (module as { default: Record<string, unknown> }).default
+      const locale = path.match(/\/([^/]+)\.json$/)?.[1]
+      if (!locale) continue
+
+      if (path.includes('/pages/')) {
+        const routeName = path.match(/\/pages\/([^/]+)\//)?.[1] ?? 'index'
+        globalI18n.addRouteTranslations(locale, routeName, translations, false)
+      } else {
+        globalI18n.addTranslations(locale, translations, false)
+      }
+    }
+
+    const routingStrategy = createAstroRouterAdapter(config.locales, config.defaultLocale)
+
+    export const onRequest = createI18nMiddleware({
+      i18n: globalI18n,
+      defaultLocale: config.defaultLocale,
+      locales: config.localeCodes,
+      localeObjects: config.locales,
+      routingStrategy,
+    })
+    ```
+  </Tab>
+  <Tab title="Inline messages">
+    ```typescript src/middleware.ts
+    import { createI18nMiddleware, createI18n, createAstroRouterAdapter } from '@i18n-micro/astro'
+
+    const locales = [
+      { code: 'en', displayName: 'English', iso: 'en-US' },
+      { code: 'fr', displayName: 'Français', iso: 'fr-FR' },
+    ]
+
+    const globalI18n = createI18n({
+      locale: 'en',
+      fallbackLocale: 'en',
+      messages: {
+        en: { welcome: 'Welcome', greeting: 'Hello, {name}!' },
+        fr: { welcome: 'Bienvenue', greeting: 'Bonjour, {name}!' },
+      },
+    })
+
+    export const onRequest = createI18nMiddleware({
+      i18n: globalI18n,
+      defaultLocale: 'en',
+      locales: ['en', 'fr'],
+      localeObjects: locales,
+      routingStrategy: createAstroRouterAdapter(locales, 'en'),
+    })
+    ```
+  </Tab>
+</Tabs>
+
+<Warning>
+`loadTranslationsIntoI18n` uses `node:fs` and does not work on Cloudflare Workers, Vercel Edge, Deno Deploy, or Netlify Edge. Use `import.meta.glob` for those runtimes.
+</Warning>
+
+## Use in .astro components
+
+`useI18n(Astro)` reads the current request's i18n state and returns translation and routing helpers:
+
+```astro src/pages/index.astro
+---
+import { useI18n } from '@i18n-micro/astro'
+
+const { t, locale, switchLocalePath, getRouteName } = useI18n(Astro)
+---
+
+<html lang={locale}>
+  <body>
+    <h1>{t('welcome')}</h1>
+    <p>{t('greeting', { name: 'World' })}</p>
+    <p>Current route: {getRouteName()}</p>
+    <a href={switchLocalePath('fr')}>Français</a>
+  </body>
+</html>
+```
+
+The hook returns:
+
+- `locale`, `defaultLocale`, `locales`
+- Translation methods `t`, `ts`, `tc`, `tn`, `td`, `tdr`, `has`
+- Route helpers `getRoute`, `getRouteName`, `getLocaleFromPath`
+- Path helpers `switchLocalePath`, `localizePath`, `removeLocaleFromPath`, `getBasePath`
+- Translation management `addTranslations`, `addRouteTranslations`, `mergeTranslations`, `clearCache`, `getI18n`
+
+Standalone helpers are also exposed if you only need one piece:
+
+```typescript
+import { getI18n, getLocale, getDefaultLocale, getLocales } from '@i18n-micro/astro'
+```
+
+## Ready-made components
+
+```astro
+---
+import I18nT from '@i18n-micro/astro/i18n-t'
+import I18nLink from '@i18n-micro/astro/i18n-link'
+import I18nSwitcher from '@i18n-micro/astro/i18n-switcher'
+import I18nGroup from '@i18n-micro/astro/i18n-group'
+---
+
+<I18nT keypath="welcome" />
+<I18nT keypath="apples" plural={5} />
+<I18nT keypath="price" number={1234.56} />
+<I18nT keypath="html" html tag="p" />
+
+<I18nLink href="/about">About</I18nLink>
+<I18nLink href="/about" locale="fr">À propos</I18nLink>
+
+<I18nSwitcher class="locale-switcher" activeClass="current" />
+
+<I18nGroup prefix="home">
+  <slot />
+</I18nGroup>
+```
+
+## SEO head helper
+
+`useLocaleHead(Astro)` returns the `<html>` attributes, canonical link, `hreflang` alternates, and Open Graph metadata for the current URL:
+
+```astro src/layouts/BaseLayout.astro
+---
+import { useLocaleHead } from '@i18n-micro/astro'
+
+const { htmlAttrs, link, meta } = useLocaleHead(Astro, {
+  baseUrl: 'https://example.com',
+  addSeoAttributes: true,
+})
+---
+
+<html {...htmlAttrs}>
+  <head>
+    {link.map((l) => <link rel={l.rel} href={l.href} hreflang={l.hreflang} />)}
+    {meta.map((m) => <meta property={m.property} content={m.content} />)}
+  </head>
+  <body><slot /></body>
+</html>
+```
+
+## Framework islands
+
+Islands opt in with `client:load` (or `client:only`). Pass just the keys they need via `getI18nProps(Astro, keys)` so the client bundle stays lean.
+
+```astro src/pages/islands.astro
+---
+import { getI18nProps, useI18n } from '@i18n-micro/astro'
+import VueCounter from '../components/islands/VueCounter.vue'
+import ReactCard from '../components/islands/ReactCard'
+import SvelteWidget from '../components/islands/SvelteWidget.svelte'
+
+const { t } = useI18n(Astro)
+
+const i18nProps = getI18nProps(Astro, [
+  'islands.vue.title',
+  'islands.react.title',
+  'islands.svelte.title',
+  'islands.apples',
+  'islands.number',
+])
+---
+
+<h1>{t('islands.title')}</h1>
+
+<VueCounter client:load i18n={i18nProps} />
+<ReactCard client:load i18n={i18nProps} />
+<SvelteWidget client:load i18n={i18nProps} />
+```
+
+<Tip>
+Always pass an explicit `keys` array to `getI18nProps`. Omitting it ships every route translation to the client.
+</Tip>
+
+### Vue island
+
+```vue src/components/islands/VueCounter.vue
+<script setup lang="ts">
+import { ref, computed } from 'vue'
+import { provideI18n } from '@i18n-micro/astro/client/vue'
+import { translate } from '@i18n-micro/astro/client'
+import type { I18nClientProps } from '@i18n-micro/astro'
+
+const props = defineProps<{ i18n: I18nClientProps }>()
+const state = provideI18n(props.i18n)
+
+const t = (key: string, params?: Record<string, unknown>) => translate(state.value, key, params)
+const locale = computed(() => state.value.locale)
+const count = ref(0)
+</script>
+
+<template>
+  <div>
+    <h3>{{ t('islands.vue.title') }}</h3>
+    <button @click="count++">+ {{ count }}</button>
+    <p>Locale: {{ locale }}</p>
+  </div>
+</template>
+```
+
+### React island
+
+```tsx src/components/islands/ReactCard.tsx
+import { useState } from 'react'
+import { I18nProvider, useAstroI18n } from '@i18n-micro/astro/client/react'
+import type { I18nClientProps } from '@i18n-micro/astro'
+
+function CardContent() {
+  const { t, locale, tc, tn } = useAstroI18n()
+  const [count, setCount] = useState(0)
+
+  return (
+    <div>
+      <h3>{t('islands.react.title')}</h3>
+      <button onClick={() => setCount((n) => n + 1)}>+</button>
+      <p>{tc('islands.apples', count)}</p>
+      <p>{t('islands.number', { number: tn(count) })}</p>
+      <span>Locale: {locale}</span>
+    </div>
+  )
+}
+
+export default function ReactCard({ i18n }: { i18n: I18nClientProps }) {
+  return (
+    <I18nProvider value={i18n}>
+      <CardContent />
+    </I18nProvider>
+  )
+}
+```
+
+### Svelte island
+
+```typescript src/components/islands/SvelteWidget.svelte
+<script lang="ts">
+  import { createI18nStore, useAstroI18n } from '@i18n-micro/astro/client/svelte'
+  import type { I18nClientProps } from '@i18n-micro/astro'
+
+  export let i18n: I18nClientProps
+  const store = createI18nStore(i18n)
+  const { t, locale, tc, tn } = useAstroI18n(store)
+
+  let count = 0
+</script>
+
+<h3>{t('islands.svelte.title')}</h3>
+<button on:click={() => count++}>+</button>
+<p>{tc('islands.apples', count)}</p>
+<p>Locale: {locale}</p>
+```
+
+The same pattern applies to Preact (`@i18n-micro/astro/client/preact`) and Solid (`@i18n-micro/astro/client/solid`) island adapters, all exposing `t`, `ts`, `tc`, `tn`, `td`, `tdr`, `has`, `locale`, `fallbackLocale`, and `currentRoute`.
+
+## Router adapter
+
+`createAstroRouterAdapter(locales, defaultLocale)` returns a strategy that:
+
+- Detects locale from the first path segment.
+- Localizes and switches paths while keeping the default locale unprefixed.
+- Reports the current route name to the i18n instance.
+
+The full interface (implement any subset):
+
+```typescript
+interface I18nRoutingStrategy {
+  getCurrentPath: () => string
+  resolvePath?: (to: string | { path?: string }, locale: string) => string | { path?: string }
+  getRouteName?: (path: string, locales: string[]) => string
+  getLocaleFromPath?: (path: string, defaultLocale: string, locales: string[]) => string
+  switchLocalePath?: (path: string, newLocale: string, locales: string[], defaultLocale?: string) => string
+  localizePath?: (path: string, locale: string, locales: string[], defaultLocale?: string) => string
+  removeLocaleFromPath?: (path: string, locales: string[]) => string
+  push?: (target: { path: string }) => void
+  replace?: (target: { path: string }) => void
+  getRoute?: () => { fullPath: string; query: Record<string, unknown> }
+}
+```
+
+Use custom adapters for query-param, suffix-based, or subdomain-based locales; see the [routing strategies guide](/guides/routing-strategies) for background.
+
+## TypeScript
+
+Types are injected automatically via Astro's `injectTypes` hook. `Astro.locals` gains `i18n`, `locale`, `defaultLocale`, `locales`, `currentUrl`, and `routingStrategy`.
+
+If you skip the integration and only use middleware, add a manual reference in `src/env.d.ts`:
+
+```typescript src/env.d.ts
+/// <reference path="../.astro/types.d.ts" />
+/// <reference types="@i18n-micro/astro/env" />
+```
+
+Exported types include `I18nIntegrationOptions`, `AstroI18nOptions`, `I18nMiddlewareOptions`, `LocaleHeadOptions`, `I18nRoutingStrategy`, `I18nClientProps`, plus everything from `@i18n-micro/types`.
+
+Pair with the [types generator](/integrations/types-generator) for typed translation keys.
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Node.js runtime" icon="server" href="/integrations/nodejs">
+    Same translation core for pure Node.js servers.
+  </Card>
+  <Card title="Vue integration" icon="vuejs" href="/integrations/vue">
+    Standalone Vue apps outside Nuxt.
+  </Card>
+  <Card title="DevTools UI" icon="screwdriver-wrench" href="/integrations/devtools-ui">
+    Edit translations at runtime from a floating panel.
+  </Card>
+  <Card title="Overview" icon="puzzle-piece" href="/integrations/overview">
+    Compare every framework integration.
+  </Card>
+</CardGroup>
