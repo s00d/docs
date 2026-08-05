@@ -1,0 +1,354 @@
+---
+title: "Nuxt I18n Micro 中的路由策略"
+description: "语言路由的 URL 前缀策略。"
+---
+
+# 🗂️ Nuxt I18n Micro 中的路由策略
+
+## 📖 概述
+
+Nuxt I18n Micro 通过 `strategy` 选项控制语言前缀在 URL 中的出现方式。其底层由两个包实现:
+
+- **`@i18n-micro/route-strategy`** —— 构建期路由生成(扩展 Nuxt 页面以生成本地化路由)
+- **`@i18n-micro/path-strategy`** —— 运行时路径解析、重定向、SEO 属性以及链接生成
+
+Nuxt 模块会在构建时选择正确的策略类,并通过 `#i18n-strategy` 别名注入,因此只有所选实现会被打包。
+
+## 🚦 可用策略
+
+{/* generated:option:strategy — do not edit; run `pnpm run docs:generate` */}
+
+**类型** `Strategies` · **默认值** `'prefix_except_default'`
+
+用于语言前缀的 URL 路由策略。
+
+- `'no_prefix'` —— URL 中不带语言;语言存储在 Cookie 中。
+- `'prefix_except_default'` —— 为除默认语言外的所有语言添加前缀。
+- `'prefix'` —— 始终添加前缀,包括默认语言。
+- `'prefix_and_default'` —— 与 `prefix` 类似,但默认语言也可通过无前缀方式访问。
+
+{/* /generated:option:strategy */}
+
+### 策略对比
+
+```mermaid
+flowchart LR
+    subgraph no_prefix["no_prefix"]
+        N1["/about"] --> N2["Any locale"]
+        N3["/contact"] --> N2
+    end
+
+    subgraph prefix_except_default["prefix_except_default"]
+        P1["/about"] --> P2["Default (en)"]
+        P3["/fr/about"] --> P4["French"]
+        P5["/de/about"] --> P6["German"]
+    end
+
+    subgraph prefix["prefix"]
+        X1["/en/about"] --> X2["English"]
+        X3["/fr/about"] --> X4["French"]
+        X5["/de/about"] --> X6["German"]
+    end
+
+    subgraph prefix_and_default["prefix_and_default"]
+        A1["/about"] --> A2["Default (en)"]
+        A3["/en/about"] --> A2
+        A5["/fr/about"] --> A6["French"]
+    end
+```
+
+### 🛑 `no_prefix`
+
+URL 中没有语言片段。语言由 Cookie、`useI18nLocale()` 状态或浏览器检测决定。
+
+- **路由**:`/about`、`/contact` —— 所有语言使用相同的 URL 模式(无 `/en/`、`/fr/` 前缀)
+- **语言持久化**:通过 `localeCookie`(若未指定,会自动设为 `'user-locale'`)
+- **自定义路径**:通过 [`globalLocaleRoutes`](/guides/configuration#globallocaleroutes) 和 [`defineI18nRoute`](/guides/custom-locale-routes) 支持 —— 会生成本地化 slug,但不会在 URL 中添加语言前缀(例如 `/about` 与 `/ueber-uns`)。嵌套路由、别名以及按语言的限制都比 `prefix_except_default` 更简单。
+
+<Tip>
+使用 `no_prefix` 时,如果没有指定 `localeCookie`,它会自动设置为 `'user-locale'`。这是必需的,因为 URL 中不包含任何语言信息。
+</Tip>
+
+```typescript
+i18n: {
+  strategy: 'no_prefix'
+  // localeCookie is automatically set to 'user-locale'
+}
+```
+
+### 🚧 `prefix_except_default`
+
+除默认语言**之外**的所有路由都会带上语言前缀。
+
+- **默认语言**:`/about`、`/contact`
+- **其他语言**:`/fr/about`、`/de/contact`
+- **默认语言带前缀会返回 404**:当 `en` 为默认语言时,`/en/about` → 404
+
+```typescript
+i18n: {
+  strategy: 'prefix_except_default' // This is the default
+}
+```
+
+### 🌍 `prefix`
+
+所有路由都带有语言前缀,包括默认语言。
+
+- **所有语言**:`/en/about`、`/fr/about`、`/de/about`
+- **根路径 `/`**:根据用户偏好重定向到 `/\{locale\}/`
+
+```typescript
+i18n: {
+  strategy: 'prefix'
+}
+```
+
+### 🔄 `prefix_and_default`
+
+默认语言可以带前缀访问,也可以不带前缀访问。非默认语言始终带前缀。
+
+- **默认语言**:`/about` 与 `/en/about` 均有效
+- **其他语言**:`/fr/about`、`/de/about`
+- **`/` 不重定向**:`/` 与 `/en/` 都会提供默认语言
+
+```typescript
+i18n: {
+  strategy: 'prefix_and_default'
+}
+```
+
+## 🔀 重定向架构(v3)
+
+在 v3 中,重定向逻辑被拆分为两层,以获得最佳性能:
+
+### 工作原理
+
+```mermaid
+flowchart TB
+    A["Request"] --> B{Server or Client?}
+
+    B -->|Server SSR| C["Nitro Middleware<br/>i18n.global.ts"]
+    C --> D["Sets event.context.i18n.locale"]
+    D --> E["Redirect Plugin<br/>06.redirect.ts server only"]
+    E --> F{Needs redirect?}
+    F -->|Yes| G["302 sendRedirect<br/>(no page render)"]
+    F -->|No| H["Continue to render"]
+
+    B -->|Client SPA| I["Route Middleware<br/>i18n-redirect.global.ts"]
+    I --> J["Target route locale + getPreferredLocale()"]
+    J --> K{Needs redirect?}
+    K -->|Yes| L["navigateTo with query and hash"]
+    K -->|No| M["Stay on page"]
+```
+
+### 服务端(无闪烁)
+
+1. **Nitro 中间件**(`i18n.global.ts`)最先运行 —— 从 URL、Cookie 或 `Accept-Language` 请求头检测语言,并设置 `event.context.i18n.locale`
+2. **重定向插件**(`06.redirect.ts`,仅服务端)使用 `i18nStrategy.getClientRedirect()` 检查当前路径是否需要重定向,并在任何页面渲染**之前**发出 302
+3. 这样可避免用户在重定向前短暂看到错误页面而产生的“闪烁”
+
+### 客户端(SPA 导航)
+
+1. 全局路由中间件(`i18n-redirect.global.ts`)在启用 `redirects` 时,会在每次客户端导航中运行
+2. 首先从**目标路由**推导偏好语言,然后回退到 `useI18nLocale().getPreferredLocale()`
+3. 使用 `i18nStrategy.getClientRedirect()` 决定是否需要重定向
+4. 重定向时保留 `query` 与 `hash`
+
+### 语言优先级顺序
+
+在服务端,重定向插件按以下顺序判断偏好语言:
+
+1. **`useState('i18n-locale')`** —— 最高优先级(通过 `useI18nLocale().setLocale()` 以编程方式设置)
+2. **Cookie** —— 如果已配置 `localeCookie`
+3. **`Accept-Language` 请求头** —— 如果 `autoDetectLanguage: true`
+4. **`defaultLocale`** —— 最终回退
+
+在客户端,路由中间件优先使用目标路由中的语言,随后同样按上述 state/cookie 回退链处理。
+
+### 各策略下的重定向行为
+
+| 策略                | `GET /` 行为                              | 是否需要 Cookie? |
+| ----------------------- | --------------------------------------------- | ---------------- |
+| `no_prefix`             | 不重定向(语言来自 Cookie/state)        | 自动设置         |
+| `prefix`                | 302 → `/\{locale\}/`                            | 建议启用      |
+| `prefix_except_default` | 若语言 ≠ 默认语言则 302 → `/\{locale\}/`        | 建议启用      |
+| `prefix_and_default`    | 不重定向(`/` 与 `/\{locale\}/` 均有效) | 可选         |
+
+### 禁用重定向
+
+```typescript
+i18n: {
+  redirects: false // Disables automatic locale redirects
+}
+```
+
+当 `redirects: false` 时,自动的语言重定向会被禁用:
+
+- **服务端**:重定向插件(`06.redirect.ts`,仅服务端)仍然注册,但会跳过重定向逻辑。它依然会对无效的语言前缀执行 **404 校验**(例如 `xx` 不是有效语言时的 `/xx/about`),并从 URL 前缀**同步 Cookie**(例如访问 `/fr/about` 会把 Cookie 同步为 `fr`)
+- **客户端**:`i18n-redirect` 全局路由中间件**不会注册** —— 没有 SPA 自动重定向
+
+## 🍪 基于 Cookie 的语言持久化
+
+<Warning>
+当使用 `prefix` 或 `prefix_except_default` 并启用 `redirects: true`(默认)时,你**必须**设置 `localeCookie`,重定向才能正常工作。没有 Cookie 时,重定向插件无法在页面刷新之间记住用户的语言偏好。
+
+```typescript
+i18n: {
+  strategy: 'prefix_except_default',
+  localeCookie: 'user-locale' // Required for redirects to work properly
+}
+```
+</Warning>
+
+**`localeCookie` 在 v3 中的工作方式:**
+
+- 由 `useI18nLocale()` 在内部管理 —— **不要**通过 `useCookie()` 手动设置
+- 当用户访问带前缀的 URL(例如 `/fr/about`)时,Cookie 会自动同步为 `fr`
+- 下次访问 `/` 时,会依据 Cookie 的值重定向到 `/\{locale\}/`
+- 如果 Cookie 中包含无效语言(不在 `locales` 列表中),会回退到 `defaultLocale`
+
+| 策略                | `localeCookie` 默认值 | 说明                                |
+| ----------------------- | ---------------------- | ------------------------------------ |
+| `no_prefix`             | 自动:`'user-locale'`  | 必需;自动设置          |
+| `prefix`                | `null`(禁用)      | 若要使用重定向请设为 `'user-locale'` |
+| `prefix_except_default` | `null`(禁用)      | 若要使用重定向请设为 `'user-locale'` |
+| `prefix_and_default`    | `null`(禁用)      | 可选                             |
+
+## 🔍 `autoDetectLanguage` 与 `autoDetectPath`
+
+### `autoDetectLanguage`
+
+{/* generated:option:autoDetectLanguage — do not edit; run `pnpm run docs:generate` */}
+
+**类型** `boolean` · **默认值** `true`
+
+从 HTTP 的 `Accept-Language` 请求头自动检测用户的首选语言。
+与 `autoDetectPath` 配合使用,以决定何时进行检测。
+
+{/* /generated:option:autoDetectLanguage */}
+
+该检查在服务端中间件中运行,并作为回退机制:Cookie 或已存在的 state 优先级更高。
+
+```typescript
+i18n: {
+  autoDetectLanguage: true
+}
+```
+
+### `autoDetectPath`
+
+{/* generated:option:autoDetectPath — do not edit; run `pnpm run docs:generate` */}
+
+**类型** `string` · **默认值** `'/'`
+
+允许根据 Cookie / Accept-Language 偏好触发重定向的路径(需启用 `redirects`)。
+
+- `'/'` —— 仅 `/`(默认语言下的深链接仍可访问;默认)
+- `'no_prefix'` —— 仅无语言前缀的路径
+- `'*'` —— 所有路径,包括改写显式的语言前缀
+  (例如当 Cookie 偏好为 `de` 时,`/fr/about` → `/de/about`)
+
+- 其他任意字符串 —— 精确匹配路径(例如 `'/welcome'`)
+
+带前缀策略的清理行为(例如 `prefix_except_default` 下的 `/en` → `/`)不受此项控制。
+
+{/* /generated:option:autoDetectPath */}
+
+```typescript
+i18n: {
+  autoDetectPath: '/' // Default: only root
+  // autoDetectPath: '*' // All paths — redirects even /fr/about to /de/about
+}
+```
+
+<Warning>
+当 `autoDetectPath: '*'` 时,即使 URL 已显式带有语言前缀(例如 `/fr/about`),若用户的偏好语言不同,也会被重定向。这对基于域名的部署可能有用,但可能会让分享 URL 的用户感到困惑。
+</Warning>
+
+使用默认的 `autoDetectPath: '/'` 并配合语言 Cookie:
+
+| 请求 | Cookie | 结果 |
+| --- | --- | --- |
+| `/` | `de` | 302 → `/de` |
+| `/about` | `de` | 200,默认语言(不改写) |
+
+```typescript
+i18n: {
+  localeCookie: 'user-locale',
+  strategy: 'prefix_except_default',
+  // Default — remember language on entry, keep deep links stable
+  autoDetectPath: '/',
+  // Or redirect on every unprefixed path (but not /de/… → /fr/…):
+  // autoDetectPath: 'no_prefix',
+}
+```
+
+## ⚠️ 已知问题与最佳实践
+
+### 1. `no_prefix` 策略下的水合不匹配
+
+在使用 `no_prefix` 时,语言是动态确定的。如果服务端与客户端对语言判断不一致,你将看到水合不匹配。
+
+**解决方案**:在服务端插件(`order: -10`)中使用 `useI18nLocale().setLocale()`,在 i18n 初始化之前设置语言:
+
+```ts
+// plugins/i18n-loader.server.ts
+export default defineNuxtPlugin({
+  name: 'i18n-custom-loader',
+  enforce: 'pre',
+  order: -10,
+  setup() {
+    const { setLocale } = useI18nLocale()
+    setLocale('ja') // Your detection logic here
+  },
+})
+```
+
+详细示例请参见[自定义语言检测](/guides/custom-language-detection)。
+
+### 2. 在 `localeRoute` 中使用命名路由
+
+基于路径的路由可能会带来路由解析上的问题:
+
+```typescript
+// May cause issues
+$localeRoute('/page')
+
+// Preferred approach
+$localeRoute({ name: 'page' })
+```
+
+### 3. 在 i18n 中使用 `pages: false`
+
+当 Nuxt 使用 `pages: false` 时:
+
+```typescript
+export default defineNuxtConfig({
+  pages: false,
+  i18n: {
+    strategy: 'no_prefix', // Recommended
+    disablePageLocales: true, // Required
+    localeCookie: 'user-locale', // Required for persistence
+  },
+})
+```
+
+**`pages: false` 的局限:**
+
+- 无自动重定向
+- 无基于 URL 的语言检测
+- 客户端切换语言需要刷新页面或手动加载翻译
+
+### 4. 无效 Cookie 的处理
+
+如果 Cookie 中包含无效语言(不在 `locales` 列表中),模块会平滑回退到 `defaultLocale`,不会抛出错误。
+
+## 📝 最佳实践总结
+
+| 建议            | 详情                                                                             |
+| ------------------------- | ----------------------------------------------------------------------------------- |
+| **设置 `localeCookie`**    | 使用带前缀策略并启用 `redirects: true` 时始终设置                             |
+| **使用 `useI18nLocale()`** | 管理语言状态的统一方式(取代手动使用 `useState`/`useCookie`) |
+| **使用命名路由**      | 相对于 `$localeRoute('/page')`,优先使用 `$localeRoute(\{ name: 'page' \})`                       |
+| **以编程方式设置语言**   | 在 `order: -10` 的服务端插件中使用 `useI18nLocale().setLocale()`              |
+| **避免手动操作 Cookie**  | 不要直接使用 `useCookie('user-locale')` —— 由 `useI18nLocale()` 统一管理      |

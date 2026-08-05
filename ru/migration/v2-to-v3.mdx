@@ -1,0 +1,154 @@
+---
+title: "Обновление с v2.x до v3.x"
+description: "Обновление с версии v2.x до v3.x."
+---
+
+# 📦 Обновление с v2.x до v3.x
+
+<Tip>
+См. [Миграция с nuxt-i18n](/migration/from-nuxtjs-i18n) — это руководство описывает переход из экосистемы vue-i18n, а не с nuxt-i18n-micro v2.
+</Tip>
+
+v3.0.0 вносит фундаментальные архитектурные изменения: пакеты стратегий, новую систему кэширования, централизованное управление локалью через `useI18nLocale()` и переработанный конвейер перенаправлений. В этом разделе описаны все ломающие изменения и способы обновления вашего кода.
+
+## Шаги миграции
+
+```mermaid
+flowchart LR
+    A["1. Update deps"] --> B["2. Fix config"] --> C["3. Update plugins"] --> D["4. Test"] --> E["✅ Done"]
+```
+
+## Сводка ломающих изменений
+
+- **Состояние локали** — ручное `useState` / `useCookie` → composable `useI18nLocale()`
+- **Доступ к конфигурации** — `useRuntimeConfig().public.i18nConfig` → `getI18nConfig()` из `#build/i18n.strategy.mjs`
+- **Компонент перенаправления** — опция `fallbackRedirectComponentPath` → серверный плагин перенаправления + клиентское route middleware (автоматически)
+- **`includeDefaultLocaleRoute`** — поддерживался (устарел) → удалён, используйте опцию `strategy`
+- **`experimental.hmr`** — под `experimental` → опция корневого уровня
+- **`previousPageFallback`** — полностью удалён (стратегия накопительного слияния обрабатывает это автоматически)
+- **Кэширование** — `useStorage('cache')` → синглтон `TranslationStorage` (`Symbol.for` в `globalThis`)
+- **Передача SSR** — runtime config → payload Nuxt (в v3 использовался `useState`; чанки теперь находятся в `payload.data`, см. [Производительность](/guides/performance#server-side-payload-transfer))
+- **Классы стратегий** — внутренние → отдельные пакеты (`@i18n-micro/route-strategy`, `@i18n-micro/path-strategy`)
+
+## Удалено: `fallbackRedirectComponentPath`
+
+Опция `fallbackRedirectComponentPath` и резервный компонент `locale-redirect.vue` были удалены. Логика перенаправления теперь обрабатывается:
+
+1. **Серверным middleware** (`i18n.global.ts`) — устанавливает `event.context.i18n.locale`
+2. **Серверным плагином перенаправления** (`06.redirect.ts`, только на сервере) — 302-перенаправления до рендеринга
+3. **Клиентским route middleware** (`i18n-redirect.global.ts`) — SPA-перенаправления после гидратации
+
+```diff
+ i18n: {
+   strategy: 'prefix_except_default',
+-  fallbackRedirectComponentPath: '~/components/MyRedirect.vue',
+ }
+```
+
+Если у вас была пользовательская логика перенаправления в резервном компоненте, реализуйте её в серверном плагине:
+
+```ts
+// plugins/i18n-loader.server.ts
+export default defineNuxtPlugin({
+  name: 'i18n-custom-redirect',
+  enforce: 'pre',
+  order: -10,
+  setup() {
+    const { setLocale } = useI18nLocale()
+    // Your custom detection logic
+    setLocale(detectedLocale)
+  },
+})
+```
+
+## Удалено: `includeDefaultLocaleRoute`
+
+Используйте опцию `strategy`:
+
+- `includeDefaultLocaleRoute: true` → `strategy: 'prefix'`
+- `includeDefaultLocaleRoute: false` → `strategy: 'prefix_except_default'` (по умолчанию)
+
+```diff
+ i18n: {
+-  includeDefaultLocaleRoute: true,
++  strategy: 'prefix',
+ }
+```
+
+## Доступ к конфигурации: `getI18nConfig()` заменяет `useRuntimeConfig`
+
+```diff
+- const config = useRuntimeConfig()
+- const cookieName = config.public.i18nConfig?.localeCookie || 'user-locale'
++ import { getI18nConfig } from '#build/i18n.strategy.mjs'
++ const { localeCookie: configCookie } = getI18nConfig()
++ const cookieName = configCookie ?? 'user-locale'
+```
+
+## Управление локалью: `useI18nLocale()` заменяет ручное управление состоянием
+
+В v2 вы могли напрямую использовать `useState('i18n-locale')` или `useCookie('user-locale')`. В v3 используйте централизованный composable `useI18nLocale()`:
+
+```diff
+- const locale = useState('i18n-locale')
+- const cookie = useCookie('user-locale')
+- locale.value = 'fr'
+- cookie.value = 'fr'
++ const { setLocale } = useI18nLocale()
++ setLocale('fr') // Updates both state and cookie atomically
+```
+
+Подробные примеры см. в разделе [Пользовательское определение языка](/guides/custom-language-detection).
+
+## Экспериментальные опции перемещены / удалены
+
+`hmr` перемещён из `experimental` на корневой уровень. `previousPageFallback` полностью удалён — теперь модуль использует стратегию накопительного глубокого слияния (глубина 2 уровня), которая автоматически сохраняет переводы предыдущей страницы во время анимаций переходов, даже когда страницы имеют пересекающиеся вложенные ключи. После завершения анимации перехода хук `page:transition:finish` очищает ключи старой страницы из памяти.
+
+```diff
+ i18n: {
+-  experimental: {
+-    hmr: true,
+-    previousPageFallback: true
+-  }
++  hmr: true,
++  // previousPageFallback removed — handled automatically
+ }
+```
+
+## Архитектура перенаправлений (v3)
+
+Перенаправления теперь автоматически обрабатываются двумя компонентами:
+
+1. **На стороне сервера** (`06.redirect.ts`, только сервер): работает во время SSR, выдаёт 302-перенаправления до рендеринга страницы — без «мигания ошибки»
+2. **На стороне клиента** (`i18n-redirect.global.ts`): глобальный route middleware для SPA-навигации; сохраняет query-строку и hash
+
+Приоритет локали для перенаправлений:
+
+1. `useState('i18n-locale')` — устанавливается через `useI18nLocale().setLocale()`
+2. Cookie — если настроен `localeCookie`
+3. Заголовок `Accept-Language` — если `autoDetectLanguage: true`
+4. `defaultLocale` — резервный вариант
+
+Для стандартных настроек изменения кода не требуются.
+
+<Warning>
+Для стратегий `prefix` и `prefix_except_default` с `redirects: true` установите `localeCookie: 'user-locale'`, чтобы включить сохранение локали между перезагрузками страниц. Без этого перенаправления используют только `Accept-Language` или `defaultLocale`.
+</Warning>
+
+## TypeScript: типы внутренних модулей (опционально)
+
+Если вы сталкиваетесь с ошибками типов, связанными с внутренними импортами, такими как `#i18n-internal/plural`, `#i18n-internal/strategy` или `#i18n-internal/config`, добавьте секцию `imports` в `package.json` вашего проекта:
+
+```json
+{
+  "imports": {
+    "#i18n-internal/plural": "nuxt-i18n-micro/internals",
+    "#i18n-internal/strategy": "nuxt-i18n-micro/internals",
+    "#i18n-internal/config": "nuxt-i18n-micro/internals"
+  }
+}
+```
+
+<Tip>
+
+</Tip>

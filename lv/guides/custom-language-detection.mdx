@@ -1,0 +1,261 @@
+---
+title: "Pielāgota valodas noteikšana Nuxt I18n Micro"
+description: "Pielāgota lokāles noteikšana ar useI18nLocale()."
+---
+
+# 🔧 Pielāgota valodas noteikšana Nuxt I18n Micro
+
+## 📖 Pārskats
+
+Nuxt I18n Micro v3 piedāvā centralizētu komponējamo funkciju — `useI18nLocale()` — visai lokāles pārvaldībai. Tas aizvieto manuālos `useState`/`useCookie` modeļus no v2. Izmantojot `useI18nLocale().setLocale()` servera spraudnī, jūs varat ieviest jebkādu pielāgotu noteikšanas loģiku, saglabājot pilnu saderību ar moduļa pāradresācijas un sīkfailu sistēmām.
+
+## 🏗️ Arhitektūra
+
+```mermaid
+flowchart TB
+    subgraph Plugins["Plugin Execution Order"]
+        A["Your plugin<br/>order: -10"] -->|setLocale()| B["01.plugin.ts<br/>order: -5"]
+        B --> C["06.redirect.ts server<br/>order: 10"]
+    end
+
+    subgraph Client["Client SPA Navigation"]
+        D["i18n-redirect.global.ts<br/>route middleware"]
+    end
+
+    subgraph State["Locale State"]
+        E["useState('i18n-locale')"]
+        F["localeCookie"]
+    end
+
+    A -->|"setLocale() updates both"| E
+    A -->|"setLocale() updates both"| F
+    B -->|reads| E
+    C -->|reads| E
+    C -->|reads| F
+    D -->|reads target route +| E
+```
+
+**Galvenais princips**: izsauciet `useI18nLocale().setLocale()` servera spraudnī ar `order: -10`. Tas atomiski atjaunina gan `useState('i18n-locale')`, gan lokāles sīkfailu, tāpēc i18n spraudnis (`order: -5`) un servera pāradresācijas spraudnis (`order: 10`) pirmajā SSR pieprasījumā redz pareizo lokāli. Klienta puses automātiskās pāradresācijas turpmākajās navigācijās darbojas globālajā maršruta starpprogrammatūrā.
+
+## 🛠️ Iebūvētās automātiskās noteikšanas atspējošana
+
+Ja vēlaties pilnu kontroli pār lokāles noteikšanu, atspējojiet iebūvēto mehānismu:
+
+```ts
+export default defineNuxtConfig({
+  i18n: {
+    autoDetectLanguage: false,
+  },
+})
+```
+
+## ✨ Piemērs: servera puses noteikšana ar `useI18nLocale`
+
+Šī ir **ieteicamā pieeja** visām stratēģijām.
+
+### 1. solis: konfigurējiet `nuxt.config.ts`
+
+```ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    strategy: 'no_prefix', // Works with ANY strategy
+    defaultLocale: 'en',
+    localeCookie: 'user-locale',
+    autoDetectLanguage: false,
+    locales: [
+      { code: 'en', iso: 'en-US' },
+      { code: 'de', iso: 'de-DE' },
+      { code: 'ja', iso: 'ja-JP' },
+    ],
+  },
+})
+```
+
+### 2. solis: izveidojiet `plugins/i18n-loader.server.ts`
+
+```ts
+import { defineNuxtPlugin, useRequestHeaders } from '#imports'
+
+export default defineNuxtPlugin({
+  name: 'i18n-custom-loader',
+  enforce: 'pre',
+  order: -10, // Execute BEFORE the i18n plugin (which has order -5)
+
+  setup() {
+    const { setLocale } = useI18nLocale()
+    const headers = useRequestHeaders(['host', 'x-country', 'accept-language'])
+    let detectedLocale = 'en'
+
+    // --- YOUR DETECTION LOGIC ---
+
+    // Example 1: By domain
+    const host = headers['host']
+    if (host?.includes('example.de')) {
+      detectedLocale = 'de'
+    }
+    // Example 2: By custom header
+    else if (headers['x-country'] === 'JP') {
+      detectedLocale = 'ja'
+    }
+    // Example 3: By Accept-Language header
+    else if (headers['accept-language']?.includes('de')) {
+      detectedLocale = 'de'
+    }
+
+    // --- APPLY THE LOCALE ---
+    setLocale(detectedLocale)
+  },
+})
+```
+
+### Kā tas darbojas
+
+```mermaid
+flowchart TB
+    subgraph Request["1. Server Request"]
+        A[Receive request] --> B[Read headers]
+        B --> C["x-country"]
+        B --> D["accept-language"]
+        B --> E["host"]
+    end
+
+    subgraph Detect["2. Locale Detection"]
+        C --> F{Country match?}
+        E --> G{Domain match?}
+        D --> H{Language match?}
+        F -->|Yes| I[Use detected locale]
+        G -->|Yes| I
+        H -->|Yes| I
+        F & G & H -->|No match| J[Use defaultLocale]
+    end
+
+    subgraph Apply["3. Apply via useI18nLocale"]
+        I --> K["setLocale(locale)"]
+        J --> K
+        K --> L["Updates useState + cookie"]
+        L --> M["i18n plugin reads locale"]
+        M --> N["Server redirect plugin uses locale"]
+        M --> O["Client middleware on next navigation"]
+    end
+```
+
+1. **Spraudnis darbojas pirmais** (`order: -10`) — nosaka lokāli no galvenēm, domēna vai citiem avotiem
+2. **`setLocale()` atjaunina abus** — `useState('i18n-locale')` un sīkfailu — nodrošina tūlītēju redzamību visiem turpmākajiem spraudņiem
+3. **i18n spraudnis** (`order: -5`) nolasa lokāli un ielādē pareizos tulkojumus
+4. **Servera pāradresācijas spraudnis** (`order: 10`) izmanto lokāli pāradresācijas lēmumiem SSR
+5. **Klienta maršruta starpprogrammatūra** (`i18n-redirect`) piemēro pāradresācijas SPA navigācijā, kad URL lokāle neatbilst izvēlei
+
+## 🌐 Stratēģijai specifiska uzvedība
+
+`useI18nLocale().setLocale()` darbojas ar **visām stratēģijām**. Pāradresācijas uzvedība atkarīga no stratēģijas:
+
+<Tip>
+| Stratēģija | `setLocale('de')` efekts |
+|----------|---------------------------|
+| `no_prefix` | Renderē vācu valodā, bez URL izmaiņām |
+| `prefix` | 302 → `/de/` (servera puses pāradresācija) |
+| `prefix_except_default` | 302 → `/de/`, ja `de` ≠ noklusējums; bez pāradresācijas, ja `de` = noklusējums |
+| `prefix_and_default` | Bez pāradresācijas (gan `/`, gan `/de/` ir derīgi) |
+</Tip>
+
+**Svarīgas piezīmes:**
+
+- Sīkfailu balstīta lokāles noteikšana pēc noklusējuma ir atspējota (`localeCookie: null`)
+- Iestatiet `localeCookie: 'user-locale'`, lai iespējotu sīkfailu noturību
+- Ja sīkfaila/stāvokļa vērtība nav sarakstā `locales`, tā atkāpjas uz `defaultLocale`
+
+## 🏢 Padziļināti: uz domēnu balstīta noteikšana
+
+Vairāku domēnu iestatījumiem, kur katrs domēns apkalpo atšķirīgu lokāli:
+
+```ts
+import { defineNuxtPlugin, useRequestHeaders } from '#imports'
+
+export default defineNuxtPlugin({
+  name: 'i18n-domain-loader',
+  enforce: 'pre',
+  order: -10,
+
+  setup() {
+    const { setLocale } = useI18nLocale()
+    const headers = useRequestHeaders(['host'])
+    const host = headers['host'] || ''
+
+    let detectedLocale = 'en'
+
+    if (host.endsWith('.de') || host.includes('german.')) {
+      detectedLocale = 'de'
+    } else if (host.endsWith('.fr') || host.includes('french.')) {
+      detectedLocale = 'fr'
+    } else if (host.endsWith('.jp') || host.includes('japanese.')) {
+      detectedLocale = 'ja'
+    }
+
+    setLocale(detectedLocale)
+  },
+})
+```
+
+## 🔄 Padziļināti: lietotāja izvēles respektēšana
+
+Ja lietotāji var manuāli pārslēgt valodu, respektējiet viņu izvēli pār automātisko noteikšanu:
+
+```ts
+import { defineNuxtPlugin, useRequestHeaders } from '#imports'
+
+export default defineNuxtPlugin({
+  name: 'i18n-smart-loader',
+  enforce: 'pre',
+  order: -10,
+
+  setup() {
+    const { getLocale, setLocale } = useI18nLocale()
+
+    // If user already has a preference (from cookie), respect it
+    if (getLocale()) {
+      return
+    }
+
+    // Otherwise, detect locale from headers
+    const headers = useRequestHeaders(['accept-language'])
+    let detectedLocale = 'en'
+
+    const acceptLanguage = headers['accept-language'] || ''
+    if (acceptLanguage.includes('de')) {
+      detectedLocale = 'de'
+    } else if (acceptLanguage.includes('ja')) {
+      detectedLocale = 'ja'
+    }
+
+    setLocale(detectedLocale)
+  },
+})
+```
+
+## ⚙️ Tikai servera vai tikai klienta spraudņi
+
+Izmantojiet [Nuxt failu nosaukumu konvencijas](https://nuxt.com/docs/getting-started/directory-structure#plugins), lai kontrolētu, kur jūsu spraudnis darbojas:
+
+- **Tikai serveris**: `i18n-loader.server.ts` — darbojas tikai SSR laikā (ieteicams uz galvenēm balstītai noteikšanai)
+- **Tikai klients**: `i18n-loader.client.ts` — darbojas tikai pārlūkā (izmantošanai ar `localStorage` vai DOM balstītu noteikšanu)
+
+<Tip>
+
+</Tip>
+
+## ✅ Kopsavilkums
+
+| Funkcija                                | Apraksts                                                       |
+| -------------------------------------- | ----------------------------------------------------------------- |
+| `useI18nLocale().setLocale()`          | Atomiski atjaunina `useState` + sīkfailu; darbojas ar visām stratēģijām |
+| `useI18nLocale().getLocale()`          | Atgriež pašreizējo lokāli no stāvokļa vai sīkfaila                       |
+| `useI18nLocale().getPreferredLocale()` | Atgriež vēlamo lokāli (validētu pret sarakstu `locales`)       |
+| Spraudnis `order: -10`                    | Nodrošina, ka jūsu spraudnis darbojas pirms i18n inicializācijas               |
+| `enforce: 'pre'`                       | Darbojas "pre" spraudņu grupā                                    |
+
+**NEDARIET:**
+
+- Neizmantojiet `useCookie('user-locale')` tieši — `useI18nLocale()` pārvalda sīkfailus iekšēji
+- Neizmantojiet `useState('i18n-locale')` tieši — tā vietā izmantojiet `useI18nLocale().setLocale()`
+- Neiestatiet `order` >= -5 — jūsu spraudnim jādarbojas pirms i18n spraudņa

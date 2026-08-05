@@ -1,0 +1,500 @@
+---
+title: "Firebase AppHosting へのデプロイ"
+description: "Firebase AppHosting に nuxt-i18n-micro をデプロイします。"
+---
+
+# 🔥 Firebase AppHosting へのデプロイ
+
+## 📖 はじめに
+
+Firebase AppHosting は、サーバーレスインフラで Nuxt アプリケーションをデプロイするための強力なプラットフォームです。しかし、`nuxt-i18n-micro` を使うアプリケーションをデプロイする際、翻訳 JSON ファイルの配信方法に関連する固有の問題に遭遇する場合があります。このガイドでは、本番環境で翻訳が正しく動作するようにするための包括的な解決策を提供します。
+
+## ⚠️ よくある問題
+
+### 翻訳ファイルが適用されない
+
+**症状:**
+
+- ✅ 開発時(`nuxt dev`)は翻訳が完璧に動作する
+- ❌ Firebase AppHosting へのデプロイ後、JSON ファイルは読み込まれるが翻訳が適用されない
+- ❌ コンソールにエラーは表示されない
+- ❌ 翻訳ファイルは Network タブに表示されるが、`Content-Type` が `application/json` ではなく `text/html` になっている
+
+**原因:**
+
+Firebase AppHosting(および Nitro のプリレンダリングを使う他のプラットフォーム)は、プリレンダリングされた JSON ファイルを誤った MIME タイプで配信することがあります。ブラウザは `Content-Type: text/html` の JSON ファイルを適切に解析できないため、翻訳がサイレントに失敗します。
+
+## ✅ 解決策
+
+### 解決策 1: Route Rules による設定(推奨)
+
+最もシンプルな解決策は、`nuxt.config.ts` で翻訳ルート用の明示的なヘッダーを追加することです:
+
+```typescript
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+
+  i18n: {
+    locales: [
+      { code: 'en', iso: 'en-US', dir: 'ltr' },
+      { code: 'fr', iso: 'fr-FR', dir: 'ltr' },
+      { code: 'de', iso: 'de-DE', dir: 'ltr' },
+      // ... other locales
+    ],
+    strategy: 'prefix_except_default',
+    defaultLocale: 'en',
+    translationDir: 'locales',
+    meta: true,
+    metaBaseUrl: 'https://your-domain.com',
+  },
+
+  // Add route rules for translation files
+  routeRules: {
+    '/_locales/**': {
+      headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'public, max-age=3600, s-maxage=3600',
+      },
+    },
+  },
+})
+```
+
+**利点:**
+
+- ✨ シンプルな設定
+- 🚀 適切なキャッシングでパフォーマンス向上
+- 🔒 すべてのデプロイプラットフォームで動作
+
+### 解決策 2: カスタム API ベース URL
+
+カスタム `apiBaseUrl`(パスプレフィックスのみ)を使っている場合、route rules をそれに合わせて調整します:
+
+```typescript
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+
+  i18n: {
+    apiBaseUrl: '/api/translations', // Path prefix only, not a full URL
+    locales: [
+      { code: 'en', iso: 'en-US', dir: 'ltr' },
+      { code: 'fr', iso: 'fr-FR', dir: 'ltr' },
+    ],
+    defaultLocale: 'en',
+  },
+
+  routeRules: {
+    '/api/translations/**': {
+      headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'public, max-age=3600',
+      },
+    },
+  },
+})
+```
+
+### 解決策 3: Firebase 固有の設定
+
+プロジェクトルートに `firebase.json` を作成または更新します:
+
+```json
+{
+  "hosting": {
+    "public": ".output/public",
+    "cleanUrls": true,
+    "rewrites": [
+      {
+        "source": "**",
+        "function": "server"
+      }
+    ],
+    "headers": [
+      {
+        "source": "/_locales/**/*.json",
+        "headers": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Cache-Control",
+            "value": "public, max-age=3600, immutable"
+          },
+          {
+            "key": "Access-Control-Allow-Origin",
+            "value": "*"
+          }
+        ]
+      }
+    ]
+  },
+  "functions": {
+    "source": ".output/server"
+  }
+}
+```
+
+<Warning>
+
+</Warning>
+
+### 解決策 4: Firebase Functions の設定
+
+Firebase Functions デプロイの場合、`functions/package.json` に必要な依存関係が含まれていることを確認します:
+
+```json
+{
+  "name": "functions",
+  "type": "module",
+  "engines": {
+    "node": "18"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.0.0",
+    "firebase-functions": "^5.0.0"
+  }
+}
+```
+
+## 🔍 デバッグ
+
+### デバッグモードを有効にする
+
+問題を特定するためにデバッグログを追加します:
+
+```typescript
+export default defineNuxtConfig({
+  i18n: {
+    debug: true,
+    // Your other config...
+  },
+})
+```
+
+これにより、次の情報について詳細なログが出力されます:
+
+- 📝 翻訳ファイルの読み込み
+- 🔄 キャッシュ操作
+- ⚠️ 読み込みエラー
+
+### Network タブを確認する
+
+1. DevTools → Network タブを開く
+2. 「data.json」でフィルタリング
+3. 翻訳ファイルのリクエストをクリック
+4. **Response Headers** を検証:
+   - ✅ `Content-Type: application/json`(正しい)
+   - ❌ `Content-Type: text/html`(誤り — 修正が必要)
+
+### プリレンダリング出力を検証する
+
+ビルド後、翻訳ファイルが生成されていることを確認します:
+
+```bash
+pnpm build
+
+# Check public payload copy (premerged layout)
+ls -la .output/public/_locales/index/en/
+# → data.json
+```
+
+ページごと、ロケールごとに `data.json` が表示されるはずです。
+
+## 🚀 ビルド設定
+
+### Nitro プリセット
+
+Firebase AppHosting では、正しいプリセットを使っていることを確認してください:
+
+```typescript
+export default defineNuxtConfig({
+  nitro: {
+    preset: 'firebase-app-hosting',
+    firebase: {
+      gen: 2,
+      httpsOptions: {
+        region: 'us-central1',
+        maxInstances: 3,
+      },
+    },
+  },
+})
+```
+
+### プリレンダリング設定
+
+最適なパフォーマンスを得るためのプリレンダリング設定です:
+
+```typescript
+export default defineNuxtConfig({
+  nitro: {
+    prerender: {
+      crawlLinks: true,
+      routes: ['/'],
+      ignore: ['/api/**', '/admin/**'],
+    },
+  },
+})
+```
+
+## 📋 完全な設定例
+
+Firebase AppHosting 向けの完全に動作する設定例です:
+
+```typescript
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+
+  i18n: {
+    locales: [
+      { code: 'en', iso: 'en-US', dir: 'ltr' },
+      { code: 'fr', iso: 'fr-FR', dir: 'ltr' },
+      { code: 'de', iso: 'de-DE', dir: 'ltr' },
+      { code: 'es', iso: 'es-ES', dir: 'ltr' },
+      { code: 'it', iso: 'it-IT', dir: 'ltr' },
+      { code: 'pt', iso: 'pt-PT', dir: 'ltr' },
+      { code: 'ru', iso: 'ru-RU', dir: 'ltr' },
+      { code: 'zh', iso: 'zh-CN', dir: 'ltr' },
+      { code: 'ko', iso: 'ko-KR', dir: 'ltr' },
+    ],
+    strategy: 'prefix_except_default',
+    defaultLocale: 'en',
+    translationDir: 'locales',
+    meta: true,
+    metaBaseUrl: 'https://your-domain.com',
+    debug: false, // Enable in development if needed
+  },
+
+  routeRules: {
+    '/_locales/**': {
+      headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'public, max-age=3600, s-maxage=3600',
+      },
+    },
+  },
+
+  nitro: {
+    preset: 'firebase-app-hosting',
+    prerender: {
+      crawlLinks: true,
+      routes: ['/'],
+    },
+  },
+})
+```
+
+```json
+// firebase.json
+{
+  "hosting": {
+    "public": ".output/public",
+    "cleanUrls": true,
+    "headers": [
+      {
+        "source": "/_locales/**/*.json",
+        "headers": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Cache-Control",
+            "value": "public, max-age=3600, immutable"
+          }
+        ]
+      },
+      {
+        "source": "**/*.@(jpg|jpeg|gif|png|webp|svg|ico)",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "public, max-age=31536000, immutable"
+          }
+        ]
+      }
+    ],
+    "rewrites": [
+      {
+        "source": "**",
+        "function": "server"
+      }
+    ]
+  },
+  "functions": {
+    "source": ".output/server",
+    "runtime": "nodejs18"
+  }
+}
+```
+
+## ✅ 検証チェックリスト
+
+修正を適用した後、すべてが動作していることを確認します:
+
+- [ ] ビルドがエラーなく完了する
+- [ ] 翻訳 JSON ファイルが `.output/public/_locales/\{page\}/\{locale\}/data.json` に存在する
+- [ ] Network タブで翻訳ファイルの `Content-Type: application/json` が表示される
+- [ ] 最初のページ読み込みで翻訳が正しく表示される
+- [ ] コンソールにハイドレーションミスマッチが発生しない
+- [ ] 言語切り替えが正しく動作する
+- [ ] SEO メタタグが適切に生成される
+
+## 🔄 デプロイのワークフロー
+
+### 1. ビルドの準備
+
+```bash
+# Install dependencies
+pnpm install
+
+# Build for production
+pnpm build
+
+# Verify public payload copy
+ls -la .output/public/_locales/index/en/data.json
+```
+
+### 2. Firebase へのデプロイ
+
+```bash
+# Install Firebase CLI if not already installed
+npm install -g firebase-tools
+
+# Login to Firebase
+firebase login
+
+# Initialize Firebase (first time only)
+firebase init hosting
+
+# Deploy
+firebase deploy --only hosting,functions
+```
+
+### 3. デプロイの確認
+
+1. デプロイ済みサイトにアクセスします
+2. DevTools → Network タブを開きます
+3. ページに移動します
+4. `/_locales/index/en/data.json`(またはデフォルトロケール)が以下の条件で読み込まれることを確認します:
+   - Status: 200
+   - Content-Type: application/json
+   - レスポンスに有効な JSON が含まれる
+
+## 🔧 トラブルシューティング
+
+### 問題: 翻訳ファイルの 404 エラー
+
+**解決策:** 翻訳ファイルが出力ディレクトリにコピーされていることを確認します:
+
+```typescript
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: {
+    publicAssets: [
+      {
+        dir: 'locales',
+        maxAge: 60 * 60 * 24 * 365, // 1 year
+      },
+    ],
+  },
+})
+```
+
+### 問題: 一部のページでは翻訳が動くが、他のページでは動かない
+
+**解決策:** ページ固有の翻訳が生成されているか確認します:
+
+```bash
+# Should show data.json for each page/locale
+ls -la .output/public/_locales/index/en/
+ls -la .output/public/_locales/about/en/
+```
+
+ページ固有の翻訳が欠落している場合、`disablePageLocales` が `true` に設定されていないことを確認します:
+
+```typescript
+i18n: {
+  disablePageLocales: false, // Ensure this is false
+}
+```
+
+### 問題: 翻訳の読み込みが遅い
+
+**解決策:** キャッシュとプリロードを最適化します:
+
+```typescript
+routeRules: {
+  '/_locales/**': {
+    headers: {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'public, max-age=31536000, immutable',
+      'X-Content-Type-Options': 'nosniff'
+    },
+    prerender: true
+  }
+}
+```
+
+## 📚 追加リソース
+
+- [Firebase AppHosting ドキュメント](https://firebase.google.com/docs/app-hosting)
+- [Nitro プリセット](https://nitro.unjs.io/deploy/providers/firebase)
+- [Nuxt デプロイガイド](https://nuxt.com/docs/getting-started/deployment)
+- [モジュール設定](/guides/configuration)
+
+## 💡 ヒント
+
+1. **常に本番に近い環境でテストしてから**デプロイしましょう
+2. 初期セットアップ中は**デバッグモードを利用**して、問題を早期に発見しましょう
+3. **キャッシュヒット率をモニタリング**して、パフォーマンスを最適化しましょう
+4. **翻訳ファイルを小さく保つ**ことで、読み込みを速くできます
+5. **適切なキャッシュヘッダーを利用**して、サーバー負荷を減らしましょう
+
+## ⚡ パフォーマンス最適化
+
+### 圧縮を有効にする
+
+Firebase は Gzip/Brotli 圧縮を自動的に処理しますが、ビルドが最適化されていることを確認します:
+
+```typescript
+export default defineNuxtConfig({
+  vite: {
+    build: {
+      minify: 'terser',
+      terserOptions: {
+        compress: {
+          drop_console: true,
+        },
+      },
+    },
+  },
+})
+```
+
+### 翻訳の遅延読み込み
+
+`Nuxt I18n Micro` は、翻訳をページごとに自動で遅延読み込みします。翻訳は必要になったときにのみ読み込まれ、初期バンドルサイズを削減します。これは組み込みの機能で、追加の設定は必要ありません。
+
+さらに最適化するには:
+
+- ページ固有の翻訳を有効にするために `disablePageLocales: false`(デフォルト)を使う
+- ルートレベルの翻訳を最小限に保つ
+- ページコンテンツにはルート固有の翻訳ファイルを使う
+
+<Tip>
+モジュールはバージョン **v3.0.0+** から、適切な `Content-Type` ヘッダーを自動的に設定します。問題が発生している場合は、最新版に更新してください:
+
+```bash
+pnpm update nuxt-i18n-micro@latest
+```
+</Tip>
+
+## 🎯 次のステップ
+
+- [サーバーサイドの翻訳](/guides/server-side-translations)
+- [パフォーマンス最適化](/guides/performance)
+- [SEO 設定](/guides/seo)
+- [テストガイド](/guides/testing)

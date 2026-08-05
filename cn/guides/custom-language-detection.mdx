@@ -1,0 +1,261 @@
+---
+title: "Nuxt I18n Micro 中的自定义语言检测"
+description: "使用 useI18nLocale() 进行自定义语言检测。"
+---
+
+# 🔧 Nuxt I18n Micro 中的自定义语言检测
+
+## 📖 概述
+
+Nuxt I18n Micro v3 为所有语言管理提供了集中的 composable —— `useI18nLocale()`。它取代了 v2 中手动使用 `useState`/`useCookie` 的写法。通过在服务端插件中使用 `useI18nLocale().setLocale()`,你可以实现任意自定义检测逻辑,同时与模块的重定向和 Cookie 体系保持完全兼容。
+
+## 🏗️ 架构
+
+```mermaid
+flowchart TB
+    subgraph Plugins["Plugin Execution Order"]
+        A["Your plugin<br/>order: -10"] -->|setLocale()| B["01.plugin.ts<br/>order: -5"]
+        B --> C["06.redirect.ts server<br/>order: 10"]
+    end
+
+    subgraph Client["Client SPA Navigation"]
+        D["i18n-redirect.global.ts<br/>route middleware"]
+    end
+
+    subgraph State["Locale State"]
+        E["useState('i18n-locale')"]
+        F["localeCookie"]
+    end
+
+    A -->|"setLocale() updates both"| E
+    A -->|"setLocale() updates both"| F
+    B -->|reads| E
+    C -->|reads| E
+    C -->|reads| F
+    D -->|reads target route +| E
+```
+
+**核心原则**:在 `order: -10` 的服务端插件中调用 `useI18nLocale().setLocale()`。这会同步更新 `useState('i18n-locale')` 和语言 Cookie,让 i18n 插件(`order: -5`)和服务端重定向插件(`order: 10`)在首次 SSR 请求时就能读到正确的语言。客户端的自动重定向会在后续导航时由全局路由中间件执行。
+
+## 🛠️ 禁用内置自动检测
+
+若你希望完全掌控语言检测,可禁用内置机制:
+
+```ts
+export default defineNuxtConfig({
+  i18n: {
+    autoDetectLanguage: false,
+  },
+})
+```
+
+## ✨ 示例:使用 `useI18nLocale` 进行服务端检测
+
+这是所有策略下**推荐的做法**。
+
+### 第 1 步:配置 `nuxt.config.ts`
+
+```ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    strategy: 'no_prefix', // Works with ANY strategy
+    defaultLocale: 'en',
+    localeCookie: 'user-locale',
+    autoDetectLanguage: false,
+    locales: [
+      { code: 'en', iso: 'en-US' },
+      { code: 'de', iso: 'de-DE' },
+      { code: 'ja', iso: 'ja-JP' },
+    ],
+  },
+})
+```
+
+### 第 2 步:创建 `plugins/i18n-loader.server.ts`
+
+```ts
+import { defineNuxtPlugin, useRequestHeaders } from '#imports'
+
+export default defineNuxtPlugin({
+  name: 'i18n-custom-loader',
+  enforce: 'pre',
+  order: -10, // Execute BEFORE the i18n plugin (which has order -5)
+
+  setup() {
+    const { setLocale } = useI18nLocale()
+    const headers = useRequestHeaders(['host', 'x-country', 'accept-language'])
+    let detectedLocale = 'en'
+
+    // --- YOUR DETECTION LOGIC ---
+
+    // Example 1: By domain
+    const host = headers['host']
+    if (host?.includes('example.de')) {
+      detectedLocale = 'de'
+    }
+    // Example 2: By custom header
+    else if (headers['x-country'] === 'JP') {
+      detectedLocale = 'ja'
+    }
+    // Example 3: By Accept-Language header
+    else if (headers['accept-language']?.includes('de')) {
+      detectedLocale = 'de'
+    }
+
+    // --- APPLY THE LOCALE ---
+    setLocale(detectedLocale)
+  },
+})
+```
+
+### 工作原理
+
+```mermaid
+flowchart TB
+    subgraph Request["1. Server Request"]
+        A[Receive request] --> B[Read headers]
+        B --> C["x-country"]
+        B --> D["accept-language"]
+        B --> E["host"]
+    end
+
+    subgraph Detect["2. Locale Detection"]
+        C --> F{Country match?}
+        E --> G{Domain match?}
+        D --> H{Language match?}
+        F -->|Yes| I[Use detected locale]
+        G -->|Yes| I
+        H -->|Yes| I
+        F & G & H -->|No match| J[Use defaultLocale]
+    end
+
+    subgraph Apply["3. Apply via useI18nLocale"]
+        I --> K["setLocale(locale)"]
+        J --> K
+        K --> L["Updates useState + cookie"]
+        L --> M["i18n plugin reads locale"]
+        M --> N["Server redirect plugin uses locale"]
+        M --> O["Client middleware on next navigation"]
+    end
+```
+
+1. **插件最先运行**(`order: -10`)—— 从请求头、域名或其他源检测语言
+2. **`setLocale()` 同时更新** `useState('i18n-locale')` 与 Cookie —— 确保后续所有插件立刻看到正确的语言
+3. **i18n 插件**(`order: -5`)读取该语言并加载对应的翻译
+4. **服务端重定向插件**(`order: 10`)在 SSR 时基于该语言进行重定向决策
+5. **客户端路由中间件**(`i18n-redirect`)在 SPA 导航时,如果 URL 中的语言与偏好不一致,会应用重定向
+
+## 🌐 各策略下的行为
+
+`useI18nLocale().setLocale()` 适用于**所有策略**。重定向行为取决于策略:
+
+<Tip>
+| 策略 | `setLocale('de')` 的效果 |
+|----------|---------------------------|
+| `no_prefix` | 以德语渲染,URL 不变 |
+| `prefix` | 302 → `/de/`(服务端重定向) |
+| `prefix_except_default` | 若 `de` ≠ 默认语言则 302 → `/de/`;若 `de` = 默认语言则不重定向 |
+| `prefix_and_default` | 不重定向(`/` 与 `/de/` 均有效) |
+</Tip>
+
+**重要说明:**
+
+- 基于 Cookie 的语言检测默认关闭(`localeCookie: null`)
+- 将 `localeCookie: 'user-locale'` 设置为该值可启用 Cookie 持久化
+- 若 Cookie/状态中的值不在 `locales` 列表内,会回退到 `defaultLocale`
+
+## 🏢 进阶:基于域名的检测
+
+在多域名场景下,每个域名提供不同的语言:
+
+```ts
+import { defineNuxtPlugin, useRequestHeaders } from '#imports'
+
+export default defineNuxtPlugin({
+  name: 'i18n-domain-loader',
+  enforce: 'pre',
+  order: -10,
+
+  setup() {
+    const { setLocale } = useI18nLocale()
+    const headers = useRequestHeaders(['host'])
+    const host = headers['host'] || ''
+
+    let detectedLocale = 'en'
+
+    if (host.endsWith('.de') || host.includes('german.')) {
+      detectedLocale = 'de'
+    } else if (host.endsWith('.fr') || host.includes('french.')) {
+      detectedLocale = 'fr'
+    } else if (host.endsWith('.jp') || host.includes('japanese.')) {
+      detectedLocale = 'ja'
+    }
+
+    setLocale(detectedLocale)
+  },
+})
+```
+
+## 🔄 进阶:尊重用户偏好
+
+若用户可以手动切换语言,应优先尊重其选择,而非自动检测:
+
+```ts
+import { defineNuxtPlugin, useRequestHeaders } from '#imports'
+
+export default defineNuxtPlugin({
+  name: 'i18n-smart-loader',
+  enforce: 'pre',
+  order: -10,
+
+  setup() {
+    const { getLocale, setLocale } = useI18nLocale()
+
+    // If user already has a preference (from cookie), respect it
+    if (getLocale()) {
+      return
+    }
+
+    // Otherwise, detect locale from headers
+    const headers = useRequestHeaders(['accept-language'])
+    let detectedLocale = 'en'
+
+    const acceptLanguage = headers['accept-language'] || ''
+    if (acceptLanguage.includes('de')) {
+      detectedLocale = 'de'
+    } else if (acceptLanguage.includes('ja')) {
+      detectedLocale = 'ja'
+    }
+
+    setLocale(detectedLocale)
+  },
+})
+```
+
+## ⚙️ 仅服务端或仅客户端插件
+
+使用 [Nuxt 文件命名约定](https://nuxt.com/docs/getting-started/directory-structure#plugins) 控制插件的运行环境:
+
+- **仅服务端**:`i18n-loader.server.ts` —— 只在 SSR 期间运行(推荐用于基于请求头的检测)
+- **仅客户端**:`i18n-loader.client.ts` —— 只在浏览器中运行(用于基于 `localStorage` 或 DOM 的检测)
+
+<Tip>
+
+</Tip>
+
+## ✅ 总结
+
+| 特性                                | 说明                                                       |
+| -------------------------------------- | ----------------------------------------------------------------- |
+| `useI18nLocale().setLocale()`          | 同步更新 `useState` 与 Cookie;适用于所有策略 |
+| `useI18nLocale().getLocale()`          | 从状态或 Cookie 返回当前语言 |
+| `useI18nLocale().getPreferredLocale()` | 返回经过 `locales` 列表校验的偏好语言 |
+| 插件 `order: -10`                    | 确保你的插件在 i18n 初始化之前运行 |
+| `enforce: 'pre'`                       | 位于 "pre" 阶段的插件分组 |
+
+**请勿:**
+
+- 直接使用 `useCookie('user-locale')` —— `useI18nLocale()` 会在内部管理 Cookie
+- 直接使用 `useState('i18n-locale')` —— 请改用 `useI18nLocale().setLocale()`
+- 将 `order` 设置为 >= -5 —— 你的插件必须在 i18n 插件之前运行
