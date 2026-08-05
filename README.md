@@ -26,7 +26,8 @@ Push to `main`. Mintlify deploys via the GitHub app connected in the [Mintlify d
 - `guides/` — user guides
 - `api/` — module API, composables, components, package APIs
 - `integrations/` — framework packages
+- `changelog/` — dated release notes (from VitePress `docs/news`)
 - `migration/` — migration guides
 - `.mintlify/Assistant.md` — Mintlify AI assistant instructions
 
-Maintainer-only docs (contribution, release smoke, maintenance commands) and full release news stay in the [GitHub repo](https://github.com/s00d/nuxt-i18n-micro/tree/main/docs).
+Maintainer-only docs (contribution, release smoke, maintenance commands) stay in the [GitHub repo](https://github.com/s00d/nuxt-i18n-micro/tree/main/docs). The git-style release log is [`CHANGELOG.md`](https://github.com/s00d/nuxt-i18n-micro/blob/main/CHANGELOG.md).

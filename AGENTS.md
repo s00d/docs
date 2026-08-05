@@ -25,7 +25,8 @@
 
 - Document public user-facing APIs and guides only
 - Do not duplicate maintainer docs (contribution, testing-strategies, release-smoke) — link to GitHub
-- Do not duplicate full changelog — link to `CHANGELOG.md`
+- User-facing release notes live under `changelog/` (ported from VitePress `docs/news`); keep dated MDX files in sync when publishing news
+- Full git-style changelog remains on GitHub: `CHANGELOG.md`
 - `index.mdx` uses CardGroup landing layout; do not replace with VitePress marketing charts
 
 ## Publishing
