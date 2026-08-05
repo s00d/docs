@@ -1,0 +1,304 @@
+---
+title: "Traduções e informações de locale no lado do servidor no Nuxt I18n Micro"
+description: "Traduções e dados de locale no lado do servidor."
+---
+
+# 🌍 Traduções e informações de locale no lado do servidor no Nuxt I18n Micro
+
+## 📖 Visão geral
+
+O Nuxt I18n Micro suporta traduções e informações de locale no lado do servidor, permitindo traduzir conteúdo e aceder aos detalhes do locale no servidor. Isto é particularmente útil para APIs ou aplicações renderizadas no servidor, onde a localização é necessária antes de chegar ao cliente.
+
+As traduções utilizam mensagens de locale definidas na configuração do Nuxt I18n e são resolvidas dinamicamente com base no locale detetado.
+
+Por predefinição (`translationPayloads.mode: 'premerged'`), os ficheiros ao nível da raiz são incorporados em cada payload de página em build-time como `\{page\}/\{locale\}/data.json`. O servidor carrega os mesmos ficheiros pré-construídos que o cliente obtém em `/\{apiBaseUrl\}/...`, pelo que todas as chaves (partilhadas e específicas de página) estão disponíveis nos handlers do servidor.
+
+Com `translationPayloads.mode: 'source'`, os ficheiros de origem compactos são fundidos em runtime quando `loadTranslationsFromServer()` (ou a rota `/_locales`) é chamada — em **Edge** via `serverAssets` do Nitro, em **Node** a partir da cópia pública opcional. Consulte o [Guia de desempenho — Saída de payloads serverless](/guides/performance#serverless-payload-output) e a [Arquitetura de cache e armazenamento](/api/cache) para mais detalhes.
+
+Para uma lista consolidada das APIs de runtime e do servidor, consulte a [Referência da API](/api/overview).
+
+## 🛠️ Configurar middleware do lado do servidor
+
+Para ativar as traduções e as informações de locale no lado do servidor, utilize as funções de middleware fornecidas:
+
+- `useTranslationServerMiddleware` — para traduzir conteúdo.
+- `useLocaleServerMiddleware` — para aceder a informações de locale.
+
+Ambas as funções de middleware estão automaticamente disponíveis em todas as rotas do servidor.
+
+A lógica de deteção de locale é partilhada entre as duas funções de middleware através da função utilitária `detectCurrentLocale`, para garantir consistência em todo o módulo.
+
+## ✨ Utilizar traduções em handlers do servidor
+
+Pode traduzir conteúdo de forma transparente em qualquer `eventHandler`, utilizando o middleware de tradução.
+
+### Exemplo: utilização básica de traduções
+
+```typescript
+import { defineEventHandler } from 'h3'
+
+export default defineEventHandler(async (event) => {
+  const t = await useTranslationServerMiddleware(event)
+  return {
+    message: t('greeting'), // Returns the translated value for the key "greeting"
+  }
+})
+```
+
+Neste exemplo:
+
+- O locale do utilizador é detetado automaticamente a partir de parâmetros de query, cookies ou cabeçalhos.
+- A função `t` obtém a tradução adequada para o locale detetado.
+
+## 🌍 Utilizar informações de locale em handlers do servidor
+
+### Utilização básica das informações de locale
+
+```typescript
+import { defineEventHandler } from 'h3'
+
+export default defineEventHandler((event) => {
+  const localeInfo = useLocaleServerMiddleware(event)
+
+  return {
+    success: true,
+    data: localeInfo,
+    timestamp: new Date().toISOString(),
+  }
+})
+```
+
+### Fornecer parâmetros de locale personalizados
+
+```typescript
+import { defineEventHandler } from 'h3'
+
+export default defineEventHandler((event) => {
+  // Force specific locale with custom default
+  const localeInfo = useLocaleServerMiddleware(event, 'en', 'ru')
+
+  return {
+    success: true,
+    data: localeInfo,
+    timestamp: new Date().toISOString(),
+  }
+})
+```
+
+### Estrutura da resposta
+
+O middleware de locale devolve um objeto `LocaleInfo` com as seguintes propriedades:
+
+```typescript
+interface LocaleInfo {
+  current: string // Current detected locale code
+  default: string // Default locale code
+  fallback: string // Fallback locale code
+  available: string[] // Array of all available locale codes
+  locale: Locale | null // Full locale configuration object
+  isDefault: boolean // Whether current locale is the default
+  isFallback: boolean // Whether current locale is the fallback
+}
+```
+
+### Exemplo de resposta
+
+```json
+{
+  "success": true,
+  "data": {
+    "current": "ru",
+    "default": "en",
+    "fallback": "en",
+    "available": ["en", "ru", "de"],
+    "locale": {
+      "code": "ru",
+      "iso": "ru-RU",
+      "dir": "ltr",
+      "displayName": "Русский"
+    },
+    "isDefault": false,
+    "isFallback": false
+  },
+  "timestamp": "2024-01-15T10:30:00.000Z"
+}
+```
+
+## 🌐 Fornecer um locale personalizado
+
+Se precisar de especificar um locale manualmente (p. ex., para testes ou determinados pedidos), pode passá-lo ao middleware de tradução:
+
+### Exemplo: locale personalizado
+
+```typescript
+import { defineEventHandler } from 'h3'
+
+function detectLocale(event): string | null {
+  const urlSearchParams = new URLSearchParams(event.node.req.url?.split('?')[1])
+  const localeFromQuery = urlSearchParams.get('locale')
+  if (localeFromQuery) return localeFromQuery
+
+  return 'en'
+}
+
+export default defineEventHandler(async (event) => {
+  const t = await useTranslationServerMiddleware(event, 'en', detectLocale(event)) // Force French local, en - default locale
+  return {
+    message: t('welcome'), // Returns the French translation for "welcome"
+  }
+})
+```
+
+## 📋 Lógica de deteção de locale
+
+Ambas as funções de middleware determinam automaticamente o locale do utilizador utilizando a seguinte ordem de prioridade:
+
+```mermaid
+flowchart TB
+    A[Incoming Request] --> B{URL Parameter?}
+    B -->|"?locale=ru"| Z[Use 'ru']
+    B -->|No| C{Route Parameter?}
+    C -->|"/ru/api/..."| Z
+    C -->|No| D{Cookie?}
+    D -->|"user-locale=de"| Y{Valid Locale?}
+    Y -->|Yes| Z2[Use Cookie Value]
+    Y -->|No| E
+    D -->|No| E{Accept-Language?}
+    E -->|"Accept-Language: fr"| Z3[Use Header Value]
+    E -->|No| F{Fallback Locale?}
+    F -->|Configured| Z4[Use Fallback]
+    F -->|No| G{Default Locale?}
+    G -->|Configured| Z5[Use Default]
+    G -->|No| H["Use 'en'"]
+
+    Z --> I[Return Locale]
+    Z2 --> I
+    Z3 --> I
+    Z4 --> I
+    Z5 --> I
+    H --> I
+```
+
+1. **Parâmetros de URL**: `?locale=ru`
+2. **Parâmetros de rota**: `/ru/api/endpoint`
+3. **Cookies**: cookie `user-locale`
+4. **Cabeçalhos HTTP**: cabeçalho `Accept-Language`
+5. **Locale de fallback**: conforme configurado nas opções do módulo
+6. **Locale predefinido**: conforme configurado nas opções do módulo
+7. **Fallback fixo**: `'en'`
+
+> **Nota**: a lógica de deteção de locale é partilhada entre `useLocaleServerMiddleware` e `useTranslationServerMiddleware`, para garantir consistência no módulo.
+
+## 📋 Exemplos de utilização avançada
+
+### Resposta condicional baseada no locale
+
+```typescript
+import { defineEventHandler } from 'h3'
+
+export default defineEventHandler((event) => {
+  const { current, isDefault, locale } = useLocaleServerMiddleware(event)
+
+  // Return different content based on locale
+  if (current === 'ru') {
+    return {
+      message: 'Привет, мир!',
+      locale: current,
+      isDefault,
+    }
+  }
+
+  if (current === 'de') {
+    return {
+      message: 'Hallo, Welt!',
+      locale: current,
+      isDefault,
+    }
+  }
+
+  // Default English response
+  return {
+    message: 'Hello, World!',
+    locale: current,
+    isDefault,
+  }
+})
+```
+
+### Deteção de locale personalizada
+
+```typescript
+import { defineEventHandler } from 'h3'
+
+export default defineEventHandler((event) => {
+  // Force German locale with English as fallback
+  const { current, isDefault, locale } = useLocaleServerMiddleware(event, 'en', 'de')
+
+  return {
+    message: 'Hallo, Welt!',
+    locale: current,
+    isDefault: false, // Will be false since we forced German
+  }
+})
+```
+
+### API sensível ao locale com validação
+
+```typescript
+import { defineEventHandler, createError } from 'h3'
+
+export default defineEventHandler((event) => {
+  const { current, available, locale } = useLocaleServerMiddleware(event)
+
+  // Validate if the detected locale is supported
+  if (!available.includes(current)) {
+    throw createError({
+      statusCode: 400,
+      statusMessage: `Unsupported locale: ${current}. Available locales: ${available.join(', ')}`,
+    })
+  }
+
+  // Return locale-specific configuration
+  return {
+    locale: current,
+    direction: locale?.dir || 'ltr',
+    displayName: locale?.displayName || current,
+    availableLocales: available,
+  }
+})
+```
+
+### Integração com o middleware de tradução
+
+Pode combinar informações de locale com o middleware de tradução para obter uma internacionalização abrangente:
+
+```typescript
+import { defineEventHandler } from 'h3'
+
+export default defineEventHandler(async (event) => {
+  const localeInfo = useLocaleServerMiddleware(event)
+  const t = await useTranslationServerMiddleware(event)
+
+  return {
+    locale: localeInfo.current,
+    message: t('welcome_message'),
+    availableLocales: localeInfo.available,
+    isDefault: localeInfo.isDefault,
+  }
+})
+```
+
+## 📝 Boas práticas
+
+1. **Valide sempre os locales**: verifique se o locale detetado está na sua lista de locales disponíveis.
+2. **Use lógica de fallback**: forneça predefinições razoáveis quando a deteção de locale falhar.
+3. **Coloque em cache as informações de locale**: para aplicações críticas em desempenho, considere colocar em cache os resultados da deteção.
+4. **Trate casos limite**: contabilize locales não suportados e forneça respostas de erro adequadas.
+5. **Combine com traduções**: utilize as informações de locale a par do middleware de tradução para obter um suporte i18n completo.
+
+## 🚀 Considerações de desempenho
+
+- Ambas as funções de middleware são leves e concebidas para uma execução rápida.
+- A deteção de locale utiliza cadeias de fallback eficientes.
+- Não são efetuadas chamadas a APIs externas durante a deteção de locale.
+- Os resultados são calculados de forma síncrona para um desempenho ótimo.

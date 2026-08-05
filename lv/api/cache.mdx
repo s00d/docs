@@ -1,0 +1,248 @@
+---
+title: "Tulkojumu kešatmiņas un krātuves arhitektūra"
+description: "Tulkojumu kešatmiņas slāņi un payload režīmi v3."
+---
+
+# 🗄️ Tulkojumu kešatmiņas un krātuves arhitektūra
+
+## 📖 Pārskats
+
+Nuxt I18n Micro v3 izmanto daudzslāņu kešošanas arhitektūru tulkojumiem. Payload ielāde ir atkarīga no `translationPayloads.mode`:
+
+- **`premerged`** (noklusējums) — saknes, lapas, rezerves un slāņu faili tiek sapludināti būvēšanas laikā caur `@i18n-micro/utils/build` failā `\{page\}/\{locale\}/data.json`
+- **`source`** — kompakti avota faili tiek saglabāti izpildlaika sapludināšanai caur `@i18n-micro/utils/source-loader` un `@i18n-micro/utils/merge-source` (Edge tos iestrādā Nitro `serverAssets`; Node tos nolasa no `public/`, kad tie ir kopēti)
+
+Šī lapa apraksta, kā darbojas iebūvētais kešs un kā to paplašināt pielāgotiem lietošanas gadījumiem (administratora rīkiem, ārējiem API, kešatmiņas nederības padarīšanai).
+
+## 📊 Arhitektūras pārskats
+
+### Datu plūsma
+
+```mermaid
+flowchart TB
+    subgraph BuildPremerged["Build Time — mode: premerged (default)"]
+        F1["locales/*.json (root-level)"] -->|Merge layers + fallback| PM["preMergeLocales<br/>(@i18n-micro/utils/build)"]
+        F2["locales/pages/**/*.json"] -->|Merge layers + fallback| PM
+        PM -->|"page/locale/data.json"| OUT1["public/&lt;apiBaseUrl&gt;<br/>+ Edge assets:i18n"]
+    end
+
+    subgraph BuildSource["Build Time — mode: source"]
+        SF1["locales/*.json"] --> SLayers["buildTranslationSourceLayers<br/>(@i18n-micro/utils/build)"]
+        SF2["locales/pages/**/*.json"] --> SLayers
+        SLayers --> OUT2["compact source tree<br/>(Edge embed / optional public)"]
+    end
+
+    subgraph Server["Server Runtime"]
+        OUT1 -->|"#i18n-internal/payload-source"| SL["server-loader.ts<br/>loadTranslationsFromServer()"]
+        OUT2 -->|"#i18n-internal/payload-source + merge"| SL
+        SL -->|SERVER_CC_KEY cache| SC["Server Cache<br/>(process-global Map)"]
+        SC -->|JSON response| API["/_locales/:page/:locale/data.json"]
+    end
+
+    subgraph Client["Client Runtime"]
+        API -->|$fetch| TS["TranslationStorage<br/>(singleton via Symbol.for)"]
+        TS -->|getFromCache / load| NI["NuxtI18n<br/>active view layer"]
+        NI --> PL["01.plugin.ts"]
+    end
+```
+
+## 🧱 Pamata komponenti
+
+### 1. `TranslationStorage` (klients + serveris)
+
+**Fails**: `src/runtime/utils/storage.ts`
+
+Singleton klase, kas nodrošina vienotu tulkojumu krātuvi gan klientam, gan serverim. Izmanto `Symbol.for('__NUXT_I18N_STORAGE_CACHE__')` uz `globalThis`, lai nodrošinātu, ka eksistē tikai viena instance, pat ja ielādētas vairākas pakotnes.
+
+**Galvenās metodes:**
+
+| Metode                              | Apraksts                                                            |
+| ----------------------------------- | ---------------------------------------------------------------------- |
+| `getFromCache(locale, routeName?)`  | Sinhrona pārbaude: atgriež kešotus atmiņā esošos datus vai `null`            |
+| `load(locale, routeName?, options)` | Asinhrona ielāde ar kešošanu: vispirms pārbauda kešu, tad izgūst caur `$fetch` |
+| `clear()`                           | Notīra visu kešu                                                |
+
+**Kešatmiņas atslēgas formāts**: `\{locale\}:\{routeName\}` (piemēram, `en:index`, `fr:about`)
+
+```typescript
+import { translationStorage } from '../utils/storage'
+
+// Synchronous cache check
+const cached = translationStorage.getFromCache('en', 'index')
+
+// Async load (with automatic caching)
+const result = await translationStorage.load('en', 'index', {
+  apiBaseUrl: '_locales',
+  baseURL: '/',
+  dateBuild: '2024-01-01',
+})
+// result.data — merged translations
+// result.cacheKey — cache key used
+```
+
+### ⚙️ Deterministiska kešatmiņas laušana (`i18n.dateBuild`)
+
+Pēc noklusējuma šis modulis būvēšanas laikā ģenerē `dateBuild`, izmantojot `Date.now()`. Pēc tam tas tiek iestrādāts ģenerētajā `#build/i18n.strategy.mjs` un izmantots kā vaicājuma parametrs (`?v=...`), lai pēc atkārtotas būvēšanas atzīmētu tulkojumu ienesuma kešu par nederīgu.
+
+Ja jums ir nepieciešami atkārtojami būvējumi (piemēram, lai uzlabotu gabalu kešatmiņas trāpījumu ātrumus pakāpeniskajās izvietošanās), iestatiet stabilu vērtību failā `nuxt.config`:
+
+```ts
+export default defineNuxtConfig({
+  i18n: {
+    // Any stable string/number (git SHA, CI build number, release tag, etc.)
+    dateBuild: process.env.GIT_SHA ?? 'local-dev',
+  },
+})
+```
+
+### 2. `loadTranslationsFromServer()` (tikai serverī)
+
+**Fails**: `src/runtime/server/utils/server-loader.ts`
+
+Ielādē tulkojumus lokālei/lapai un kešo sapludināto rezultātu procesu globālā `CacheControl` kartē, ko atslēgo `@i18n-micro/hmr/cache-keys` (`SERVER_CC_KEY`).
+
+Uzvedība: SSR ielādē no `#i18n-internal/payload-source` — **Node** `readFile` zem `public/<apiBaseUrl>` (`\{page\}/\{locale\}/data.json` premerged režīmā), **Edge** `assets:i18n`. `premerged` nolasa vienu failu; `source` sapludina sakni/lapu/rezervi caur `@i18n-micro/utils/source-loader`.
+
+```typescript
+import { loadTranslationsFromServer } from '../server/utils/server-loader'
+
+// Returns { data: Translations, json: string }
+const { data, json } = await loadTranslationsFromServer('en', 'index')
+```
+
+### 3. Klienta ielāde (bez HTML iestrādes)
+
+Vārdnīcas **netiek** rakstītas `nuxtApp.payload` iekšpusē. Serveris tās tur atmiņā SSR
+renderēšanai; klienta spraudnis `await`o `switchContext`, kas ielādē `/\{apiBaseUrl\}/:page/:locale/data.json`
+(tā pati noklusējuma poza kā `@nuxtjs/i18n` ar `experimental.preload: false`).
+
+`NuxtI18n` tur aktīvo skata slāņa vārdnīcu, ko izmanto `$t()` un `$has()`. `NuxtTranslationLoader` pārslēdz lokāles/maršruta kontekstu un sapludina gabalus šajā slānī.
+
+### 4. Servera API maršruts
+
+**Maršruts**: `/_locales/\{page\}/\{locale\}/data.json`
+
+**Fails**: `src/runtime/server/routes/i18n.ts`
+
+Šis Nitro maršruts apkalpo sapludinātus tulkojumus aktīvajam payload režīmam. Tas izsauc `loadTranslationsFromServer()` un atgriež rezultātu kā JSON.
+
+Produkcijā tas arī iestata:
+
+```http
+Cache-Control: public, max-age={httpCacheDuration}, immutable
+```
+
+Noklusējuma `httpCacheDuration` ir `31536000` (1 gads). Tas ir droši, jo klienti pieprasa payload ar `?v=\{dateBuild\}` kešatmiņas laušanu. Iestatiet `httpCacheDuration: 0`, lai galveni izlaistu. Galvene netiek piemērota izstrādes vidē.
+
+## 📥 Paplašināšana: pielāgota tulkojumu ielāde
+
+### Lasīt no kešatmiņas (servera maršruts)
+
+```ts
+// server/api/i18n/load-cache.[post].ts
+import { defineEventHandler, readBody } from 'h3'
+import { loadTranslationsFromServer } from '#imports'
+
+export default defineEventHandler(async (event) => {
+  const { page, locale } = await readBody<{ page: string; locale: string }>(event)
+  const { data } = await loadTranslationsFromServer(locale, page)
+  return { locale, page, data }
+})
+```
+
+### Atjaunināt tulkojumus (fails + kešatmiņas nederības padarīšana)
+
+```ts
+// server/api/i18n/update.[post].ts
+import { defineEventHandler, readBody, createError } from 'h3'
+import { join } from 'node:path'
+import { readFile, writeFile } from 'node:fs/promises'
+import { deepMergeTranslations } from '@i18n-micro/utils/deep-merge'
+
+export default defineEventHandler(async (event) => {
+  const { path, updates } = await readBody<{ path: string; updates: Record<string, unknown> }>(event)
+
+  if (!path || !updates) {
+    throw createError({ statusCode: 400, statusMessage: 'Missing path or updates' })
+  }
+
+  const fullPath = join('locales', path)
+  let existing: Record<string, unknown> = {}
+
+  try {
+    const content = await readFile(fullPath, 'utf-8')
+    existing = JSON.parse(content) as Record<string, unknown>
+  } catch {
+    // File does not exist — create new
+  }
+
+  const merged = deepMergeTranslations(existing, updates)
+  await writeFile(fullPath, JSON.stringify(merged, null, 2), 'utf-8')
+
+  return { success: true, path, updated: merged }
+})
+```
+
+<Tip>
+
+</Tip>
+
+## 🧹 Kešatmiņas notīrīšana
+
+### Programmatiska kešatmiņas notīrīšana (klients)
+
+Izmantojiet iebūvēto metodi `$clearCache`:
+
+```vue
+<script setup>
+const { $clearCache } = useNuxtApp()
+
+// Clears both TranslationStorage and plugin-level cache
+$clearCache()
+</script>
+```
+
+### Servera kešatmiņas uzvedība
+
+Servera puses kešs (`loadTranslationsFromServer`) ir procesu globāls un saglabājas, līdz:
+
+- Servera process tiek restartēts
+- Tiek noteikta jauna izvietošana (atšķirīga `dateBuild` vērtība)
+
+Bezservera vidēm katrs auksts starts nozīmē svaigu kešu.
+
+## ⚙️ Bezservera konfigurācija
+
+Bezservera vidēs (Cloudflare Workers, AWS Lambda) iebūvētais kešs izmanto atmiņā esošus `Map` objektus. Pašam tulkojumu kešam nav nepieciešama ārējas krātuves konfigurācija.
+
+Tomēr Nitro krātuvei avota tulkojumu failiem var būt nepieciešama konfigurācija:
+
+```ts
+export default defineNuxtConfig({
+  nitro: {
+    storage: {
+      // Only needed if default file-system storage is unavailable
+      'assets:server': {
+        driver: 'cloudflare-kv-binding',
+        binding: 'MY_KV_NAMESPACE',
+      },
+    },
+  },
+})
+```
+
+## 💡 Galvenās atšķirības no v2
+
+| Aspekts           | v2                            | v3                                                                       |
+| ---------------- | ----------------------------- | ------------------------------------------------------------------------ |
+| Klienta kešs     | `useStorage('cache')`         | `TranslationStorage` singleton (Symbol.for uz globalThis)                |
+| SSR pārsūtīšana     | Runtime config                | Pilni gabali caur `payload.data` (v3.0 izmantoja `useState`)                    |
+| Servera kešs     | Nitro cache storage           | Procesu globāls `Map` caur `Symbol.for`                                    |
+| Sapludināšanas loģika      | Klienta puses                   | Būvēšanas laikā (`premerged`) vai izpildlaikā (`source`) caur `@i18n-micro/utils/*` |
+| Kešatmiņas atslēgas formāts | `i18n:merged:\{page\}:\{locale\}` | `\{locale\}:\{routeName\}`                                                   |
+
+## 📚 Saistīts
+
+- [Veiktspējas ceļvedis](/guides/performance) — kā kešošana ietekmē veiktspēju
+- [Servera puses tulkojumi](/guides/server-side-translations) — tulkojumu izmantošana servera maršrutos
+- [Firebase izvietošana](/guides/firebase) — ar izvietošanu saistīti kešatmiņas apsvērumi

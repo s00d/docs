@@ -1,0 +1,154 @@
+---
+title: "Nâng cấp từ v2.x lên v3.x"
+description: "Nâng cấp từ v2.x lên v3.x."
+---
+
+# 📦 Nâng cấp từ v2.x lên v3.x
+
+<Tip>
+Xem [Di chuyển từ nuxt-i18n](/migration/from-nuxtjs-i18n) — hướng dẫn đó bao gồm việc chuyển từ hệ sinh thái vue-i18n, không phải từ nuxt-i18n-micro v2.
+</Tip>
+
+v3.0.0 giới thiệu các thay đổi kiến trúc cơ bản: các gói chiến lược, hệ thống cache mới, quản lý locale tập trung qua `useI18nLocale()`, và một pipeline chuyển hướng được thiết kế lại. Phần này bao gồm tất cả các thay đổi phá vỡ tương thích và cách cập nhật mã của bạn.
+
+## Các bước di chuyển
+
+```mermaid
+flowchart LR
+    A["1. Update deps"] --> B["2. Fix config"] --> C["3. Update plugins"] --> D["4. Test"] --> E["✅ Done"]
+```
+
+## Tóm tắt thay đổi phá vỡ tương thích
+
+- **Trạng thái locale** — `useState` / `useCookie` thủ công → composable `useI18nLocale()`
+- **Truy cập cấu hình** — `useRuntimeConfig().public.i18nConfig` → `getI18nConfig()` từ `#build/i18n.strategy.mjs`
+- **Component chuyển hướng** — tùy chọn `fallbackRedirectComponentPath` → Plugin chuyển hướng server + client route middleware (tự động)
+- **`includeDefaultLocaleRoute`** — Được hỗ trợ (deprecated) → Đã xóa, dùng tùy chọn `strategy`
+- **`experimental.hmr`** — Dưới `experimental` → Tùy chọn cấp gốc
+- **`previousPageFallback`** — Đã xóa hoàn toàn (chiến lược gộp tích lũy xử lý điều này tự động)
+- **Cache** — `useStorage('cache')` → Singleton `TranslationStorage` (`Symbol.for` trên `globalThis`)
+- **Truyền SSR** — Cấu hình runtime → Payload Nuxt (v3 đã dùng `useState`; các chunk giờ nằm trong `payload.data`, xem [Hiệu năng](/guides/performance#server-side-payload-transfer))
+- **Các lớp chiến lược** — Nội bộ → Các gói riêng biệt (`@i18n-micro/route-strategy`, `@i18n-micro/path-strategy`)
+
+## Đã xóa: `fallbackRedirectComponentPath`
+
+Tùy chọn `fallbackRedirectComponentPath` và component dự phòng `locale-redirect.vue` đã bị xóa. Logic chuyển hướng giờ được xử lý bởi:
+
+1. **Server middleware** (`i18n.global.ts`) — đặt `event.context.i18n.locale`
+2. **Plugin chuyển hướng server** (`06.redirect.ts`, chỉ server) — 302 chuyển hướng trước khi render
+3. **Client route middleware** (`i18n-redirect.global.ts`) — chuyển hướng SPA sau hydration
+
+```diff
+ i18n: {
+   strategy: 'prefix_except_default',
+-  fallbackRedirectComponentPath: '~/components/MyRedirect.vue',
+ }
+```
+
+Nếu bạn đã có logic chuyển hướng tùy chỉnh trong component dự phòng, hãy triển khai nó trong một plugin server thay thế:
+
+```ts
+// plugins/i18n-loader.server.ts
+export default defineNuxtPlugin({
+  name: 'i18n-custom-redirect',
+  enforce: 'pre',
+  order: -10,
+  setup() {
+    const { setLocale } = useI18nLocale()
+    // Your custom detection logic
+    setLocale(detectedLocale)
+  },
+})
+```
+
+## Đã xóa: `includeDefaultLocaleRoute`
+
+Hãy dùng tùy chọn `strategy` thay thế:
+
+- `includeDefaultLocaleRoute: true` → `strategy: 'prefix'`
+- `includeDefaultLocaleRoute: false` → `strategy: 'prefix_except_default'` (mặc định)
+
+```diff
+ i18n: {
+-  includeDefaultLocaleRoute: true,
++  strategy: 'prefix',
+ }
+```
+
+## Truy cập cấu hình: `getI18nConfig()` thay thế `useRuntimeConfig`
+
+```diff
+- const config = useRuntimeConfig()
+- const cookieName = config.public.i18nConfig?.localeCookie || 'user-locale'
++ import { getI18nConfig } from '#build/i18n.strategy.mjs'
++ const { localeCookie: configCookie } = getI18nConfig()
++ const cookieName = configCookie ?? 'user-locale'
+```
+
+## Quản lý Locale: `useI18nLocale()` thay thế trạng thái thủ công
+
+Trong v2, bạn có thể đã dùng `useState('i18n-locale')` hoặc `useCookie('user-locale')` trực tiếp. Trong v3, hãy dùng composable `useI18nLocale()` tập trung:
+
+```diff
+- const locale = useState('i18n-locale')
+- const cookie = useCookie('user-locale')
+- locale.value = 'fr'
+- cookie.value = 'fr'
++ const { setLocale } = useI18nLocale()
++ setLocale('fr') // Updates both state and cookie atomically
+```
+
+Xem [Phát hiện ngôn ngữ tùy chỉnh](/guides/custom-language-detection) để có ví dụ chi tiết.
+
+## Tùy chọn thử nghiệm đã di chuyển / xóa
+
+`hmr` đã di chuyển từ `experimental` lên cấp gốc. `previousPageFallback` đã bị xóa hoàn toàn — module giờ dùng chiến lược deep merge tích lũy (độ sâu 2 cấp) tự động bảo toàn các bản dịch từ trang trước trong quá trình hoạt hình chuyển tiếp, ngay cả khi các trang chia sẻ các khóa lồng nhau chồng chéo. Sau khi hoạt hình chuyển tiếp hoàn thành, hook `page:transition:finish` dọn dẹp các khóa của trang cũ khỏi bộ nhớ.
+
+```diff
+ i18n: {
+-  experimental: {
+-    hmr: true,
+-    previousPageFallback: true
+-  }
++  hmr: true,
++  // previousPageFallback removed — handled automatically
+ }
+```
+
+## Kiến trúc chuyển hướng (v3)
+
+Chuyển hướng giờ được xử lý tự động bởi hai thành phần:
+
+1. **Phía server** (`06.redirect.ts`, chỉ server): Chạy trong SSR, phát ra 302 chuyển hướng trước bất kỳ render trang nào — không có "error flash"
+2. **Phía client** (`i18n-redirect.global.ts`): Global route middleware trên điều hướng SPA; bảo toàn query string và hash
+
+Ưu tiên locale cho chuyển hướng:
+
+1. `useState('i18n-locale')` — được đặt qua `useI18nLocale().setLocale()`
+2. Cookie — nếu `localeCookie` được cấu hình
+3. Header `Accept-Language` — nếu `autoDetectLanguage: true`
+4. `defaultLocale` — dự phòng
+
+Không cần thay đổi mã cho thiết lập tiêu chuẩn.
+
+<Warning>
+Đối với các chiến lược `prefix` và `prefix_except_default` với `redirects: true`, hãy đặt `localeCookie: 'user-locale'` để bật lưu locale qua các lần tải lại trang. Không có nó, chuyển hướng chỉ dùng `Accept-Language` hoặc `defaultLocale`.
+</Warning>
+
+## TypeScript: Kiểu module nội bộ (tùy chọn)
+
+Nếu bạn gặp lỗi kiểu liên quan đến các import nội bộ như `#i18n-internal/plural`, `#i18n-internal/strategy`, hoặc `#i18n-internal/config`, hãy thêm mục `imports` vào `package.json` của dự án:
+
+```json
+{
+  "imports": {
+    "#i18n-internal/plural": "nuxt-i18n-micro/internals",
+    "#i18n-internal/strategy": "nuxt-i18n-micro/internals",
+    "#i18n-internal/config": "nuxt-i18n-micro/internals"
+  }
+}
+```
+
+<Tip>
+
+</Tip>

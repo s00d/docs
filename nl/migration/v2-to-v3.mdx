@@ -1,0 +1,154 @@
+---
+title: "Upgraden van v2.x naar v3.x"
+description: "Upgrade van v2.x naar v3.x."
+---
+
+# 📦 Upgraden van v2.x naar v3.x
+
+<Tip>
+Zie [Migratie van nuxt-i18n](/migration/from-nuxtjs-i18n) — die gids behandelt het overstappen vanuit het vue-i18n-ecosysteem, niet vanaf nuxt-i18n-micro v2.
+</Tip>
+
+v3.0.0 introduceert fundamentele architectuurwijzigingen: strategiepakketten, een nieuw cachesysteem, gecentraliseerd localebeheer via `useI18nLocale()` en een herontworpen redirect-pipeline. Deze sectie behandelt alle breaking changes en hoe je je code bijwerkt.
+
+## Migratiestappen
+
+```mermaid
+flowchart LR
+    A["1. Update deps"] --> B["2. Fix config"] --> C["3. Update plugins"] --> D["4. Test"] --> E["✅ Done"]
+```
+
+## Overzicht van breaking changes
+
+- **Locale-state** — `useState` / `useCookie` handmatig → `useI18nLocale()`-composable
+- **Config-toegang** — `useRuntimeConfig().public.i18nConfig` → `getI18nConfig()` uit `#build/i18n.strategy.mjs`
+- **Redirect-component** — Optie `fallbackRedirectComponentPath` → Server-redirectplugin + client-route-middleware (automatisch)
+- **`includeDefaultLocaleRoute`** — Ondersteund (deprecated) → Verwijderd, gebruik `strategy`-optie
+- **`experimental.hmr`** — Onder `experimental` → Optie op rootniveau
+- **`previousPageFallback`** — Volledig verwijderd (cumulatieve mergestrategie regelt dit automatisch)
+- **Caching** — `useStorage('cache')` → `TranslationStorage`-singleton (`Symbol.for` op `globalThis`)
+- **SSR-overdracht** — Runtime config → Nuxt-payload (v3 gebruikte `useState`; chunks staan nu in `payload.data`, zie [Performance](/guides/performance#server-side-payload-transfer))
+- **Strategieklassen** — Intern → Aparte pakketten (`@i18n-micro/route-strategy`, `@i18n-micro/path-strategy`)
+
+## Verwijderd: `fallbackRedirectComponentPath`
+
+De optie `fallbackRedirectComponentPath` en het fallback-component `locale-redirect.vue` zijn verwijderd. Redirect-logica wordt nu afgehandeld door:
+
+1. **Server-middleware** (`i18n.global.ts`) — stelt `event.context.i18n.locale` in
+2. **Server-redirectplugin** (`06.redirect.ts`, alleen server) — 302-redirects vóór rendering
+3. **Client-route-middleware** (`i18n-redirect.global.ts`) — SPA-redirects na hydratie
+
+```diff
+ i18n: {
+   strategy: 'prefix_except_default',
+-  fallbackRedirectComponentPath: '~/components/MyRedirect.vue',
+ }
+```
+
+Als je aangepaste redirect-logica in het fallback-component had, implementeer deze dan in plaats daarvan in een serverplugin:
+
+```ts
+// plugins/i18n-loader.server.ts
+export default defineNuxtPlugin({
+  name: 'i18n-custom-redirect',
+  enforce: 'pre',
+  order: -10,
+  setup() {
+    const { setLocale } = useI18nLocale()
+    // Your custom detection logic
+    setLocale(detectedLocale)
+  },
+})
+```
+
+## Verwijderd: `includeDefaultLocaleRoute`
+
+Gebruik in plaats daarvan de optie `strategy`:
+
+- `includeDefaultLocaleRoute: true` → `strategy: 'prefix'`
+- `includeDefaultLocaleRoute: false` → `strategy: 'prefix_except_default'` (de standaard)
+
+```diff
+ i18n: {
+-  includeDefaultLocaleRoute: true,
++  strategy: 'prefix',
+ }
+```
+
+## Config-toegang: `getI18nConfig()` vervangt `useRuntimeConfig`
+
+```diff
+- const config = useRuntimeConfig()
+- const cookieName = config.public.i18nConfig?.localeCookie || 'user-locale'
++ import { getI18nConfig } from '#build/i18n.strategy.mjs'
++ const { localeCookie: configCookie } = getI18nConfig()
++ const cookieName = configCookie ?? 'user-locale'
+```
+
+## Localebeheer: `useI18nLocale()` vervangt handmatige state
+
+In v2 heb je mogelijk `useState('i18n-locale')` of `useCookie('user-locale')` direct gebruikt. In v3 gebruik je de gecentraliseerde `useI18nLocale()`-composable:
+
+```diff
+- const locale = useState('i18n-locale')
+- const cookie = useCookie('user-locale')
+- locale.value = 'fr'
+- cookie.value = 'fr'
++ const { setLocale } = useI18nLocale()
++ setLocale('fr') // Updates both state and cookie atomically
+```
+
+Zie [Aangepaste taaldetectie](/guides/custom-language-detection) voor gedetailleerde voorbeelden.
+
+## Experimentele opties verplaatst / verwijderd
+
+`hmr` is verplaatst van `experimental` naar het rootniveau. `previousPageFallback` is volledig verwijderd — de module gebruikt nu een cumulatieve deep-mergestrategie (2 niveaus diep) die vertalingen van de vorige pagina automatisch behoudt tijdens overgangsanimaties, zelfs wanneer pagina's overlappende geneste sleutels delen. Na voltooiing van de overgangsanimatie ruimt de `page:transition:finish`-hook oude-paginasleutels op uit het geheugen.
+
+```diff
+ i18n: {
+-  experimental: {
+-    hmr: true,
+-    previousPageFallback: true
+-  }
++  hmr: true,
++  // previousPageFallback removed — handled automatically
+ }
+```
+
+## Redirect-architectuur (v3)
+
+Redirects worden nu automatisch afgehandeld door twee componenten:
+
+1. **Server-side** (`06.redirect.ts`, alleen server): Draait tijdens SSR, geeft 302-redirects uit vóór enige paginarendering — geen "error flash"
+2. **Client-side** (`i18n-redirect.global.ts`): Globale route-middleware bij SPA-navigatie; behoudt querystring en hash
+
+Localeprioriteit voor redirects:
+
+1. `useState('i18n-locale')` — ingesteld via `useI18nLocale().setLocale()`
+2. Cookie — als `localeCookie` is geconfigureerd
+3. `Accept-Language`-header — als `autoDetectLanguage: true`
+4. `defaultLocale` — fallback
+
+Voor standaard-setups zijn geen codewijzigingen vereist.
+
+<Warning>
+Stel voor de strategieën `prefix` en `prefix_except_default` met `redirects: true` `localeCookie: 'user-locale'` in om localepersistentie tussen paginalaadbeurten in te schakelen. Zonder deze cookie gebruiken redirects alleen `Accept-Language` of `defaultLocale`.
+</Warning>
+
+## TypeScript: interne moduletypes (optioneel)
+
+Als je typefouten tegenkomt gerelateerd aan interne imports zoals `#i18n-internal/plural`, `#i18n-internal/strategy` of `#i18n-internal/config`, voeg dan de `imports`-sectie toe aan de `package.json` van je project:
+
+```json
+{
+  "imports": {
+    "#i18n-internal/plural": "nuxt-i18n-micro/internals",
+    "#i18n-internal/strategy": "nuxt-i18n-micro/internals",
+    "#i18n-internal/config": "nuxt-i18n-micro/internals"
+  }
+}
+```
+
+<Tip>
+
+</Tip>

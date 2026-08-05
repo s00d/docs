@@ -1,0 +1,499 @@
+---
+title: "`useI18nHead` コンポーザブル"
+description: "i18n SEO のメタタグと link タグをページレベルで上書きします。"
+---
+
+# `useI18nHead` コンポーザブル
+
+`useI18nHead` を使うと、カスタムのメタプラグインを用意せずに、i18n の SEO タグを **ページ単位** でカスタマイズできます。`meta: true` のとき、モジュールは [`useLocaleHead`](/api/composables/use-locale-head) の出力の上に入力をマージします。
+
+代表的なユースケース:
+
+- **CMS / ブログ記事** — 一部のロケールだけが翻訳されており、代替 URL が言語ごとに異なる(スラッグやパスが異なる)場合。
+- **動的な canonical** — canonical URL を `$switchLocalePath` ではなく、API から返される記事の URL に一致させる必要がある場合。
+- **追加の Open Graph** — 自動生成される `og:locale` / `og:url` に加えて、`og:title`、`og:description`、`og:image` を追加する場合。
+- **部分的な制御** — モジュール生成の canonical と `og:url` は維持しつつ、`hreflang` と `og:locale:alternate` だけを差し替える場合。
+
+---
+
+## シグネチャ
+
+{/* generated:symbol:useI18nHead — do not edit; run `pnpm run docs:generate` */}
+
+```ts
+useI18nHead(input?: MaybeRefOrGetter<I18nHeadInput | null>): { pageHead: any; resetPageHead: () => void }
+```
+
+i18n SEO の head タグに対するページレベルの上書きを登録します。
+`02.meta` プラグインが `useLocaleHead` の出力の上にマージします。
+
+| パラメータ | 型 | 説明 |
+| --- | --- | --- |
+| `input` *(任意)* | `MaybeRefOrGetter<I18nHeadInput \| null>` |  |
+
+{/* /generated:symbol:useI18nHead */}
+
+## パイプラインでの位置づけ
+
+```mermaid
+flowchart LR
+    A[useLocaleHead] --> B[base tags]
+    C[useI18nHead on page] --> D[page overrides]
+    B --> E[mergeI18nHead]
+    D --> E
+    E --> F[useHead in 02.meta]
+```
+
+`useI18nHead` はページコンポーネント内で呼び出します。`02.meta` プラグインは、`updateMeta()`(ルート変更、`$setI18nRouteParams`、クライアント側の `page:finish`)のたびに上書きを適用します。
+
+---
+
+## 例 1 — 一部のロケールにしか翻訳がない記事
+
+よくあるパターン: API がどのロケールが存在するかと、それらの絶対または相対 URL を返します。
+
+```ts
+interface Article {
+  title: string
+  slug: string
+  /** Locale code → page URL (absolute or site-relative) */
+  locales: Record<string, string>
+}
+```
+
+```vue
+<script setup lang="ts">
+const route = useRoute()
+const { data: article } = await useFetch<Article>(`/api/articles/${route.params.slug}`)
+
+const localeCodes = computed(() => Object.keys(article.value?.locales ?? {}))
+
+useI18nHead(() => {
+  if (!article.value) return null
+
+  return {
+    meta: [
+      { property: 'og:title', content: article.value.title },
+      { property: 'og:type', content: 'article' },
+    ],
+    replace: {
+      hreflang: localeCodes.value.map((locale) => ({
+        rel: 'alternate',
+        hreflang: locale,
+        href: article.value!.locales[locale]!,
+      })),
+      ogAlternates: localeCodes.value,
+    },
+  }
+})
+</script>
+```
+
+`ogAlternates` は、`i18n.locales` 設定の **ロケールコード** を受け取ります。`og:locale:alternate` の値は、`locale.og` または `iso` を介して解決されます(Open Graph の `en_US` 形式)。
+
+---
+
+## 例 2 — ロケールごとのスラッグを持つ記事(`$defineI18nRoute` + `$setI18nRouteParams`)
+
+URL がローカライズされたルートテンプレートと動的パラメータから構築される場合:
+
+```vue
+<script setup lang="ts">
+const { $defineI18nRoute, $setI18nRouteParams } = useNuxtApp()
+const route = useRoute()
+
+const { data: article } = await useFetch(`/api/articles/${route.params.slug}`)
+
+$defineI18nRoute({
+  localeRoutes: {
+    en: '/blog/[slug]',
+    de: '/de/blog/[slug]',
+    fr: '/fr/blog/[slug]',
+  },
+})
+
+if (article.value) {
+  $setI18nRouteParams({
+    en: { slug: article.value.slugEn },
+    de: { slug: article.value.slugDe },
+    fr: { slug: article.value.slugFr },
+  })
+
+  const availableLocales = article.value.availableLocales as string[]
+
+  useI18nHead({
+    meta: [{ property: 'og:title', content: article.value.title }],
+    replace: {
+      hreflang: availableLocales.map((locale) => ({
+        rel: 'alternate',
+        hreflang: locale,
+        href: article.value!.urls[locale],
+      })),
+      ogAlternates: availableLocales,
+    },
+  })
+}
+</script>
+```
+
+モジュール生成の代替リンクは、設定されている **すべての** ロケールを列挙します。`replace.hreflang` を使うと、実際に翻訳があるロケールだけにタグを絞れます。
+
+---
+
+## 例 3 — デフォルトロケールの記事 URL 用のカスタム `x-default`
+
+デフォルトでは、`x-default` は `$switchLocalePath` からのデフォルトロケール URL を指します。記事の場合、デフォルト翻訳の URL を指すようにします:
+
+```vue
+<script setup lang="ts">
+const { $defaultLocale } = useNuxtApp()
+const article = await loadArticle()
+
+const defaultLocale = $defaultLocale() ?? 'en'
+const defaultHref = article.locales[defaultLocale]
+
+useI18nHead({
+  replace: {
+    hreflang: Object.entries(article.locales).map(([locale, href]) => ({
+      rel: 'alternate',
+      hreflang: locale,
+      href,
+    })),
+    xDefault: defaultHref ? { rel: 'alternate', hreflang: 'x-default', href: defaultHref } : false,
+    ogAlternates: Object.keys(article.locales),
+  },
+})
+</script>
+```
+
+---
+
+## 例 4 — API データから canonical と `og:url` を差し替える
+
+canonical を CMS が提供する URL に一致させる必要がある場合(マルチドメイン、カスタムパス、ビルド済みの絶対 URL など):
+
+```vue
+<script setup lang="ts">
+const article = await loadArticle()
+const canonical = article.canonicalUrl // e.g. https://www.example.com/en/blog/my-post
+
+useI18nHead({
+  replace: {
+    canonical,
+    ogUrl: canonical,
+    hreflang: buildAlternateLinks(article),
+    ogAlternates: Object.keys(article.locales),
+  },
+  meta: [
+    { property: 'og:title', content: article.title },
+    { name: 'description', content: article.excerpt },
+  ],
+})
+</script>
+```
+
+---
+
+## 例 5 — 自動 canonical / `og:url` は維持しつつ、代替リンクだけを差し替える
+
+`$switchLocalePath` + `$setI18nRouteParams` によって canonical と `og:url` がすでに正しく生成されている場合、ディスカバリータグだけを差し替えます:
+
+```vue
+<script setup lang="ts">
+const article = await loadArticle()
+
+useI18nHead({
+  replace: {
+    hreflang: buildAlternateLinks(article),
+    ogAlternates: Object.keys(article.locales),
+  },
+})
+</script>
+```
+
+---
+
+## 例 6 — コンテンツ詳細ページ向けの完全な head(meta + link)
+
+「ページメタ」と「代替リンク」を別のヘルパーに分割するのに似たパターンを、1 回の呼び出しにまとめます:
+
+```vue
+<script setup lang="ts">
+const article = await loadArticle()
+const alternates = Object.entries(article.locales).map(([locale, href]) => ({
+  rel: 'alternate' as const,
+  hreflang: locale,
+  href: normalizeSeoUrl(href), // strip ?query and #hash if needed
+}))
+
+useI18nHead({
+  meta: [
+    { property: 'og:title', content: article.title },
+    { property: 'og:description', content: article.description },
+    { property: 'og:image', content: article.imageUrl },
+    { name: 'twitter:card', content: 'summary_large_image' },
+    { name: 'twitter:title', content: article.title },
+  ],
+  replace: {
+    canonical: article.canonicalUrl,
+    ogUrl: article.canonicalUrl,
+    hreflang: alternates,
+    ogAlternates: Object.keys(article.locales),
+  },
+})
+</script>
+```
+
+```ts
+/** Remove query and hash — useful when CMS URLs must be clean for SEO */
+function normalizeSeoUrl(href: string): string {
+  try {
+    const url = new URL(href, 'https://placeholder.local')
+    url.search = ''
+    url.hash = ''
+    return href.startsWith('http') ? url.href : `${url.pathname}`
+  } catch {
+    return href.split(/[?#]/)[0] ?? href
+  }
+}
+```
+
+---
+
+## 例 7 — 同じパターンの 2 つのコンテンツタイプ(ニュース vs ガイド)
+
+同じ API のシェイプで、ルート名だけが異なる場合 — 小さなヘルパーを再利用します:
+
+```ts
+// composables/useArticleHead.ts
+import type { I18nHeadInput } from '@i18n-micro/types'
+
+interface LocalizedContent {
+  title: string
+  locales: Record<string, string>
+  canonicalUrl?: string
+}
+
+export function buildArticleHead(content: LocalizedContent): I18nHeadInput {
+  const localeCodes = Object.keys(content.locales)
+  const canonical = content.canonicalUrl ?? content.locales.en
+
+  return {
+    meta: [{ property: 'og:title', content: content.title }],
+    replace: {
+      canonical,
+      ogUrl: canonical,
+      hreflang: localeCodes.map((locale) => ({
+        rel: 'alternate',
+        hreflang: locale,
+        href: content.locales[locale]!,
+      })),
+      ogAlternates: localeCodes,
+    },
+  }
+}
+```
+
+```vue
+<!-- pages/blog/[slug].vue -->
+<script setup lang="ts">
+const article = await loadArticle()
+useI18nHead(buildArticleHead(article))
+</script>
+```
+
+```vue
+<!-- pages/guides/[slug].vue -->
+<script setup lang="ts">
+const guide = await loadGuide()
+useI18nHead(buildArticleHead(guide))
+</script>
+```
+
+---
+
+## 例 8 — 組み込みの代替リンクを無効化して独自リストを渡す
+
+モジュールの hreflang ジェネレータを無効化し、カスタムリストを渡すことと同等です(代替タグが重複しません):
+
+```vue
+<script setup lang="ts">
+const article = await loadArticle()
+
+useI18nHead({
+  disable: ['hreflang', 'x-default', 'og-alternates'],
+  link: Object.entries(article.locales).map(([locale, href]) => ({
+    rel: 'alternate',
+    hreflang: locale,
+    href,
+  })),
+  replace: {
+    ogAlternates: Object.keys(article.locales),
+  },
+})
+</script>
+```
+
+あるいは、`disable` なしで `replace.hreflang` を使うこともできます — 一度のステップで `rel="alternate"` のリンクをすべて置き換えます。
+
+---
+
+## 例 9 — ランディングページ: 追加の OG のみ、i18n タグはすべて維持
+
+```vue
+<script setup lang="ts">
+const { t } = useI18n()
+
+useI18nHead({
+  meta: [
+    { property: 'og:title', content: t('landing.ogTitle') },
+    { property: 'og:description', content: t('landing.ogDescription') },
+  ],
+})
+</script>
+```
+
+---
+
+## 例 10 — 商品ページ: 単一ロケールの実験のために hreflang を無効化
+
+```vue
+<script setup lang="ts">
+useI18nHead({
+  disable: ['hreflang', 'x-default'],
+  // canonical, og:locale, og:url still generated
+})
+</script>
+```
+
+---
+
+## 例 11 — クライアントサイド fetch 後のリアクティブ更新
+
+```vue
+<script setup lang="ts">
+const article = ref<Article | null>(null)
+
+onMounted(async () => {
+  article.value = await $fetch('/api/articles/latest')
+})
+
+useI18nHead(() => {
+  if (!article.value) return null
+  return {
+    meta: [{ property: 'og:title', content: article.value.title }],
+    replace: {
+      hreflang: Object.entries(article.value.locales).map(([locale, href]) => ({
+        rel: 'alternate',
+        hreflang: locale,
+        href,
+      })),
+    },
+  }
+})
+</script>
+```
+
+head は `page:finish` および `pageHead` の状態変更時に更新されます。
+
+---
+
+## 例 12 — リバースプロキシ経由の HTTPS オリジン
+
+canonical / 代替の絶対 URL のために「パブリックオリジン」用のコンポーザブルをこれまで解決していた場合、代わりにモジュール設定を使用してください:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  i18n: {
+    meta: true,
+    // undefined = origin from current request (multi-domain friendly)
+    metaBaseUrl: undefined,
+    metaTrustForwardedHost: true,
+    metaTrustForwardedProto: true,
+  },
+})
+```
+
+そのうえで、`replace.hreflang` / `replace.canonical` には **パスまたは完全な URL** を渡します。モジュールは SSR で `X-Forwarded-Host` / `X-Forwarded-Proto` を伴う `useRequestURL` を使用します。
+
+---
+
+## API リファレンス
+
+### `meta`
+
+追加の `<meta>` タグ。`id`、`property`、または `name` によって重複排除されます。
+
+### `link`
+
+追加の `<link>` タグ。`id`、または `rel` + `hreflang` によって重複排除されます。
+
+### `htmlAttrs`
+
+`useLocaleHead`(`lang`、`dir`)からの `<html>` 属性にマージされます。
+
+### `replace`
+
+| キー           | 型                        | 効果                                                 |
+| -------------- | ------------------------- | ---------------------------------------------------- |
+| `canonical`    | `string \| false`         | canonical リンクを置換または削除                     |
+| `hreflang`     | `I18nHeadLink[] \| false` | すべての `rel="alternate"` リンクを置換または削除    |
+| `xDefault`     | `I18nHeadLink \| false`   | `hreflang="x-default"` を置換または削除              |
+| `ogLocale`     | `string \| false`         | `og:locale` を置換または削除                         |
+| `ogUrl`        | `string \| false`         | `og:url` を置換または削除                            |
+| `ogAlternates` | `string[] \| false`       | ロケールコードに対して `og:locale:alternate` を再生成 |
+
+### `disable`
+
+| 値              | 削除される対象                                       |
+| --------------- | ---------------------------------------------------- |
+| `hreflang`      | ロケール代替リンク(`x-default` は除く)             |
+| `x-default`     | `hreflang="x-default"` リンク                        |
+| `canonical`     | canonical リンク                                     |
+| `og`            | `og:locale` および `og:url`                          |
+| `og-alternates` | `og:locale:alternate` タグ                           |
+| `html`          | `<html>` 上の `lang` / `dir`                         |
+
+---
+
+## `useLocaleHead` と `useI18nHead` の使い分け
+
+| コンポーザブル  | スコープ               | 使うタイミング                                     |
+| --------------- | ---------------------- | -------------------------------------------------- |
+| `useLocaleHead` | グローバル / 手動 head | `meta: false` で、`useHead` を完全に自前で組む場合 |
+| `useI18nHead`   | ページ単位の上書き     | `meta: true` で、特定のページをカスタマイズする場合 |
+
+`meta: true` のとき、`useI18nHead` のみを使うページでは `useLocaleHead` は **不要** です。
+
+---
+
+## カスタム i18n head プラグインからの移行
+
+多くのプロジェクトは、以下のようなカスタムプラグインを維持しています:
+
+- 共有ステートからページ固有の代替リンクをマージする
+- 重複する地域別 `hreflang` エントリをフィルタする
+- `og:locale` の値を正規化する
+- SEO URL からクエリ文字列を取り除く
+
+これらは、各コンテンツページで `useI18nHead` を使い、モジュールのデフォルトを組み合わせることで置き換えられます。
+
+| これまでのアプローチ                                          | `useI18nHead` を使う場合                              |
+| ------------------------------------------------------------- | ----------------------------------------------------- |
+| 共有ステート + 「この記事に存在するロケール」                 | `replace: \{ ogAlternates: localeCodes \}`              |
+| `rel="alternate"` リンクを構築する専用ヘルパー                | `replace: \{ hreflang: links \}`                        |
+| ページステートを head にマージするカスタムプラグイン          | `02.meta` の組み込みマージ                            |
+| 絶対 URL 用のカスタムな「パブリックオリジン」                 | `metaBaseUrl` + 転送ヘッダー(例 12 を参照)          |
+| 短い `og:locale`(`en_US` の代わりに `en`)                    | `locale.og` を設定するか、`iso` → `en_US` を使用(OG プロトコル) |
+
+**`iso` に基づく `hreflang`:** 各ロケールは `hreflang = iso || code` を持つ代替リンクを 1 つ出力します。`iso` が設定されている場合、ルーティング用の `code` は使用されません(`hreflang="mx"` のような無効なタグを回避します)。単なる言語コードのフォールバック(`es-ES` → `es` も追加)を有効にするには `hreflangBaseLanguage: true` を設定します — これは `code` ではなく `iso` から派生します。完全にカスタムなリストが必要な場合は `replace.hreflang` を使用してください。
+
+**JSON-LD:** `useI18nHead` は構造化データを生成しません。JSON-LD は `useHead(\{ script: [...] \})` または専用のヘルパーを併用してください。
+
+---
+
+## 関連項目
+
+- [SEO ガイド](/guides/seo) — メタの自動生成とページレベルの上書き
+- [`useLocaleHead`](/api/composables/use-locale-head) — 低レベルの head API

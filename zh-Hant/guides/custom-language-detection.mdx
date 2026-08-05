@@ -1,0 +1,261 @@
+---
+title: "Nuxt I18n Micro 中的自訂語言偵測"
+description: "使用 useI18nLocale() 自訂語系偵測。"
+---
+
+# 🔧 Nuxt I18n Micro 中的自訂語言偵測
+
+## 📖 概觀
+
+Nuxt I18n Micro v3 為所有語系管理提供了集中式的 composable —— `useI18nLocale()`。這取代了 v2 中的手動 `useState`/`useCookie` 模式。透過在伺服器外掛中使用 `useI18nLocale().setLocale()`,你可以實作任何自訂偵測邏輯,同時完全相容於模組的重新導向與 cookie 系統。
+
+## 🏗️ 架構
+
+```mermaid
+flowchart TB
+    subgraph Plugins["Plugin Execution Order"]
+        A["Your plugin<br/>order: -10"] -->|setLocale()| B["01.plugin.ts<br/>order: -5"]
+        B --> C["06.redirect.ts server<br/>order: 10"]
+    end
+
+    subgraph Client["Client SPA Navigation"]
+        D["i18n-redirect.global.ts<br/>route middleware"]
+    end
+
+    subgraph State["Locale State"]
+        E["useState('i18n-locale')"]
+        F["localeCookie"]
+    end
+
+    A -->|"setLocale() updates both"| E
+    A -->|"setLocale() updates both"| F
+    B -->|reads| E
+    C -->|reads| E
+    C -->|reads| F
+    D -->|reads target route +| E
+```
+
+**關鍵原則**:在 `order: -10` 的伺服器外掛中呼叫 `useI18nLocale().setLocale()`。這會同時原子性地更新 `useState('i18n-locale')` 與語系 cookie,讓 i18n 外掛(`order: -5`)與伺服器重新導向外掛(`order: 10`)在第一次 SSR 請求時就能取得正確的語系。客戶端自動重新導向則在後續導覽時,由全域路由中介層執行。
+
+## 🛠️ 停用內建的自動偵測
+
+若你想完全掌控語系偵測,請停用內建機制:
+
+```ts
+export default defineNuxtConfig({
+  i18n: {
+    autoDetectLanguage: false,
+  },
+})
+```
+
+## ✨ 範例:使用 `useI18nLocale` 的伺服器端偵測
+
+這是所有策略的**建議做法**。
+
+### 步驟 1:設定 `nuxt.config.ts`
+
+```ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    strategy: 'no_prefix', // Works with ANY strategy
+    defaultLocale: 'en',
+    localeCookie: 'user-locale',
+    autoDetectLanguage: false,
+    locales: [
+      { code: 'en', iso: 'en-US' },
+      { code: 'de', iso: 'de-DE' },
+      { code: 'ja', iso: 'ja-JP' },
+    ],
+  },
+})
+```
+
+### 步驟 2:建立 `plugins/i18n-loader.server.ts`
+
+```ts
+import { defineNuxtPlugin, useRequestHeaders } from '#imports'
+
+export default defineNuxtPlugin({
+  name: 'i18n-custom-loader',
+  enforce: 'pre',
+  order: -10, // Execute BEFORE the i18n plugin (which has order -5)
+
+  setup() {
+    const { setLocale } = useI18nLocale()
+    const headers = useRequestHeaders(['host', 'x-country', 'accept-language'])
+    let detectedLocale = 'en'
+
+    // --- YOUR DETECTION LOGIC ---
+
+    // Example 1: By domain
+    const host = headers['host']
+    if (host?.includes('example.de')) {
+      detectedLocale = 'de'
+    }
+    // Example 2: By custom header
+    else if (headers['x-country'] === 'JP') {
+      detectedLocale = 'ja'
+    }
+    // Example 3: By Accept-Language header
+    else if (headers['accept-language']?.includes('de')) {
+      detectedLocale = 'de'
+    }
+
+    // --- APPLY THE LOCALE ---
+    setLocale(detectedLocale)
+  },
+})
+```
+
+### 運作方式
+
+```mermaid
+flowchart TB
+    subgraph Request["1. Server Request"]
+        A[Receive request] --> B[Read headers]
+        B --> C["x-country"]
+        B --> D["accept-language"]
+        B --> E["host"]
+    end
+
+    subgraph Detect["2. Locale Detection"]
+        C --> F{Country match?}
+        E --> G{Domain match?}
+        D --> H{Language match?}
+        F -->|Yes| I[Use detected locale]
+        G -->|Yes| I
+        H -->|Yes| I
+        F & G & H -->|No match| J[Use defaultLocale]
+    end
+
+    subgraph Apply["3. Apply via useI18nLocale"]
+        I --> K["setLocale(locale)"]
+        J --> K
+        K --> L["Updates useState + cookie"]
+        L --> M["i18n plugin reads locale"]
+        M --> N["Server redirect plugin uses locale"]
+        M --> O["Client middleware on next navigation"]
+    end
+```
+
+1. **外掛先執行**(`order: -10`)—— 從標頭、網域或其他來源偵測語系
+2. **`setLocale()` 同時更新** `useState('i18n-locale')` 與 cookie —— 確保後續所有外掛都能立即看到變更
+3. **i18n 外掛**(`order: -5`)讀取語系並載入對應翻譯
+4. **伺服器重新導向外掛**(`order: 10`)在 SSR 時依此語系決定是否重新導向
+5. **客戶端路由中介層**(`i18n-redirect`)在 SPA 導覽時,若 URL 語系不符偏好則套用重新導向
+
+## 🌐 各策略的行為
+
+`useI18nLocale().setLocale()` 適用於**所有策略**。重新導向行為則依策略而異:
+
+<Tip>
+| 策略 | `setLocale('de')` 的效果 |
+|----------|---------------------------|
+| `no_prefix` | 以德文渲染,URL 不變 |
+| `prefix` | 302 → `/de/`(伺服器端重新導向) |
+| `prefix_except_default` | 若 `de` ≠ 預設,302 → `/de/`;若 `de` = 預設,不重新導向 |
+| `prefix_and_default` | 不重新導向(`/` 與 `/de/` 皆有效) |
+</Tip>
+
+**重要說明:**
+
+- 基於 cookie 的語系偵測預設為停用(`localeCookie: null`)
+- 設定 `localeCookie: 'user-locale'` 可啟用 cookie 儲存
+- 若 cookie/state 的值不在 `locales` 清單中,會退回 `defaultLocale`
+
+## 🏢 進階:網域偵測
+
+多網域設定中,每個網域對應不同語系:
+
+```ts
+import { defineNuxtPlugin, useRequestHeaders } from '#imports'
+
+export default defineNuxtPlugin({
+  name: 'i18n-domain-loader',
+  enforce: 'pre',
+  order: -10,
+
+  setup() {
+    const { setLocale } = useI18nLocale()
+    const headers = useRequestHeaders(['host'])
+    const host = headers['host'] || ''
+
+    let detectedLocale = 'en'
+
+    if (host.endsWith('.de') || host.includes('german.')) {
+      detectedLocale = 'de'
+    } else if (host.endsWith('.fr') || host.includes('french.')) {
+      detectedLocale = 'fr'
+    } else if (host.endsWith('.jp') || host.includes('japanese.')) {
+      detectedLocale = 'ja'
+    }
+
+    setLocale(detectedLocale)
+  },
+})
+```
+
+## 🔄 進階:尊重使用者偏好
+
+若使用者可手動切換語言,請以他們的選擇優先於自動偵測:
+
+```ts
+import { defineNuxtPlugin, useRequestHeaders } from '#imports'
+
+export default defineNuxtPlugin({
+  name: 'i18n-smart-loader',
+  enforce: 'pre',
+  order: -10,
+
+  setup() {
+    const { getLocale, setLocale } = useI18nLocale()
+
+    // If user already has a preference (from cookie), respect it
+    if (getLocale()) {
+      return
+    }
+
+    // Otherwise, detect locale from headers
+    const headers = useRequestHeaders(['accept-language'])
+    let detectedLocale = 'en'
+
+    const acceptLanguage = headers['accept-language'] || ''
+    if (acceptLanguage.includes('de')) {
+      detectedLocale = 'de'
+    } else if (acceptLanguage.includes('ja')) {
+      detectedLocale = 'ja'
+    }
+
+    setLocale(detectedLocale)
+  },
+})
+```
+
+## ⚙️ 僅伺服器或僅客戶端外掛
+
+使用 [Nuxt 檔名慣例](https://nuxt.com/docs/getting-started/directory-structure#plugins)控制外掛執行位置:
+
+- **僅伺服器**:`i18n-loader.server.ts` —— 只在 SSR 時執行(建議用於基於標頭的偵測)
+- **僅客戶端**:`i18n-loader.client.ts` —— 只在瀏覽器執行(適用 `localStorage` 或 DOM 偵測)
+
+<Tip>
+
+</Tip>
+
+## ✅ 摘要
+
+| 功能                                   | 說明                                                              |
+| -------------------------------------- | ----------------------------------------------------------------- |
+| `useI18nLocale().setLocale()`          | 原子性地更新 `useState` + cookie;適用所有策略                    |
+| `useI18nLocale().getLocale()`          | 從 state 或 cookie 取得目前語系                                  |
+| `useI18nLocale().getPreferredLocale()` | 取得偏好語系(對照 `locales` 清單驗證)                          |
+| 外掛 `order: -10`                      | 確保你的外掛在 i18n 初始化前執行                                  |
+| `enforce: 'pre'`                       | 於「pre」外掛群組執行                                            |
+
+**請勿:**
+
+- 直接使用 `useCookie('user-locale')` —— `useI18nLocale()` 會在內部管理 cookie
+- 直接使用 `useState('i18n-locale')` —— 應改用 `useI18nLocale().setLocale()`
+- 將 `order` 設為 >= -5 —— 你的外掛必須在 i18n 外掛之前執行

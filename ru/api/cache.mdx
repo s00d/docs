@@ -1,0 +1,248 @@
+---
+title: "Архитектура кэша и хранилища переводов"
+description: "Слои кэша переводов и режимы payload в v3."
+---
+
+# 🗄️ Архитектура кэша и хранилища переводов
+
+## 📖 Обзор
+
+Nuxt I18n Micro v3 использует многоуровневую архитектуру кэширования для переводов. Загрузка payload'ов зависит от `translationPayloads.mode`:
+
+- **`premerged`** (default) — root, page, fallback, and layer files are merged at build time via `@i18n-micro/utils/build` into `\{page\}/\{locale\}/data.json`
+- **`source`** — compact source files are kept for runtime merge via `@i18n-micro/utils/source-loader` and `@i18n-micro/utils/merge-source` (Edge embeds them in Nitro `serverAssets`; Node reads them from `public/` when copied)
+
+Эта страница описывает, как работает встроенный кэш и как расширить его для пользовательских сценариев (админ-инструменты, внешние API, инвалидация кэша).
+
+## 📊 Обзор архитектуры
+
+### Поток данных
+
+```mermaid
+flowchart TB
+    subgraph BuildPremerged["Build Time — mode: premerged (default)"]
+        F1["locales/*.json (root-level)"] -->|Merge layers + fallback| PM["preMergeLocales<br/>(@i18n-micro/utils/build)"]
+        F2["locales/pages/**/*.json"] -->|Merge layers + fallback| PM
+        PM -->|"page/locale/data.json"| OUT1["public/&lt;apiBaseUrl&gt;<br/>+ Edge assets:i18n"]
+    end
+
+    subgraph BuildSource["Build Time — mode: source"]
+        SF1["locales/*.json"] --> SLayers["buildTranslationSourceLayers<br/>(@i18n-micro/utils/build)"]
+        SF2["locales/pages/**/*.json"] --> SLayers
+        SLayers --> OUT2["compact source tree<br/>(Edge embed / optional public)"]
+    end
+
+    subgraph Server["Server Runtime"]
+        OUT1 -->|"#i18n-internal/payload-source"| SL["server-loader.ts<br/>loadTranslationsFromServer()"]
+        OUT2 -->|"#i18n-internal/payload-source + merge"| SL
+        SL -->|SERVER_CC_KEY cache| SC["Server Cache<br/>(process-global Map)"]
+        SC -->|JSON response| API["/_locales/:page/:locale/data.json"]
+    end
+
+    subgraph Client["Client Runtime"]
+        API -->|$fetch| TS["TranslationStorage<br/>(singleton via Symbol.for)"]
+        TS -->|getFromCache / load| NI["NuxtI18n<br/>active view layer"]
+        NI --> PL["01.plugin.ts"]
+    end
+```
+
+## 🧱 Основные компоненты
+
+### 1. `TranslationStorage` (клиент + сервер)
+
+**Файл**: `src/runtime/utils/storage.ts`
+
+Класс-синглтон, предоставляющий унифицированное хранилище переводов для клиента и сервера. Использует `Symbol.for('__NUXT_I18N_STORAGE_CACHE__')` на `globalThis`, чтобы гарантировать существование только одного экземпляра, даже когда загружены несколько бандлов.
+
+**Ключевые методы:**
+
+| Метод                               | Описание                                                                    |
+| ----------------------------------- | --------------------------------------------------------------------------- |
+| `getFromCache(locale, routeName?)`  | Синхронная проверка: возвращает кэшированные in-memory данные или `null`    |
+| `load(locale, routeName?, options)` | Асинхронная загрузка с кэшированием: сначала проверяет кэш, потом делает `$fetch` |
+| `clear()`                           | Очищает весь кэш                                                            |
+
+**Формат ключа кэша**: `\{locale\}:\{routeName\}` (например, `en:index`, `fr:about`)
+
+```typescript
+import { translationStorage } from '../utils/storage'
+
+// Synchronous cache check
+const cached = translationStorage.getFromCache('en', 'index')
+
+// Async load (with automatic caching)
+const result = await translationStorage.load('en', 'index', {
+  apiBaseUrl: '_locales',
+  baseURL: '/',
+  dateBuild: '2024-01-01',
+})
+// result.data — merged translations
+// result.cacheKey — cache key used
+```
+
+### ⚙️ Детерминированное cache-busting (`i18n.dateBuild`)
+
+По умолчанию модуль генерирует `dateBuild` во время сборки, используя `Date.now()`. Затем он встраивается в сгенерированный `#build/i18n.strategy.mjs` и используется как query-параметр (`?v=...`) для инвалидации кэша переводов после пересборок.
+
+Если вам нужны воспроизводимые сборки (например, для повышения hit rate кэша чанков в rolling-развёртываниях), задайте стабильное значение в `nuxt.config`:
+
+```ts
+export default defineNuxtConfig({
+  i18n: {
+    // Any stable string/number (git SHA, CI build number, release tag, etc.)
+    dateBuild: process.env.GIT_SHA ?? 'local-dev',
+  },
+})
+```
+
+### 2. `loadTranslationsFromServer()` (только сервер)
+
+**Файл**: `src/runtime/server/utils/server-loader.ts`
+
+Загружает переводы для локали/страницы и кэширует объединённый результат в process-global карте `CacheControl` с ключом из `@i18n-micro/hmr/cache-keys` (`SERVER_CC_KEY`).
+
+Поведение: SSR загружает из `#i18n-internal/payload-source` — **Node** делает `readFile` в `public/<apiBaseUrl>` (`\{page\}/\{locale\}/data.json` в режиме premerged), **Edge** использует `assets:i18n`. `premerged` читает один файл; `source` объединяет root/page/fallback через `@i18n-micro/utils/source-loader`.
+
+```typescript
+import { loadTranslationsFromServer } from '../server/utils/server-loader'
+
+// Returns { data: Translations, json: string }
+const { data, json } = await loadTranslationsFromServer('en', 'index')
+```
+
+### 3. Клиентская загрузка (без встраивания в HTML)
+
+Словари **не** записываются в `nuxtApp.payload`. Сервер держит их в памяти для SSR-рендеринга;
+клиентский плагин `await`ит `switchContext`, который загружает `/\{apiBaseUrl\}/:page/:locale/data.json`
+(та же поза по умолчанию, что и у `@nuxtjs/i18n` с `experimental.preload: false`).
+
+`NuxtI18n` содержит активный словарь view-слоя, используемый `$t()` и `$has()`. `NuxtTranslationLoader` переключает контекст локали/маршрута и объединяет чанки в этот слой.
+
+### 4. Серверный API-маршрут
+
+**Маршрут**: `/_locales/\{page\}/\{locale\}/data.json`
+
+**Файл**: `src/runtime/server/routes/i18n.ts`
+
+Этот маршрут Nitro обслуживает объединённые переводы для активного режима payload. Он вызывает `loadTranslationsFromServer()` и возвращает результат в виде JSON.
+
+В production также устанавливает:
+
+```http
+Cache-Control: public, max-age={httpCacheDuration}, immutable
+```
+
+По умолчанию `httpCacheDuration` равен `31536000` (1 год). Это безопасно, потому что клиенты запрашивают payload'ы с cache-busting `?v=\{dateBuild\}`. Установите `httpCacheDuration: 0`, чтобы не устанавливать заголовок. Заголовок не применяется в development.
+
+## 📥 Расширение: пользовательская загрузка переводов
+
+### Чтение из кэша (серверный маршрут)
+
+```ts
+// server/api/i18n/load-cache.[post].ts
+import { defineEventHandler, readBody } from 'h3'
+import { loadTranslationsFromServer } from '#imports'
+
+export default defineEventHandler(async (event) => {
+  const { page, locale } = await readBody<{ page: string; locale: string }>(event)
+  const { data } = await loadTranslationsFromServer(locale, page)
+  return { locale, page, data }
+})
+```
+
+### Обновление переводов (файл + инвалидация кэша)
+
+```ts
+// server/api/i18n/update.[post].ts
+import { defineEventHandler, readBody, createError } from 'h3'
+import { join } from 'node:path'
+import { readFile, writeFile } from 'node:fs/promises'
+import { deepMergeTranslations } from '@i18n-micro/utils/deep-merge'
+
+export default defineEventHandler(async (event) => {
+  const { path, updates } = await readBody<{ path: string; updates: Record<string, unknown> }>(event)
+
+  if (!path || !updates) {
+    throw createError({ statusCode: 400, statusMessage: 'Missing path or updates' })
+  }
+
+  const fullPath = join('locales', path)
+  let existing: Record<string, unknown> = {}
+
+  try {
+    const content = await readFile(fullPath, 'utf-8')
+    existing = JSON.parse(content) as Record<string, unknown>
+  } catch {
+    // File does not exist — create new
+  }
+
+  const merged = deepMergeTranslations(existing, updates)
+  await writeFile(fullPath, JSON.stringify(merged, null, 2), 'utf-8')
+
+  return { success: true, path, updated: merged }
+})
+```
+
+<Tip>
+
+</Tip>
+
+## 🧹 Очистка кэша
+
+### Программная очистка кэша (клиент)
+
+Используйте встроенный метод `$clearCache`:
+
+```vue
+<script setup>
+const { $clearCache } = useNuxtApp()
+
+// Clears both TranslationStorage and plugin-level cache
+$clearCache()
+</script>
+```
+
+### Поведение серверного кэша
+
+Серверный кэш (`loadTranslationsFromServer`) является process-global и сохраняется до тех пор, пока:
+
+- Серверный процесс не перезапустится
+- Не будет обнаружено новое развёртывание (другое значение `dateBuild`)
+
+Для serverless-окружений каждый холодный старт имеет свежий кэш.
+
+## ⚙️ Serverless-конфигурация
+
+Для serverless-окружений (Cloudflare Workers, AWS Lambda) встроенный кэш использует in-memory объекты `Map`. Для самого кэша переводов не требуется настройка внешнего хранилища.
+
+Однако хранилище Nitro для исходных файлов переводов может потребовать настройки:
+
+```ts
+export default defineNuxtConfig({
+  nitro: {
+    storage: {
+      // Only needed if default file-system storage is unavailable
+      'assets:server': {
+        driver: 'cloudflare-kv-binding',
+        binding: 'MY_KV_NAMESPACE',
+      },
+    },
+  },
+})
+```
+
+## 💡 Ключевые отличия от v2
+
+| Аспект            | v2                            | v3                                                                        |
+| ----------------- | ----------------------------- | ------------------------------------------------------------------------- |
+| Клиентский кэш    | `useStorage('cache')`         | Синглтон `TranslationStorage` (Symbol.for на globalThis)                  |
+| SSR-передача      | Runtime config                | Полные чанки через `payload.data` (в v3.0 использовался `useState`)       |
+| Серверный кэш     | Хранилище Nitro cache         | Process-global `Map` через `Symbol.for`                                   |
+| Логика слияния    | На клиенте                    | На этапе сборки (`premerged`) или во время выполнения (`source`) через `@i18n-micro/utils/*` |
+| Формат ключа кэша | `i18n:merged:\{page\}:\{locale\}` | `\{locale\}:\{routeName\}`                                                    |
+
+## 📚 См. также
+
+- [Руководство по производительности](/guides/performance) — как кэширование влияет на производительность
+- [Серверные переводы](/guides/server-side-translations) — использование переводов в серверных маршрутах
+- [Развёртывание Firebase](/guides/firebase) — особенности кэша для конкретных развёртываний

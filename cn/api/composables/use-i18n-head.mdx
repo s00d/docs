@@ -1,0 +1,499 @@
+---
+title: "`useI18nHead` composable"
+description: "对 i18n SEO meta 和 link 标签进行页面级覆盖。"
+---
+
+# `useI18nHead` Composable
+
+`useI18nHead` 允许你**按页面**自定义 i18n SEO 标签,无需编写自定义 meta 插件。当 `meta: true` 时,模块会将你的输入合并到 [`useLocaleHead`](/api/composables/use-locale-head) 的输出之上。
+
+典型场景:
+
+- **CMS / 博客文章** —— 只有部分语言有翻译;各语言的备选 URL 不同(slug 或路径不同)。
+- **动态 canonical** —— canonical URL 必须与 API 返回的文章 URL 一致,而非来自 `$switchLocalePath`。
+- **额外的 Open Graph** —— 与自动生成的 `og:locale` / `og:url` 并存的 `og:title`、`og:description`、`og:image`。
+- **部分控制** —— 保留模块生成的 canonical 和 `og:url`,仅替换 `hreflang` 与 `og:locale:alternate`。
+
+---
+
+## 签名
+
+{/* generated:symbol:useI18nHead — do not edit; run `pnpm run docs:generate` */}
+
+```ts
+useI18nHead(input?: MaybeRefOrGetter<I18nHeadInput | null>): { pageHead: any; resetPageHead: () => void }
+```
+
+为 i18n SEO head 标签注册页面级覆盖。
+由 `02.meta` 插件合并到 `useLocaleHead` 输出之上。
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `input` *(可选)* | `MaybeRefOrGetter<I18nHeadInput \| null>` |  |
+
+{/* /generated:symbol:useI18nHead */}
+
+## 它在处理流程中的位置
+
+```mermaid
+flowchart LR
+    A[useLocaleHead] --> B[base tags]
+    C[useI18nHead on page] --> D[page overrides]
+    B --> E[mergeI18nHead]
+    D --> E
+    E --> F[useHead in 02.meta]
+```
+
+你在页面组件中调用 `useI18nHead`。`02.meta` 插件会在每次 `updateMeta()`(路由变化、`$setI18nRouteParams`、客户端的 `page:finish`)之后应用这些覆盖。
+
+---
+
+## 示例 1 —— 仅部分语言有翻译的文章
+
+常见模式:API 会返回存在哪些语言,以及它们的绝对或相对 URL。
+
+```ts
+interface Article {
+  title: string
+  slug: string
+  /** Locale code → page URL (absolute or site-relative) */
+  locales: Record<string, string>
+}
+```
+
+```vue
+<script setup lang="ts">
+const route = useRoute()
+const { data: article } = await useFetch<Article>(`/api/articles/${route.params.slug}`)
+
+const localeCodes = computed(() => Object.keys(article.value?.locales ?? {}))
+
+useI18nHead(() => {
+  if (!article.value) return null
+
+  return {
+    meta: [
+      { property: 'og:title', content: article.value.title },
+      { property: 'og:type', content: 'article' },
+    ],
+    replace: {
+      hreflang: localeCodes.value.map((locale) => ({
+        rel: 'alternate',
+        hreflang: locale,
+        href: article.value!.locales[locale]!,
+      })),
+      ogAlternates: localeCodes.value,
+    },
+  }
+})
+</script>
+```
+
+`ogAlternates` 接受来自你的 `i18n.locales` 配置的**语言 code**。`og:locale:alternate` 的取值会经过 `locale.og` 或 `iso` 解析(Open Graph 的 `en_US` 格式)。
+
+---
+
+## 示例 2 —— 每种语言使用不同 slug 的文章(`$defineI18nRoute` + `$setI18nRouteParams`)
+
+当 URL 来自本地化路由模板和动态参数时:
+
+```vue
+<script setup lang="ts">
+const { $defineI18nRoute, $setI18nRouteParams } = useNuxtApp()
+const route = useRoute()
+
+const { data: article } = await useFetch(`/api/articles/${route.params.slug}`)
+
+$defineI18nRoute({
+  localeRoutes: {
+    en: '/blog/[slug]',
+    de: '/de/blog/[slug]',
+    fr: '/fr/blog/[slug]',
+  },
+})
+
+if (article.value) {
+  $setI18nRouteParams({
+    en: { slug: article.value.slugEn },
+    de: { slug: article.value.slugDe },
+    fr: { slug: article.value.slugFr },
+  })
+
+  const availableLocales = article.value.availableLocales as string[]
+
+  useI18nHead({
+    meta: [{ property: 'og:title', content: article.value.title }],
+    replace: {
+      hreflang: availableLocales.map((locale) => ({
+        rel: 'alternate',
+        hreflang: locale,
+        href: article.value!.urls[locale],
+      })),
+      ogAlternates: availableLocales,
+    },
+  })
+}
+</script>
+```
+
+模块生成的备选链接会列出**所有**已配置的语言。`replace.hreflang` 会将标签限制为实际存在翻译的语言。
+
+---
+
+## 示例 3 —— 为默认语言文章 URL 自定义 `x-default`
+
+默认情况下,`x-default` 指向 `$switchLocalePath` 得到的默认语言 URL。对于文章,可将其指向默认翻译的 URL:
+
+```vue
+<script setup lang="ts">
+const { $defaultLocale } = useNuxtApp()
+const article = await loadArticle()
+
+const defaultLocale = $defaultLocale() ?? 'en'
+const defaultHref = article.locales[defaultLocale]
+
+useI18nHead({
+  replace: {
+    hreflang: Object.entries(article.locales).map(([locale, href]) => ({
+      rel: 'alternate',
+      hreflang: locale,
+      href,
+    })),
+    xDefault: defaultHref ? { rel: 'alternate', hreflang: 'x-default', href: defaultHref } : false,
+    ogAlternates: Object.keys(article.locales),
+  },
+})
+</script>
+```
+
+---
+
+## 示例 4 —— 使用 API 数据替换 canonical 与 `og:url`
+
+当 canonical 必须与 CMS 提供的 URL 一致(多域名、自定义路径或预先构建的绝对 URL)时:
+
+```vue
+<script setup lang="ts">
+const article = await loadArticle()
+const canonical = article.canonicalUrl // e.g. https://www.example.com/en/blog/my-post
+
+useI18nHead({
+  replace: {
+    canonical,
+    ogUrl: canonical,
+    hreflang: buildAlternateLinks(article),
+    ogAlternates: Object.keys(article.locales),
+  },
+  meta: [
+    { property: 'og:title', content: article.title },
+    { name: 'description', content: article.excerpt },
+  ],
+})
+</script>
+```
+
+---
+
+## 示例 5 —— 保留自动生成的 canonical / `og:url`,仅替换备选链接
+
+若 `$switchLocalePath` + `$setI18nRouteParams` 已经生成了正确的 canonical 与 `og:url`,只需替换发现类标签:
+
+```vue
+<script setup lang="ts">
+const article = await loadArticle()
+
+useI18nHead({
+  replace: {
+    hreflang: buildAlternateLinks(article),
+    ogAlternates: Object.keys(article.locales),
+  },
+})
+</script>
+```
+
+---
+
+## 示例 6 —— 内容详情页的完整 head(meta + 链接)
+
+模式类似于将“页面 meta”和“备选链接”拆分为独立辅助函数——在此以一次调用完成:
+
+```vue
+<script setup lang="ts">
+const article = await loadArticle()
+const alternates = Object.entries(article.locales).map(([locale, href]) => ({
+  rel: 'alternate' as const,
+  hreflang: locale,
+  href: normalizeSeoUrl(href), // strip ?query and #hash if needed
+}))
+
+useI18nHead({
+  meta: [
+    { property: 'og:title', content: article.title },
+    { property: 'og:description', content: article.description },
+    { property: 'og:image', content: article.imageUrl },
+    { name: 'twitter:card', content: 'summary_large_image' },
+    { name: 'twitter:title', content: article.title },
+  ],
+  replace: {
+    canonical: article.canonicalUrl,
+    ogUrl: article.canonicalUrl,
+    hreflang: alternates,
+    ogAlternates: Object.keys(article.locales),
+  },
+})
+</script>
+```
+
+```ts
+/** Remove query and hash — useful when CMS URLs must be clean for SEO */
+function normalizeSeoUrl(href: string): string {
+  try {
+    const url = new URL(href, 'https://placeholder.local')
+    url.search = ''
+    url.hash = ''
+    return href.startsWith('http') ? url.href : `${url.pathname}`
+  } catch {
+    return href.split(/[?#]/)[0] ?? href
+  }
+}
+```
+
+---
+
+## 示例 7 —— 两种相同模式的内容类型(news 与 guides)
+
+API 结构相同、路由名不同——可以复用一个小型辅助函数:
+
+```ts
+// composables/useArticleHead.ts
+import type { I18nHeadInput } from '@i18n-micro/types'
+
+interface LocalizedContent {
+  title: string
+  locales: Record<string, string>
+  canonicalUrl?: string
+}
+
+export function buildArticleHead(content: LocalizedContent): I18nHeadInput {
+  const localeCodes = Object.keys(content.locales)
+  const canonical = content.canonicalUrl ?? content.locales.en
+
+  return {
+    meta: [{ property: 'og:title', content: content.title }],
+    replace: {
+      canonical,
+      ogUrl: canonical,
+      hreflang: localeCodes.map((locale) => ({
+        rel: 'alternate',
+        hreflang: locale,
+        href: content.locales[locale]!,
+      })),
+      ogAlternates: localeCodes,
+    },
+  }
+}
+```
+
+```vue
+<!-- pages/blog/[slug].vue -->
+<script setup lang="ts">
+const article = await loadArticle()
+useI18nHead(buildArticleHead(article))
+</script>
+```
+
+```vue
+<!-- pages/guides/[slug].vue -->
+<script setup lang="ts">
+const guide = await loadGuide()
+useI18nHead(buildArticleHead(guide))
+</script>
+```
+
+---
+
+## 示例 8 —— 禁用内置备选链接,提供自定义列表
+
+等价于禁用模块的 hreflang 生成器并传入自定义列表(不会产生重复的备选集合):
+
+```vue
+<script setup lang="ts">
+const article = await loadArticle()
+
+useI18nHead({
+  disable: ['hreflang', 'x-default', 'og-alternates'],
+  link: Object.entries(article.locales).map(([locale, href]) => ({
+    rel: 'alternate',
+    hreflang: locale,
+    href,
+  })),
+  replace: {
+    ogAlternates: Object.keys(article.locales),
+  },
+})
+</script>
+```
+
+或者更简单地,不用 `disable`,直接使用 `replace.hreflang`——它会一次性替换掉所有 `rel="alternate"` 链接。
+
+---
+
+## 示例 9 —— 落地页:仅补充额外 OG,保留所有 i18n 标签
+
+```vue
+<script setup lang="ts">
+const { t } = useI18n()
+
+useI18nHead({
+  meta: [
+    { property: 'og:title', content: t('landing.ogTitle') },
+    { property: 'og:description', content: t('landing.ogDescription') },
+  ],
+})
+</script>
+```
+
+---
+
+## 示例 10 —— 商品页:为某一语言实验禁用 hreflang
+
+```vue
+<script setup lang="ts">
+useI18nHead({
+  disable: ['hreflang', 'x-default'],
+  // canonical, og:locale, og:url still generated
+})
+</script>
+```
+
+---
+
+## 示例 11 —— 客户端拉取数据后响应式更新
+
+```vue
+<script setup lang="ts">
+const article = ref<Article | null>(null)
+
+onMounted(async () => {
+  article.value = await $fetch('/api/articles/latest')
+})
+
+useI18nHead(() => {
+  if (!article.value) return null
+  return {
+    meta: [{ property: 'og:title', content: article.value.title }],
+    replace: {
+      hreflang: Object.entries(article.value.locales).map(([locale, href]) => ({
+        rel: 'alternate',
+        hreflang: locale,
+        href,
+      })),
+    },
+  }
+})
+</script>
+```
+
+head 会在 `page:finish` 以及 `pageHead` 状态变化时刷新。
+
+---
+
+## 示例 12 —— 反向代理后的 HTTPS 来源
+
+如果你此前使用了“公共 origin”类的 composable 来生成绝对形式的 canonical / 备选 URL,现在可改用模块配置:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  i18n: {
+    meta: true,
+    // undefined = origin from current request (multi-domain friendly)
+    metaBaseUrl: undefined,
+    metaTrustForwardedHost: true,
+    metaTrustForwardedProto: true,
+  },
+})
+```
+
+然后在 `replace.hreflang` / `replace.canonical` 中传入**路径或完整 URL**。SSR 时模块会使用 `useRequestURL`,并识别 `X-Forwarded-Host` / `X-Forwarded-Proto`。
+
+---
+
+## API 参考
+
+### `meta`
+
+额外的 `<meta>` 标签。按 `id`、`property` 或 `name` 去重。
+
+### `link`
+
+额外的 `<link>` 标签。按 `id` 或 `rel` + `hreflang` 去重。
+
+### `htmlAttrs`
+
+与 `useLocaleHead` 得到的 `<html>` 属性(`lang`、`dir`)合并。
+
+### `replace`
+
+| 键            | 类型                      | 效果                                         |
+| -------------- | ------------------------- | ---------------------------------------------- |
+| `canonical`    | `string \| false`         | 替换或移除 canonical 链接               |
+| `hreflang`     | `I18nHeadLink[] \| false` | 替换或移除所有 `rel="alternate"` 链接  |
+| `xDefault`     | `I18nHeadLink \| false`   | 替换或移除 `hreflang="x-default"`       |
+| `ogLocale`     | `string \| false`         | 替换或移除 `og:locale`                  |
+| `ogUrl`        | `string \| false`         | 替换或移除 `og:url`                     |
+| `ogAlternates` | `string[] \| false`       | 基于语言 code 重建 `og:locale:alternate` |
+
+### `disable`
+
+| 值           | 移除的内容                                  |
+| --------------- | ---------------------------------------- |
+| `hreflang`      | 各语言的备选链接(不包括 `x-default`) |
+| `x-default`     | `hreflang="x-default"` 链接              |
+| `canonical`     | canonical 链接                           |
+| `og`            | `og:locale` 与 `og:url`                 |
+| `og-alternates` | `og:locale:alternate` 标签               |
+| `html`          | `<html>` 上的 `lang` / `dir`               |
+
+---
+
+## `useLocaleHead` 与 `useI18nHead` 的对比
+
+| Composable      | 作用范围                | 何时使用                                |
+| --------------- | -------------------- | ------------------------------------------ |
+| `useLocaleHead` | 全局 / 手动 head | `meta: false`,完全自定义 `useHead` 配置 |
+| `useI18nHead`   | 页面级覆盖   | `meta: true`,自定义特定页面     |
+
+当 `meta: true` 时,如果页面只使用 `useI18nHead`,则**无需**再使用 `useLocaleHead`。
+
+---
+
+## 从自定义 i18n head 插件迁移
+
+许多项目维护着一个自定义插件,用于:
+
+- 从共享状态合并页面特定的备选链接;
+- 过滤重复的区域 `hreflang` 项;
+- 规范化 `og:locale` 值;
+- 从 SEO URL 中剥离查询字符串。
+
+你可以在每个内容页面上使用 `useI18nHead` 并配合模块的默认行为来替代这些逻辑。
+
+| 以前的做法                                     | 使用 `useI18nHead`                                   |
+| ----------------------------------------------------- | ---------------------------------------------------- |
+| 共享状态 + “此文章存在哪些语言” | `replace: \{ ogAlternates: localeCodes \}`             |
+| 独立的构建 `rel="alternate"` 链接的辅助函数      | `replace: \{ hreflang: links \}`                       |
+| 将页面状态合并到 head 的自定义插件            | `02.meta` 中内置的合并逻辑                          |
+| 用于生成绝对 URL 的自定义“公共 origin”              | `metaBaseUrl` + 转发头(参见示例 12)   |
+| 简短的 `og:locale`(`en` 而非 `en_US`)           | 设置 `locale.og` 或使用 `iso` → `en_US`(遵循 OG 协议) |
+
+**基于 `iso` 的 `hreflang`:** 每种语言会输出一条备选链接,`hreflang = iso || code`。当设置了 `iso` 时,永远不会使用路由用的 `code`(避免出现 `hreflang="mx"` 这样的非法标签)。若要启用短语言回退(`es-ES` → 同时输出 `es`),将 `hreflangBaseLanguage: true`——回退来自 `iso`,而非 `code`。若需要完全自定义列表,请使用 `replace.hreflang`。
+
+**JSON-LD:** `useI18nHead` 不会生成结构化数据。请继续使用 `useHead(\{ script: [...] \})` 或专门的 JSON-LD 辅助函数与之配合。
+
+---
+
+## 另请参见
+
+- [SEO 指南](/guides/seo) —— 自动 meta 生成与页面级覆盖
+- [`useLocaleHead`](/api/composables/use-locale-head) —— 底层 head API

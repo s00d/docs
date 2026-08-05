@@ -1,0 +1,154 @@
+---
+title: "v2.x から v3.x へのアップグレード"
+description: "v2.x から v3.x へアップグレードします。"
+---
+
+# 📦 v2.x から v3.x へのアップグレード
+
+<Tip>
+[nuxt-i18n からの移行](/migration/from-nuxtjs-i18n) を参照してください — そのガイドは vue-i18n エコシステムからの移行を扱っており、nuxt-i18n-micro v2 からの移行ではありません。
+</Tip>
+
+v3.0.0 では、根本的なアーキテクチャの変更が導入されました: 戦略パッケージ、新しいキャッシュシステム、`useI18nLocale()` による一元的なロケール管理、再設計されたリダイレクトパイプラインです。このセクションでは、すべての破壊的変更とコードの更新方法について説明します。
+
+## 移行手順
+
+```mermaid
+flowchart LR
+    A["1. Update deps"] --> B["2. Fix config"] --> C["3. Update plugins"] --> D["4. Test"] --> E["✅ Done"]
+```
+
+## 破壊的変更のまとめ
+
+- **ロケール状態** — 手動の `useState` / `useCookie` → `useI18nLocale()` コンポーザブル
+- **設定アクセス** — `useRuntimeConfig().public.i18nConfig` → `#build/i18n.strategy.mjs` の `getI18nConfig()`
+- **リダイレクトコンポーネント** — `fallbackRedirectComponentPath` オプション → サーバーリダイレクトプラグイン + クライアントルートミドルウェア(自動)
+- **`includeDefaultLocaleRoute`** — サポート(非推奨) → 削除。代わりに `strategy` オプションを使用
+- **`experimental.hmr`** — `experimental` 配下 → ルートレベルオプション
+- **`previousPageFallback`** — 完全に削除(累積マージ戦略が自動的に処理します)
+- **キャッシュ** — `useStorage('cache')` → `TranslationStorage` シングルトン(`globalThis` 上の `Symbol.for`)
+- **SSR 転送** — ランタイム設定 → Nuxt ペイロード(v3 は `useState` を使用。チャンクは現在 `payload.data` に配置。[Performance](/guides/performance#server-side-payload-transfer) を参照)
+- **戦略クラス** — 内部 → 別パッケージ(`@i18n-micro/route-strategy`、`@i18n-micro/path-strategy`)
+
+## 削除: `fallbackRedirectComponentPath`
+
+`fallbackRedirectComponentPath` オプションと `locale-redirect.vue` フォールバックコンポーネントは削除されました。リダイレクトロジックは次によって処理されます:
+
+1. **サーバーミドルウェア**(`i18n.global.ts`) — `event.context.i18n.locale` を設定
+2. **サーバーリダイレクトプラグイン**(`06.redirect.ts`、サーバー専用) — レンダー前に 302 リダイレクト
+3. **クライアントルートミドルウェア**(`i18n-redirect.global.ts`) — ハイドレーション後の SPA リダイレクト
+
+```diff
+ i18n: {
+   strategy: 'prefix_except_default',
+-  fallbackRedirectComponentPath: '~/components/MyRedirect.vue',
+ }
+```
+
+フォールバックコンポーネントにカスタムリダイレクトロジックがあった場合、代わりにサーバープラグインで実装してください:
+
+```ts
+// plugins/i18n-loader.server.ts
+export default defineNuxtPlugin({
+  name: 'i18n-custom-redirect',
+  enforce: 'pre',
+  order: -10,
+  setup() {
+    const { setLocale } = useI18nLocale()
+    // Your custom detection logic
+    setLocale(detectedLocale)
+  },
+})
+```
+
+## 削除: `includeDefaultLocaleRoute`
+
+代わりに `strategy` オプションを使用します:
+
+- `includeDefaultLocaleRoute: true` → `strategy: 'prefix'`
+- `includeDefaultLocaleRoute: false` → `strategy: 'prefix_except_default'`(デフォルト)
+
+```diff
+ i18n: {
+-  includeDefaultLocaleRoute: true,
++  strategy: 'prefix',
+ }
+```
+
+## 設定アクセス: `getI18nConfig()` が `useRuntimeConfig` を置き換え
+
+```diff
+- const config = useRuntimeConfig()
+- const cookieName = config.public.i18nConfig?.localeCookie || 'user-locale'
++ import { getI18nConfig } from '#build/i18n.strategy.mjs'
++ const { localeCookie: configCookie } = getI18nConfig()
++ const cookieName = configCookie ?? 'user-locale'
+```
+
+## ロケール管理: `useI18nLocale()` が手動の状態管理を置き換え
+
+v2 では、`useState('i18n-locale')` や `useCookie('user-locale')` を直接使用していたかもしれません。v3 では、一元化された `useI18nLocale()` コンポーザブルを使用します:
+
+```diff
+- const locale = useState('i18n-locale')
+- const cookie = useCookie('user-locale')
+- locale.value = 'fr'
+- cookie.value = 'fr'
++ const { setLocale } = useI18nLocale()
++ setLocale('fr') // Updates both state and cookie atomically
+```
+
+詳細な例は [カスタム言語検出](/guides/custom-language-detection) を参照してください。
+
+## 実験的オプションの移動 / 削除
+
+`hmr` は `experimental` からルートレベルに移動しました。`previousPageFallback` は完全に削除されました — モジュールは現在、累積ディープマージ戦略(2 レベルの深さ)を使用しており、ページが重なり合うネストされたキーを共有していても、遷移アニメーション中に前ページの翻訳を自動的に保持します。遷移アニメーションが完了すると、`page:transition:finish` フックが旧ページのキーをメモリからクリーンアップします。
+
+```diff
+ i18n: {
+-  experimental: {
+-    hmr: true,
+-    previousPageFallback: true
+-  }
++  hmr: true,
++  // previousPageFallback removed — handled automatically
+ }
+```
+
+## リダイレクトアーキテクチャ(v3)
+
+リダイレクトは 2 つのコンポーネントによって自動的に処理されるようになりました:
+
+1. **サーバーサイド**(`06.redirect.ts`、サーバー専用): SSR 中に実行され、ページレンダリング前に 302 リダイレクトを発行 — 「エラーフラッシュ」がなくなります
+2. **クライアントサイド**(`i18n-redirect.global.ts`): SPA ナビゲーション時のグローバルルートミドルウェア。クエリ文字列とハッシュを保持
+
+リダイレクト用のロケール優先順位:
+
+1. `useState('i18n-locale')` — `useI18nLocale().setLocale()` で設定
+2. クッキー — `localeCookie` が設定されている場合
+3. `Accept-Language` ヘッダー — `autoDetectLanguage: true` の場合
+4. `defaultLocale` — フォールバック
+
+標準的なセットアップではコード変更は不要です。
+
+<Warning>
+`redirects: true` を伴う `prefix` および `prefix_except_default` 戦略では、ページ再読み込みをまたいだロケール永続化を有効化するため `localeCookie: 'user-locale'` を設定してください。設定しないと、リダイレクトは `Accept-Language` または `defaultLocale` のみを使用します。
+</Warning>
+
+## TypeScript: 内部モジュール型(オプション)
+
+`#i18n-internal/plural`、`#i18n-internal/strategy`、`#i18n-internal/config` などの内部 import に関する型エラーが発生する場合、プロジェクトの `package.json` に `imports` セクションを追加してください:
+
+```json
+{
+  "imports": {
+    "#i18n-internal/plural": "nuxt-i18n-micro/internals",
+    "#i18n-internal/strategy": "nuxt-i18n-micro/internals",
+    "#i18n-internal/config": "nuxt-i18n-micro/internals"
+  }
+}
+```
+
+<Tip>
+
+</Tip>
