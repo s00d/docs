@@ -1,0 +1,243 @@
+---
+title: "Arsitektur cache & penyimpanan terjemahan"
+description: "Bagaimana Nuxt I18n Micro menyimpan cache terjemahan di v3: cache multi-lapis, mode payload premerged vs source, output build, dan invalidasi cache."
+---
+
+# 🗄️ Arsitektur cache & penyimpanan terjemahan
+
+## 📖 Ikhtisar
+
+Nuxt I18n Micro v3 menggunakan arsitektur caching multi-lapis untuk terjemahan. Pemuatan payload bergantung pada `translationPayloads.mode`:
+
+- **`premerged`** (default) — file root, halaman, fallback, dan layer digabungkan saat waktu build melalui `@i18n-micro/utils/build` ke dalam `\{page\}/\{locale\}/data.json`
+- **`source`** — file sumber ringkas dipertahankan untuk penggabungan runtime melalui `@i18n-micro/utils/source-loader` dan `@i18n-micro/utils/merge-source` (Edge menyematkannya di Nitro `serverAssets`; Node membacanya dari `public/` saat disalin)
+
+Halaman ini menjelaskan cara kerja cache bawaan dan cara memperluasnya untuk kasus penggunaan kustom (alat admin, API eksternal, invalidasi cache).
+
+## 📊 Ikhtisar arsitektur
+
+### Alur data
+
+```mermaid
+flowchart TB
+    subgraph BuildPremerged["Build Time — mode: premerged (default)"]
+        F1["locales/*.json (root-level)"] -->|Merge layers + fallback| PM["preMergeLocales<br/>(@i18n-micro/utils/build)"]
+        F2["locales/pages/**/*.json"] -->|Merge layers + fallback| PM
+        PM -->|"page/locale/data.json"| OUT1["public/&lt;apiBaseUrl&gt;<br/>+ Edge assets:i18n"]
+    end
+
+    subgraph BuildSource["Build Time — mode: source"]
+        SF1["locales/*.json"] --> SLayers["buildTranslationSourceLayers<br/>(@i18n-micro/utils/build)"]
+        SF2["locales/pages/**/*.json"] --> SLayers
+        SLayers --> OUT2["compact source tree<br/>(Edge embed / optional public)"]
+    end
+
+    subgraph Server["Server Runtime"]
+        OUT1 -->|"#i18n-internal/payload-source"| SL["server-loader.ts<br/>loadTranslationsFromServer()"]
+        OUT2 -->|"#i18n-internal/payload-source + merge"| SL
+        SL -->|SERVER_CC_KEY cache| SC["Server Cache<br/>(process-global Map)"]
+        SC -->|JSON response| API["/_locales/:page/:locale/data.json"]
+    end
+
+    subgraph Client["Client Runtime"]
+        API -->|$fetch| TS["TranslationStorage<br/>(singleton via Symbol.for)"]
+        TS -->|getFromCache / load| NI["NuxtI18n<br/>active view layer"]
+        NI --> PL["01.plugin.ts"]
+    end
+```
+
+## 🧱 Komponen inti
+
+### 1. `TranslationStorage` (klien + server)
+
+**File**: `src/runtime/utils/storage.ts`
+
+Kelas singleton yang menyediakan penyimpanan terjemahan terpadu untuk klien dan server. Menggunakan `Symbol.for('__NUXT_I18N_STORAGE_CACHE__')` pada `globalThis` untuk memastikan hanya ada satu instance, bahkan saat beberapa bundle dimuat.
+
+**Metode utama:**
+
+| Metode                              | Deskripsi                                                              |
+| ----------------------------------- | ---------------------------------------------------------------------- |
+| `getFromCache(locale, routeName?)`  | Pemeriksaan sinkron: mengembalikan data dalam memori yang tersimpan, atau `null` |
+| `load(locale, routeName?, options)` | Pemuatan async dengan caching: memeriksa cache terlebih dahulu, lalu mengambil melalui `$fetch` |
+| `clear()`                           | Menghapus seluruh cache                                                |
+
+**Format kunci cache**: `\{locale\}:\{routeName\}` (misalnya, `en:index`, `fr:about`)
+
+```typescript
+import { translationStorage } from '../utils/storage'
+
+// Synchronous cache check
+const cached = translationStorage.getFromCache('en', 'index')
+
+// Async load (with automatic caching)
+const result = await translationStorage.load('en', 'index', {
+  apiBaseUrl: '_locales',
+  baseURL: '/',
+  dateBuild: '2024-01-01',
+})
+// result.data — merged translations
+// result.cacheKey — cache key used
+```
+
+### ⚙️ Pembatalan cache deterministik (`i18n.dateBuild`)
+
+Secara default, modul ini menghasilkan `dateBuild` saat waktu build menggunakan `Date.now()`. Nilai tersebut kemudian disematkan ke `#build/i18n.strategy.mjs` yang dihasilkan dan digunakan sebagai parameter kueri (`?v=...`) untuk membatalkan cache fetch terjemahan setelah build ulang.
+
+Jika Anda memerlukan build yang dapat direproduksi (misalnya, untuk meningkatkan tingkat cache hit chunk pada penerapan rolling), atur nilai yang stabil di `nuxt.config`:
+
+```ts
+export default defineNuxtConfig({
+  i18n: {
+    // Any stable string/number (git SHA, CI build number, release tag, etc.)
+    dateBuild: process.env.GIT_SHA ?? 'local-dev',
+  },
+})
+```
+
+### 2. `loadTranslationsFromServer()` (khusus server)
+
+**File**: `src/runtime/server/utils/server-loader.ts`
+
+Memuat terjemahan untuk lokal/halaman dan menyimpan hasil gabungan di peta `CacheControl` proses-global dengan kunci dari `@i18n-micro/hmr/cache-keys` (`SERVER_CC_KEY`).
+
+Perilaku: SSR memuat dari `#i18n-internal/payload-source` — **Node** `readFile` di bawah `public/<apiBaseUrl>` (`\{page\}/\{locale\}/data.json` di mode premerged), **Edge** `assets:i18n`. `premerged` membaca satu file; `source` menggabungkan root/halaman/fallback melalui `@i18n-micro/utils/source-loader`.
+
+```typescript
+import { loadTranslationsFromServer } from '../server/utils/server-loader'
+
+// Returns { data: Translations, json: string }
+const { data, json } = await loadTranslationsFromServer('en', 'index')
+```
+
+### 3. Pemuatan klien (tanpa penyematan HTML)
+
+Kamus **tidak** ditulis ke `nuxtApp.payload`. Server menyimpannya di memori untuk render SSR; plugin klien `await` `switchContext`, yang memuat `/\{apiBaseUrl\}/:page/:locale/data.json` (postur default yang sama dengan `@nuxtjs/i18n` dengan `experimental.preload: false`).
+
+`NuxtI18n` menyimpan kamus lapisan tampilan aktif yang digunakan oleh `$t()` dan `$has()`. `NuxtTranslationLoader` beralih konteks lokal/rute dan menggabungkan chunk ke lapisan tersebut.
+
+### 4. Rute API server
+
+**Rute**: `/_locales/\{page\}/\{locale\}/data.json`
+
+**File**: `src/runtime/server/routes/i18n.ts`
+
+Rute Nitro ini menyajikan terjemahan gabungan untuk mode payload aktif. Ini memanggil `loadTranslationsFromServer()` dan mengembalikan hasilnya sebagai JSON.
+
+Di produksi ini juga mengatur:
+
+```http
+Cache-Control: public, max-age={httpCacheDuration}, immutable
+```
+
+`httpCacheDuration` default adalah `31536000` (1 tahun). Ini aman karena klien meminta payload dengan cache-busting `?v=\{dateBuild\}`. Atur `httpCacheDuration: 0` untuk menghilangkan header. Header tidak diterapkan dalam pengembangan.
+
+## 📥 Perluasan: pemuatan terjemahan kustom
+
+### Membaca dari cache (rute server)
+
+```ts
+// server/api/i18n/load-cache.[post].ts
+import { defineEventHandler, readBody } from 'h3'
+import { loadTranslationsFromServer } from '#imports'
+
+export default defineEventHandler(async (event) => {
+  const { page, locale } = await readBody<{ page: string; locale: string }>(event)
+  const { data } = await loadTranslationsFromServer(locale, page)
+  return { locale, page, data }
+})
+```
+
+### Memperbarui terjemahan (file + invalidasi cache)
+
+```ts
+// server/api/i18n/update.[post].ts
+import { defineEventHandler, readBody, createError } from 'h3'
+import { join } from 'node:path'
+import { readFile, writeFile } from 'node:fs/promises'
+import { deepMergeTranslations } from '@i18n-micro/utils/deep-merge'
+
+export default defineEventHandler(async (event) => {
+  const { path, updates } = await readBody<{ path: string; updates: Record<string, unknown> }>(event)
+
+  if (!path || !updates) {
+    throw createError({ statusCode: 400, statusMessage: 'Missing path or updates' })
+  }
+
+  const fullPath = join('locales', path)
+  let existing: Record<string, unknown> = {}
+
+  try {
+    const content = await readFile(fullPath, 'utf-8')
+    existing = JSON.parse(content) as Record<string, unknown>
+  } catch {
+    // File does not exist — create new
+  }
+
+  const merged = deepMergeTranslations(existing, updates)
+  await writeFile(fullPath, JSON.stringify(merged, null, 2), 'utf-8')
+
+  return { success: true, path, updated: merged }
+})
+```
+
+
+## 🧹 Menghapus cache
+
+### Penghapusan cache programatis (klien)
+
+Gunakan metode bawaan `$clearCache`:
+
+```vue
+<script setup>
+const { $clearCache } = useNuxtApp()
+
+// Clears both TranslationStorage and plugin-level cache
+$clearCache()
+</script>
+```
+
+### Perilaku cache server
+
+Cache sisi server (`loadTranslationsFromServer`) bersifat proses-global dan bertahan sampai:
+
+- Proses server dimulai ulang
+- Penerapan baru terdeteksi (nilai `dateBuild` berbeda)
+
+Untuk lingkungan serverless, setiap cold start memiliki cache baru.
+
+## ⚙️ Konfigurasi serverless
+
+Untuk lingkungan serverless (Cloudflare Workers, AWS Lambda), cache bawaan menggunakan objek `Map` dalam memori. Tidak diperlukan konfigurasi penyimpanan eksternal untuk cache terjemahan itu sendiri.
+
+Namun, penyimpanan Nitro untuk file terjemahan sumber mungkin memerlukan konfigurasi:
+
+```ts
+export default defineNuxtConfig({
+  nitro: {
+    storage: {
+      // Only needed if default file-system storage is unavailable
+      'assets:server': {
+        driver: 'cloudflare-kv-binding',
+        binding: 'MY_KV_NAMESPACE',
+      },
+    },
+  },
+})
+```
+
+## 💡 Perbedaan utama dari v2
+
+| Aspek            | v2                            | v3                                                                       |
+| ---------------- | ----------------------------- | ------------------------------------------------------------------------ |
+| Cache klien      | `useStorage('cache')`         | `TranslationStorage` singleton (Symbol.for pada globalThis)              |
+| Transfer SSR     | Konfigurasi runtime           | Chunk penuh melalui `payload.data` (v3.0 menggunakan `useState`)         |
+| Cache server     | Penyimpanan cache Nitro       | `Map` proses-global melalui `Symbol.for`                                 |
+| Logika merge     | Sisi klien                    | Waktu build (`premerged`) atau runtime (`source`) via `@i18n-micro/utils/*` |
+| Format kunci cache | `i18n:merged:\{page\}:\{locale\}` | `\{locale\}:\{routeName\}`                                                   |
+
+## 📚 Terkait
+
+- [Panduan kinerja](/guides/performance) — Bagaimana caching memengaruhi kinerja
+- [Terjemahan sisi server](/guides/server-side-translations) — Menggunakan terjemahan di rute server
+- [Penerapan Firebase](/guides/firebase) — Pertimbangan cache khusus penerapan

@@ -1,0 +1,150 @@
+---
+title: "Guia de atualização: v2.x para v3.x"
+description: "Atualize o Nuxt I18n Micro da v2.x para a v3.x: alterações incompatíveis, novos modos de payload, composables atualizados e atualizações de configuração necessárias."
+---
+
+# 📦 Atualizar da v2.x para a v3.x
+
+<Tip>
+Consulte [Migração a partir do nuxt-i18n](/migration/from-nuxtjs-i18n). Esse guia cobre a mudança a partir do ecossistema vue-i18n, e não a partir da v2 do nuxt-i18n-micro.
+</Tip>
+
+A v3.0.0 introduz alterações arquiteturais fundamentais: pacotes de estratégia, um novo sistema de cache, gestão centralizada de locale via `useI18nLocale()` e um pipeline de redirecionamento redesenhado. Esta secção cobre todas as alterações incompatíveis e como atualizar o seu código.
+
+## Passos de migração
+
+```mermaid
+flowchart LR
+    A["1. Update deps"] --> B["2. Fix config"] --> C["3. Update plugins"] --> D["4. Test"] --> E["✅ Done"]
+```
+
+## Resumo das alterações incompatíveis
+
+- **Estado de locale** — `useState` / `useCookie` manualmente → composable `useI18nLocale()`
+- **Acesso à configuração** — `useRuntimeConfig().public.i18nConfig` → `getI18nConfig()` de `#build/i18n.strategy.mjs`
+- **Componente de redirecionamento** — opção `fallbackRedirectComponentPath` → plugin de redirecionamento no servidor + middleware de rota no cliente (automático)
+- **`includeDefaultLocaleRoute`** — suportado (depreciado) → removido, utilize a opção `strategy`
+- **`experimental.hmr`** — dentro de `experimental` → opção ao nível da raiz
+- **`previousPageFallback`** — removido por completo (a estratégia cumulativa de merge trata disto automaticamente)
+- **Cache** — `useStorage('cache')` → singleton `TranslationStorage` (`Symbol.for` em `globalThis`)
+- **Transferência SSR** — configuração de runtime → payload do Nuxt (a v3 usava `useState`; os chunks vivem agora em `payload.data`, ver [Desempenho](/guides/performance#server-side-payload-transfer))
+- **Classes de estratégia** — internas → pacotes separados (`@i18n-micro/route-strategy`, `@i18n-micro/path-strategy`)
+
+## Removido: `fallbackRedirectComponentPath`
+
+A opção `fallbackRedirectComponentPath` e o componente de fallback `locale-redirect.vue` foram removidos. A lógica de redirecionamento é agora tratada por:
+
+1. **Middleware de servidor** (`i18n.global.ts`) — define `event.context.i18n.locale`
+2. **Plugin de redirecionamento do servidor** (`06.redirect.ts`, apenas servidor) — redirecionamentos 302 antes da renderização
+3. **Middleware de rota no cliente** (`i18n-redirect.global.ts`) — redirecionamentos SPA após a hidratação
+
+```diff
+ i18n: {
+   strategy: 'prefix_except_default',
+-  fallbackRedirectComponentPath: '~/components/MyRedirect.vue',
+ }
+```
+
+Se tinha lógica personalizada de redirecionamento no componente de fallback, implemente-a antes num plugin de servidor:
+
+```ts
+// plugins/i18n-loader.server.ts
+export default defineNuxtPlugin({
+  name: 'i18n-custom-redirect',
+  enforce: 'pre',
+  order: -10,
+  setup() {
+    const { setLocale } = useI18nLocale()
+    // Your custom detection logic
+    setLocale(detectedLocale)
+  },
+})
+```
+
+## Removido: `includeDefaultLocaleRoute`
+
+Utilize a opção `strategy`:
+
+- `includeDefaultLocaleRoute: true` → `strategy: 'prefix'`
+- `includeDefaultLocaleRoute: false` → `strategy: 'prefix_except_default'` (o predefinido)
+
+```diff
+ i18n: {
+-  includeDefaultLocaleRoute: true,
++  strategy: 'prefix',
+ }
+```
+
+## Acesso à configuração: `getI18nConfig()` substitui `useRuntimeConfig`
+
+```diff
+- const config = useRuntimeConfig()
+- const cookieName = config.public.i18nConfig?.localeCookie || 'user-locale'
++ import { getI18nConfig } from '#build/i18n.strategy.mjs'
++ const { localeCookie: configCookie } = getI18nConfig()
++ const cookieName = configCookie ?? 'user-locale'
+```
+
+## Gestão de locale: `useI18nLocale()` substitui estado manual
+
+Na v2, poderia ter usado diretamente `useState('i18n-locale')` ou `useCookie('user-locale')`. Na v3, utilize o composable centralizado `useI18nLocale()`:
+
+```diff
+- const locale = useState('i18n-locale')
+- const cookie = useCookie('user-locale')
+- locale.value = 'fr'
+- cookie.value = 'fr'
++ const { setLocale } = useI18nLocale()
++ setLocale('fr') // Updates both state and cookie atomically
+```
+
+Consulte [Deteção de idioma personalizada](/guides/custom-language-detection) para exemplos detalhados.
+
+## Opções experimentais movidas / removidas
+
+`hmr` foi movida de `experimental` para o nível raiz. `previousPageFallback` foi removida por completo. O módulo usa agora uma estratégia de deep merge cumulativo (profundidade de 2 níveis) que preserva automaticamente as traduções da página anterior durante as animações de transição, mesmo quando as páginas partilham chaves aninhadas sobrepostas. Após a animação de transição terminar, o hook `page:transition:finish` limpa as chaves da página anterior da memória.
+
+```diff
+ i18n: {
+-  experimental: {
+-    hmr: true,
+-    previousPageFallback: true
+-  }
++  hmr: true,
++  // previousPageFallback removed — handled automatically
+ }
+```
+
+## Arquitetura de redirecionamento (v3)
+
+Os redirecionamentos são agora tratados automaticamente por dois componentes:
+
+1. **No servidor** (`06.redirect.ts`, apenas servidor): corre durante o SSR, emite redirecionamentos 302 antes de qualquer renderização de página. Sem "error flash"
+2. **No cliente** (`i18n-redirect.global.ts`): middleware global de rota em navegação SPA; preserva query string e hash
+
+Prioridade de locale para redirecionamentos:
+
+1. `useState('i18n-locale')` — definido via `useI18nLocale().setLocale()`
+2. Cookie — se `localeCookie` estiver configurado
+3. Cabeçalho `Accept-Language` — se `autoDetectLanguage: true`
+4. `defaultLocale` — fallback
+
+Não são necessárias alterações de código para configurações padrão.
+
+<Warning>
+Para as estratégias `prefix` e `prefix_except_default` com `redirects: true`, defina `localeCookie: 'user-locale'` para ativar a persistência de locale entre recargas de página. Sem isto, os redirecionamentos usam apenas `Accept-Language` ou `defaultLocale`.
+</Warning>
+
+## TypeScript: tipos de módulo internos (opcional)
+
+Se encontrar erros de tipo relacionados com imports internos como `#i18n-internal/plural`, `#i18n-internal/strategy` ou `#i18n-internal/config`, adicione a secção `imports` ao `package.json` do seu projeto:
+
+```json
+{
+  "imports": {
+    "#i18n-internal/plural": "nuxt-i18n-micro/internals",
+    "#i18n-internal/strategy": "nuxt-i18n-micro/internals",
+    "#i18n-internal/config": "nuxt-i18n-micro/internals"
+  }
+}
+```

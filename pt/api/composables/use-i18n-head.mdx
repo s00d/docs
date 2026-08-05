@@ -1,0 +1,499 @@
+---
+title: "Composable `useI18nHead`"
+description: "O composable useI18nHead aplica substituições por página para meta tags de SEO i18n, URLs canónicos, ligações hreflang e tags Open Graph em aplicações Nuxt."
+---
+
+# Composable `useI18nHead`
+
+`useI18nHead` permite personalizar as tags SEO i18n **por página** sem um plugin de meta personalizado. Quando `meta: true`, o módulo funde a sua entrada por cima da saída de [`useLocaleHead`](/api/composables/use-locale-head).
+
+Casos típicos:
+
+- **Artigos de CMS/blog** — apenas alguns locales estão traduzidos; os URLs alternativos diferem por idioma (slugs ou caminhos distintos).
+- **Canonical dinâmico** — o URL canónico deve corresponder ao URL do artigo devolvido pela API, não a `$switchLocalePath`.
+- **Open Graph extra** — `og:title`, `og:description`, `og:image` a par das tags `og:locale` / `og:url` geradas automaticamente.
+- **Controlo parcial** — mantenha o canonical e o `og:url` gerados pelo módulo, mas substitua apenas `hreflang` e `og:locale:alternate`.
+
+---
+
+## Assinatura
+
+{/* generated:symbol:useI18nHead — do not edit; run `pnpm run docs:generate` */}
+
+```ts
+useI18nHead(input?: MaybeRefOrGetter<I18nHeadInput | null>): { pageHead: any; resetPageHead: () => void }
+```
+
+Regista substituições ao nível da página para as tags de head SEO i18n.
+Fundidas por cima da saída de `useLocaleHead` pelo plugin `02.meta`.
+
+| Parâmetro | Tipo | Descrição |
+| --- | --- | --- |
+| `input` *(opcional)* | `MaybeRefOrGetter<I18nHeadInput \| null>` |  |
+
+{/* /generated:symbol:useI18nHead */}
+
+## Como se enquadra no pipeline
+
+```mermaid
+flowchart LR
+    A[useLocaleHead] --> B[base tags]
+    C[useI18nHead on page] --> D[page overrides]
+    B --> E[mergeI18nHead]
+    D --> E
+    E --> F[useHead in 02.meta]
+```
+
+Chama `useI18nHead` num componente de página. O plugin `02.meta` aplica as substituições após cada `updateMeta()` (mudança de rota, `$setI18nRouteParams`, `page:finish` no cliente).
+
+---
+
+## Exemplo 1 — Artigo com traduções apenas em alguns locales
+
+Um padrão comum: a API devolve os locales que existem e os respetivos URLs absolutos ou relativos.
+
+```ts
+interface Article {
+  title: string
+  slug: string
+  /** Locale code → page URL (absolute or site-relative) */
+  locales: Record<string, string>
+}
+```
+
+```vue
+<script setup lang="ts">
+const route = useRoute()
+const { data: article } = await useFetch<Article>(`/api/articles/${route.params.slug}`)
+
+const localeCodes = computed(() => Object.keys(article.value?.locales ?? {}))
+
+useI18nHead(() => {
+  if (!article.value) return null
+
+  return {
+    meta: [
+      { property: 'og:title', content: article.value.title },
+      { property: 'og:type', content: 'article' },
+    ],
+    replace: {
+      hreflang: localeCodes.value.map((locale) => ({
+        rel: 'alternate',
+        hreflang: locale,
+        href: article.value!.locales[locale]!,
+      })),
+      ogAlternates: localeCodes.value,
+    },
+  }
+})
+</script>
+```
+
+`ogAlternates` recebe **códigos de locale** da sua configuração `i18n.locales`. Os valores de `og:locale:alternate` são resolvidos via `locale.og` ou `iso` (formato Open Graph `en_US`).
+
+---
+
+## Exemplo 2 — Artigo com slugs por locale (`$defineI18nRoute` + `$setI18nRouteParams`)
+
+Quando os URLs são construídos a partir de templates de rota localizados e parâmetros dinâmicos:
+
+```vue
+<script setup lang="ts">
+const { $defineI18nRoute, $setI18nRouteParams } = useNuxtApp()
+const route = useRoute()
+
+const { data: article } = await useFetch(`/api/articles/${route.params.slug}`)
+
+$defineI18nRoute({
+  localeRoutes: {
+    en: '/blog/[slug]',
+    de: '/de/blog/[slug]',
+    fr: '/fr/blog/[slug]',
+  },
+})
+
+if (article.value) {
+  $setI18nRouteParams({
+    en: { slug: article.value.slugEn },
+    de: { slug: article.value.slugDe },
+    fr: { slug: article.value.slugFr },
+  })
+
+  const availableLocales = article.value.availableLocales as string[]
+
+  useI18nHead({
+    meta: [{ property: 'og:title', content: article.value.title }],
+    replace: {
+      hreflang: availableLocales.map((locale) => ({
+        rel: 'alternate',
+        hreflang: locale,
+        href: article.value!.urls[locale],
+      })),
+      ogAlternates: availableLocales,
+    },
+  })
+}
+</script>
+```
+
+Os alternates gerados pelo módulo listariam **todos** os locales configurados. `replace.hreflang` limita as tags aos locales que realmente têm uma tradução.
+
+---
+
+## Exemplo 3 — `x-default` personalizado para o URL do artigo no locale predefinido
+
+Por predefinição, `x-default` aponta para o URL do locale predefinido gerado por `$switchLocalePath`. Para artigos, aponte-o para o URL da tradução predefinida:
+
+```vue
+<script setup lang="ts">
+const { $defaultLocale } = useNuxtApp()
+const article = await loadArticle()
+
+const defaultLocale = $defaultLocale() ?? 'en'
+const defaultHref = article.locales[defaultLocale]
+
+useI18nHead({
+  replace: {
+    hreflang: Object.entries(article.locales).map(([locale, href]) => ({
+      rel: 'alternate',
+      hreflang: locale,
+      href,
+    })),
+    xDefault: defaultHref ? { rel: 'alternate', hreflang: 'x-default', href: defaultHref } : false,
+    ogAlternates: Object.keys(article.locales),
+  },
+})
+</script>
+```
+
+---
+
+## Exemplo 4 — Substituir canonical e `og:url` com dados da API
+
+Quando o canonical deve corresponder a um URL fornecido pelo CMS (multidomínio, caminho personalizado ou URL absoluto pré-construído):
+
+```vue
+<script setup lang="ts">
+const article = await loadArticle()
+const canonical = article.canonicalUrl // e.g. https://www.example.com/en/blog/my-post
+
+useI18nHead({
+  replace: {
+    canonical,
+    ogUrl: canonical,
+    hreflang: buildAlternateLinks(article),
+    ogAlternates: Object.keys(article.locales),
+  },
+  meta: [
+    { property: 'og:title', content: article.title },
+    { name: 'description', content: article.excerpt },
+  ],
+})
+</script>
+```
+
+---
+
+## Exemplo 5 — Manter canonical/`og:url` automáticos, substituir apenas os alternates
+
+Se `$switchLocalePath` + `$setI18nRouteParams` já produzirem o canonical e o `og:url` corretos, substitua apenas as tags de descoberta:
+
+```vue
+<script setup lang="ts">
+const article = await loadArticle()
+
+useI18nHead({
+  replace: {
+    hreflang: buildAlternateLinks(article),
+    ogAlternates: Object.keys(article.locales),
+  },
+})
+</script>
+```
+
+---
+
+## Exemplo 6 — Head completo para uma página de detalhe de conteúdo (meta + links)
+
+Padrão semelhante à divisão de "meta de página" e "ligações alternativas" em helpers separados, aqui combinados numa única chamada:
+
+```vue
+<script setup lang="ts">
+const article = await loadArticle()
+const alternates = Object.entries(article.locales).map(([locale, href]) => ({
+  rel: 'alternate' as const,
+  hreflang: locale,
+  href: normalizeSeoUrl(href), // strip ?query and #hash if needed
+}))
+
+useI18nHead({
+  meta: [
+    { property: 'og:title', content: article.title },
+    { property: 'og:description', content: article.description },
+    { property: 'og:image', content: article.imageUrl },
+    { name: 'twitter:card', content: 'summary_large_image' },
+    { name: 'twitter:title', content: article.title },
+  ],
+  replace: {
+    canonical: article.canonicalUrl,
+    ogUrl: article.canonicalUrl,
+    hreflang: alternates,
+    ogAlternates: Object.keys(article.locales),
+  },
+})
+</script>
+```
+
+```ts
+/** Remove query and hash — useful when CMS URLs must be clean for SEO */
+function normalizeSeoUrl(href: string): string {
+  try {
+    const url = new URL(href, 'https://placeholder.local')
+    url.search = ''
+    url.hash = ''
+    return href.startsWith('http') ? url.href : `${url.pathname}`
+  } catch {
+    return href.split(/[?#]/)[0] ?? href
+  }
+}
+```
+
+---
+
+## Exemplo 7 — Dois tipos de conteúdo, mesmo padrão (notícias vs guias)
+
+A mesma forma de API, mas nomes de rota diferentes: reutilize um pequeno helper:
+
+```ts
+// composables/useArticleHead.ts
+import type { I18nHeadInput } from '@i18n-micro/types'
+
+interface LocalizedContent {
+  title: string
+  locales: Record<string, string>
+  canonicalUrl?: string
+}
+
+export function buildArticleHead(content: LocalizedContent): I18nHeadInput {
+  const localeCodes = Object.keys(content.locales)
+  const canonical = content.canonicalUrl ?? content.locales.en
+
+  return {
+    meta: [{ property: 'og:title', content: content.title }],
+    replace: {
+      canonical,
+      ogUrl: canonical,
+      hreflang: localeCodes.map((locale) => ({
+        rel: 'alternate',
+        hreflang: locale,
+        href: content.locales[locale]!,
+      })),
+      ogAlternates: localeCodes,
+    },
+  }
+}
+```
+
+```vue
+<!-- pages/blog/[slug].vue -->
+<script setup lang="ts">
+const article = await loadArticle()
+useI18nHead(buildArticleHead(article))
+</script>
+```
+
+```vue
+<!-- pages/guides/[slug].vue -->
+<script setup lang="ts">
+const guide = await loadGuide()
+useI18nHead(buildArticleHead(guide))
+</script>
+```
+
+---
+
+## Exemplo 8 — Desativar os alternates incorporados e fornecer a sua lista
+
+Equivalente a desativar o gerador de hreflang do módulo e passar uma lista personalizada (sem conjuntos duplicados de alternates):
+
+```vue
+<script setup lang="ts">
+const article = await loadArticle()
+
+useI18nHead({
+  disable: ['hreflang', 'x-default', 'og-alternates'],
+  link: Object.entries(article.locales).map(([locale, href]) => ({
+    rel: 'alternate',
+    hreflang: locale,
+    href,
+  })),
+  replace: {
+    ogAlternates: Object.keys(article.locales),
+  },
+})
+</script>
+```
+
+Em alternativa, prefira `replace.hreflang` sem `disable` — substitui todas as ligações `rel="alternate"` num só passo.
+
+---
+
+## Exemplo 9 — Página de destino: apenas OG extra, mantendo todas as tags i18n
+
+```vue
+<script setup lang="ts">
+const { t } = useI18n()
+
+useI18nHead({
+  meta: [
+    { property: 'og:title', content: t('landing.ogTitle') },
+    { property: 'og:description', content: t('landing.ogDescription') },
+  ],
+})
+</script>
+```
+
+---
+
+## Exemplo 10 — Página de produto: desativar hreflang numa experiência de locale único
+
+```vue
+<script setup lang="ts">
+useI18nHead({
+  disable: ['hreflang', 'x-default'],
+  // canonical, og:locale, og:url still generated
+})
+</script>
+```
+
+---
+
+## Exemplo 11 — Atualizações reativas após fetch no cliente
+
+```vue
+<script setup lang="ts">
+const article = ref<Article | null>(null)
+
+onMounted(async () => {
+  article.value = await $fetch('/api/articles/latest')
+})
+
+useI18nHead(() => {
+  if (!article.value) return null
+  return {
+    meta: [{ property: 'og:title', content: article.value.title }],
+    replace: {
+      hreflang: Object.entries(article.value.locales).map(([locale, href]) => ({
+        rel: 'alternate',
+        hreflang: locale,
+        href,
+      })),
+    },
+  }
+})
+</script>
+```
+
+O head atualiza-se em `page:finish` e quando o estado de `pageHead` muda.
+
+---
+
+## Exemplo 12 — Origem HTTPS por trás de um proxy reverso
+
+Se anteriormente resolvia um composable de "origem pública" para URLs canónicos/alternates absolutos, utilize antes a configuração do módulo:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  i18n: {
+    meta: true,
+    // undefined = origin from current request (multi-domain friendly)
+    metaBaseUrl: undefined,
+    metaTrustForwardedHost: true,
+    metaTrustForwardedProto: true,
+  },
+})
+```
+
+Depois passe **caminhos ou URLs completos** em `replace.hreflang` / `replace.canonical`. O módulo utiliza `useRequestURL` com `X-Forwarded-Host` / `X-Forwarded-Proto` em SSR.
+
+---
+
+## Referência da API
+
+### `meta`
+
+Tags `<meta>` extra. Deduplicadas por `id`, `property` ou `name`.
+
+### `link`
+
+Tags `<link>` extra. Deduplicadas por `id` ou `rel` + `hreflang`.
+
+### `htmlAttrs`
+
+Fundidos com os atributos `<html>` provenientes de `useLocaleHead` (`lang`, `dir`).
+
+### `replace`
+
+| Chave          | Tipo                      | Efeito                                          |
+| -------------- | ------------------------- | ----------------------------------------------- |
+| `canonical`    | `string \| false`         | Substituir ou remover a ligação canonical       |
+| `hreflang`     | `I18nHeadLink[] \| false` | Substituir ou remover todas as ligações `rel="alternate"` |
+| `xDefault`     | `I18nHeadLink \| false`   | Substituir ou remover `hreflang="x-default"`    |
+| `ogLocale`     | `string \| false`         | Substituir ou remover `og:locale`               |
+| `ogUrl`        | `string \| false`         | Substituir ou remover `og:url`                  |
+| `ogAlternates` | `string[] \| false`       | Reconstruir `og:locale:alternate` para códigos de locale |
+
+### `disable`
+
+| Valor           | Remove                                    |
+| --------------- | ----------------------------------------- |
+| `hreflang`      | Ligações alternate de locale (exclui `x-default`) |
+| `x-default`     | Ligação `hreflang="x-default"`            |
+| `canonical`     | Ligação canonical                         |
+| `og`            | `og:locale` e `og:url`                    |
+| `og-alternates` | Tags `og:locale:alternate`                |
+| `html`          | `lang` / `dir` em `<html>`                |
+
+---
+
+## `useLocaleHead` vs `useI18nHead`
+
+| Composable      | Âmbito               | Quando utilizar                              |
+| --------------- | -------------------- | -------------------------------------------- |
+| `useLocaleHead` | Head global/manual   | `meta: false`, setup totalmente personalizado com `useHead` |
+| `useI18nHead`   | Substituições por página | `meta: true`, personalizar páginas específicas |
+
+Quando `meta: true`, **não** precisa de `useLocaleHead` em páginas que usam apenas `useI18nHead`.
+
+---
+
+## Migração a partir de um plugin i18n de head personalizado
+
+Muitos projetos mantêm um plugin personalizado que:
+
+- funde ligações alternativas específicas de página a partir de estado partilhado;
+- filtra entradas `hreflang` regionais duplicadas;
+- normaliza valores de `og:locale`;
+- remove query strings dos URLs de SEO.
+
+Pode substituir tudo isto por `useI18nHead` em cada página de conteúdo, aproveitando os valores predefinidos do módulo.
+
+| Abordagem anterior                                    | Com `useI18nHead`                                    |
+| ----------------------------------------------------- | ---------------------------------------------------- |
+| Estado partilhado + "que locales existem para este artigo" | `replace: \{ ogAlternates: localeCodes \}`         |
+| Helper separado que constrói ligações `rel="alternate"` | `replace: \{ hreflang: links \}`                    |
+| Plugin personalizado que funde estado de página no head | Fusão incorporada em `02.meta`                     |
+| "Origem pública" personalizada para URLs absolutos    | `metaBaseUrl` + cabeçalhos encaminhados (ver Exemplo 12) |
+| `og:locale` curto (`en` em vez de `en_US`)            | Defina `locale.og` ou use `iso` → `en_US` (protocolo OG) |
+
+**`hreflang` a partir de `iso`:** cada locale emite um alternate com `hreflang = iso || code`. O `code` de encaminhamento nunca é usado quando `iso` está definido (evita tags inválidas como `hreflang="mx"`). Pode ativar fallbacks de idioma simples (`es-ES` → também `es`) com `hreflangBaseLanguage: true`. Estes são derivados de `iso`, não de `code`. Para listas totalmente personalizadas, use `replace.hreflang`.
+
+**JSON-LD:** `useI18nHead` não gera dados estruturados. Mantenha `useHead(\{ script: [...] \})` ou um helper JSON-LD dedicado a par dele.
+
+---
+
+## Ver também
+
+- [Guia de SEO](/guides/seo) — geração automática de meta e substituições ao nível da página
+- [`useLocaleHead`](/api/composables/use-locale-head) — API de baixo nível para o head

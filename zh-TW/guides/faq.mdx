@@ -1,0 +1,337 @@
+---
+title: "FAQ：常見問題與解法"
+description: "Nuxt I18n Micro 常見問題解答：路由缺失、外掛中的 composable、翻譯載入以及疑難排解建議。"
+---
+
+# ❓ FAQ：常見問題與解法
+
+本頁解答關於 Nuxt I18n Micro 的常見問題與常見情境的解法。
+
+## 🚀 入門相關問題
+
+### ❓ 路由無法載入怎麼辦？
+
+使用 `Nuxt I18n Micro` 時，某些路由可能無法如預期載入，尤其當 router 沒有自動為子目錄下的路由指派名稱時。
+
+**解法：**
+可為對應 Vue 檔案手動定義路由名稱：
+
+```javascript
+definePageMeta({ name: 'pageName' })
+```
+
+如此路由就會被正確註冊，讓應用內導覽順暢無阻。
+
+### ❓ 為什麼 `$t` 或其他 i18n composable 在 Nuxt 外掛中無法運作？
+
+Nuxt I18n 的 composable（`$t`、`$getLocale`、`$localePath` 等）在 Nuxt 外掛或工具函式中可能無法如預期運作，並可能出現執行期錯誤。
+
+**原因與解法：**
+Nuxt composable 需要特定 context（例如 Nuxt hook 或 Vue setup 函式）才能存取 Nuxt 實例。若在這些 context 之外使用（例如在工具函式或外掛中），console 可能會出現以下錯誤：
+
+```
+[nuxt] A composable that requires access to the Nuxt instance was called outside of a plugin, Nuxt hook, Nuxt middleware, or Vue setup function. This is probably not a Nuxt bug. Find out more at https://nuxt.com/docs/guide/concepts/auto-imports#vue-and-nuxt-composables
+```
+
+**解法 1：使用 `runWithContext`**
+若要在非同步操作之後呼叫 i18n composable，請使用 [`runWithContext`](https://nuxt.com/docs/api/composables/use-nuxt-app#runwithcontext) 保留必要的 context。
+
+```javascript
+await nuxtApp.runWithContext(() => $t('test_key'))
+```
+
+**解法 2：先取值**
+或者先取得翻譯值，再傳入工具函式。
+
+```javascript
+const val = nuxtApp.$t('common.errors.unknown.title')
+showError({
+  title: val,
+})
+```
+
+**解法 3：在服務中傳遞翻譯鍵**
+在服務或工具函式中傳遞翻譯鍵，而不要直接使用 `$t`。然後在元件中取得翻譯。
+
+```javascript
+showError({
+  title: 'common.errors.unknown.title',
+  message: 'common.errors.unknown.message',
+  i18n: true,
+})
+```
+
+## 🌐 語系切換
+
+### ❓ 可以在不更動 URL 的情況下切換語系嗎？
+
+可以，但要看你的[路由策略](/guides/routing-strategies)。
+
+**`no_prefix` 策略**：語系不屬於 URL。使用 `$switchLocale()` 可在保留同一路徑的情況下切換語系並重新載入翻譯：
+
+```typescript
+const { $switchLocale } = useNuxtApp()
+$switchLocale('de') // /about stays /about, content switches to German
+```
+
+或以 `useI18nLocale().setLocale('de')` 僅更新偏好。若要在用戶端完整重新載入翻譯，建議使用 `$switchLocale()`。
+
+**Prefix 策略**（`prefix`、`prefix_except_default` 等）：語系與 URL 綁定。`$switchLocale()` 一定會導覽到對應語系的路由。沒有 `redirect: false` 選項。
+
+若你只需要目標 URL（例如作為語系切換連結），可改用 `$switchLocalePath()`：
+
+```vue
+<NuxtLink :to="$switchLocalePath('fr')">Français</NuxtLink>
+```
+
+所有切換方法請見[路由與語系切換](/api/methods#-route-locale-switching)。
+
+### ❓ 切換語系時頁面會捲到頂端（或跳動）？
+
+這是預期行為，屬於 **Vue Router／Nuxt 的捲動行為**，與 nuxt-i18n-micro 無關。
+
+在 prefix 策略下（`prefix`、`prefix_except_default` 等），`$switchLocale()` 會執行一般的用戶端導覽（`/en/page` → `/de/page`）。Nuxt 的預設 [`scrollBehavior`](https://github.com/nuxt/nuxt/blob/main/packages/nuxt/src/pages/runtime/router.options.ts) 會在路由變更時捲到頂端（除非是透過瀏覽器前進/後退，此時會使用 `savedPosition`）。
+
+nuxt-i18n-micro 並未加入隱藏的捲動處理，請在你的應用中加入一個小型的包裝元件。
+
+**`SwitchLocalePreserve` 包裝元件**
+
+將 [`playground/components/SwitchLocalePreserve.vue`](https://github.com/s00d/nuxt-i18n-micro/blob/main/playground/components/SwitchLocalePreserve.vue) 複製到你的專案（`components/SwitchLocalePreserve.vue`）。可運作的範例：[`playground/pages/scroll-test.vue`](https://github.com/s00d/nuxt-i18n-micro/blob/main/playground/pages/scroll-test.vue)。
+
+在頁面上設定 `scrollToTop: false` 並包住切換 UI。將可點擊目標加上 `data-locale`：這個包裝元件會攔截點擊、呼叫 `$switchLocale` 並復原捲動位置（即使翻譯長度導致版面重排也一樣）：
+
+```vue
+<script setup lang="ts">
+definePageMeta({ scrollToTop: false })
+
+const { $getLocales, $getLocale } = useI18n()
+</script>
+
+<template>
+  <SwitchLocalePreserve root-id="lang-switcher">
+    <button v-for="locale in $getLocales()" :key="locale.code" :data-locale="locale.code" :disabled="locale.code === $getLocale()">
+      {{ locale.code }}
+    </button>
+  </SwitchLocalePreserve>
+</template>
+```
+
+此元件會：
+
+1. **點擊時**：讀取 slot 內被點擊元素上的 `data-locale`（按鈕、連結或任何自訂標籤）。
+2. **在 `$switchLocale` 之前**：儲存 `scrollY` 與被點擊元素的位置（讓其停留在指標下）。
+3. **導覽期間**：暫時 patch `router.options.scrollBehavior`，回傳 `\{ top: scrollY \}` 而非捲到頂端。
+4. **導覽之後**：等待 `page:finish`，接著重新套用捲動位置；同時使用 `ResizeObserver` 捕捉不同翻譯長度造成的版面變動。
+
+使用此包裝元件的頁面需要設定 `scrollToTop: false`。文件：[Nuxt — `definePageMeta` / `scrollToTop`](https://nuxt.com/docs/4.x/api/utils/define-page-meta#meta)。
+
+請勿在被包裝的控制項上直接呼叫 `$switchLocale`：切換由此包裝元件處理即可。若在包裝元件之外使用 `<NuxtLink :to="$switchLocalePath('fr')">`，捲動行為會遵循一般 Nuxt 路由，除非你另外新增自己的 `app/router.options.ts`。
+
+## 🌐 翻譯相關問題
+
+### ❓ 為什麼頁面轉場（尤其搭配 `defineAsyncComponent`）時翻譯會失效？
+
+搭配 `nuxt-i18n-micro` 使用頁面轉場時，翻譯可能會在轉場過程中短暫停止運作。這是因為路由在轉場完成前就已變更，新頁面的翻譯還在載入時舊頁面仍可見。
+
+**根本原因：**
+
+- 頁面轉場會在翻譯尚未完全載入時就變更路由
+- `defineAsyncComponent` 與 `useAsyncData` 可能延後翻譯載入
+- 翻譯鍵在載入期間可能顯示為原始路徑
+
+**解法 1：累積合併（內建，無需設定）**
+
+在 v3 中，模組會自動採用累積合併策略。當在同一語系內導覽時，新頁面翻譯會併入目前字典，而不是取代它。這代表在轉場動畫期間仍可使用前一頁的翻譯。轉場完成後（`page:transition:finish` hook），舊鍵會自動被清理。
+
+無需任何設定，這是預設行為。
+
+**解法 2：明確傳入 Route context**
+
+若你偏好手動控制，可將目前 route 明確傳給 `$_t`：
+
+```vue
+<script lang="ts" setup>
+import { useNuxtApp } from '#imports'
+const route = useRoute()
+const { $_t } = useNuxtApp()
+
+const $t = $_t(route)
+</script>
+
+<template>
+  {{ $t('page::blog-slug.title') }}
+</template>
+```
+
+**解法 3：載入狀態**
+
+實作載入狀態以優雅地處理翻譯載入：
+
+```vue
+<template>
+  <div v-if="pending">
+    <div class="loading-skeleton">
+      <!-- Loading placeholder -->
+    </div>
+  </div>
+  <div v-else>
+    {{ $t('page.title') }}
+  </div>
+</template>
+
+<script setup>
+const { data, pending } = await useAsyncData('page-data', () => {
+  // Your async data loading
+})
+</script>
+```
+
+### ❓ 為什麼翻譯鍵在 Vercel 上 SSR 時無法解析？
+
+**SSR 上的 `$fetch` 限制**
+在 Vercel 這類 serverless 平台上，`$fetch` 只能從 CDN 取得靜態檔案，無法從內部 Nitro 伺服器取得。這代表除非設定正確的基底 URL，否則靜態翻譯檔可能無法直接存取。
+
+**修正：設定 `apiBaseClientHost` 與 `apiBaseServerHost`**
+若翻譯託管於 CDN 或不同網域上，請以 `apiBaseClientHost` 用於用戶端請求、`apiBaseServerHost` 用於伺服器端請求。`apiBaseUrl` 只應包含路徑前綴（例如 `_locales`）。
+
+```typescript
+export default defineNuxtConfig({
+  i18n: {
+    apiBaseUrl: '/_locales', // Path prefix only
+    apiBaseClientHost: 'https://cdn.example.com', // CDN domain for client
+    apiBaseServerHost: 'https://cdn.example.com', // CDN domain for server (SSR)
+  },
+})
+```
+
+或透過環境變數：
+
+```bash
+NUXT_I18N_APP_BASE_URL=_locales
+NUXT_I18N_APP_BASE_CLIENT_HOST=https://cdn.example.com
+NUXT_I18N_APP_BASE_SERVER_HOST=https://cdn.example.com
+```
+
+翻譯就會從 `https://cdn.example.com/_locales/\{routeName\}/\{locale\}/data.json` 取得，用戶端與伺服器皆同。
+
+## 🔗 路由與導覽問題
+
+### ❓ 可以在翻譯字串中直接使用 `NuxtLink` 或 `<i18n-link>` 嗎？
+
+可以。`Nuxt I18n Micro` 透過 `<i18n-t>` 元件在翻譯內使用 `NuxtLink` 或 `<i18n-link>`，這對處理文法與 RTL 語言需求特別有幫助，不必把翻譯字串切碎。
+
+**範例：**
+
+翻譯檔：
+
+```json
+{
+  "example": "Share your {link} with friends",
+  "link_text": "translation link"
+}
+```
+
+Vue 樣板：
+
+```vue
+<template>
+  <i18n-t keypath="example">
+    <template #link>
+      <nuxt-link :to="{ name: 'referral' }">
+        <i18n-t keypath="link_text" />
+      </nuxt-link>
+    </template>
+  </i18n-t>
+</template>
+```
+
+如此可在翻譯內動態使用連結，同時保留正確的在地化結構。
+
+## 🏗️ 建置與部署問題
+
+### ❓ 為什麼翻譯 payload 會出現在 `public/_locales/`（或 Edge 的伺服器 bundle）？
+
+SSR 與用戶端都需要相同的 `/\{apiBaseUrl\}/\{page\}/\{locale\}/data.json` payload。它們被打包的方式取決於 Nitro 目標：
+
+**說明：**
+
+- **Node（預設）**：模組**不會**將翻譯內嵌為 Nitro `serverAssets`／Rollup `raw:`（大量翻譯時會導致 build RAM 爆掉）。它會將 premerged tree 複製到 `public/<apiBaseUrl>/`（預設 `_locales`），SSR 以 `readFile` 讀取。用戶端則以 `$fetch` 取得相同 URL，可能是靜態檔案或透過 Nitro handler。
+- **Edge**（`nitro.node === false`）：SSR 沒有持久的 public 檔案系統，因此 payload 會透過 Nitro `serverAssets`（`assets:i18n`）內嵌。建議使用 `translationPayloads.mode: 'source'`，讓內嵌保持精簡。只有在你需要 CDN／靜態副本時才將 `publicAssets: true` 打開。
+- **`prerenderRoutes`**：選填。在 premerged 模式下，`publicAssets` 已寫出 `\{page\}/\{locale\}/data.json`，預先渲染這些路由通常沒必要。
+
+### ❓ 為什麼出現與 `@unhead/vue` 相關的 build 錯誤，尤其是在 Cloudflare Pages 上？
+
+**原因：**
+某些專案在使用 `nuxt-i18n-micro` 時會遭遇 build 衝突或相依性缺失。特別是：
+
+- 部署在 **Cloudflare Pages** 或 **Cloudflare Workers** 上可能需要額外的相容性旗標。
+- 若 `@unhead/vue` 之類的相依性未正確安裝，預先渲染步驟可能失敗。
+- 某些模組（例如 **nuxthub**、**nitro-cloudflare-dev**）可能引入衝突，除非以正確旗標或相依性設定。
+
+**可能解法：**
+
+**解法 1：手動安裝 `@unhead/vue`**
+若 build 錯誤指出找不到 `@unhead/vue`，請直接安裝到專案相依性：
+
+<CodeGroup>
+```bash npm
+npm install @unhead/vue
+```
+
+```bash yarn
+yarn add @unhead/vue
+```
+
+```bash pnpm
+pnpm add @unhead/vue
+```
+</CodeGroup>
+
+如此可確保它在 Nitro 預先渲染階段可用。
+
+**解法 2：加入 Cloudflare 相容性旗標**
+在 Cloudflare Pages 或 Workers 上，Node.js 相容性通常預設停用。請在 `wrangler.toml` 啟用：
+
+```toml
+compatibility_flags = [ "nodejs_compat_v2" ]
+```
+
+此旗標讓許多 Node.js 模組（包括 `nuxt-i18n-micro` 使用的）能順利執行。
+
+## 🔍 SEO 與 `@nuxtjs/seo`
+
+### ❓ 錯誤：`nuxt-seo:defaults depends on nuxt-site-config:i18n but they are not registered`
+
+當 **`@nuxtjs/seo`** 拉入舊版 **`nuxt-site-config` 3.x**（該版本僅為 `@nuxtjs/i18n` 註冊其 i18n 外掛，而非 **nuxt-i18n-micro**）時會發生這個問題。
+
+**修正方式：**
+
+1. 升級到 **`@nuxtjs/seo` 3+**（其中包含支援 micro 的 `nuxt-site-config` 4+）。
+2. 在 `modules` 中把 **`nuxt-i18n-micro` 放在 `@nuxtjs/seo` 之前**。
+3. 保持 **`i18n.meta: true`**，以取得語系感知的 head 標籤。
+
+完整範例請見 [SEO 指南 — Nuxt SEO 段落](/guides/seo#nuxt-seo-nuxtjs-seo)。
+
+## 🔧 設定與相容性
+
+### ❓ `Nuxt I18n Micro` 是靈感來自 `vue-i18n` 嗎？modifier 呢？
+
+`Nuxt I18n Micro` 是 `nuxt-i18n` 的高效能替代方案，但其實作獨立於 `vue-i18n`。雖然部分方法名稱與參數相似，但底層功能有相當差異。
+
+**Modifier**：維護者曾考慮加入 modifier，但認為 `<i18n-t>` 與 `<i18n-link>` 這類元件已能有效滿足需求。
+
+範例：
+
+```vue
+<template>
+  <i18n-t keypath="feedback.text">
+    <template #link>
+      <nuxt-link :to="{ name: 'index' }">
+        <i18n-t keypath="feedback.link" />
+      </nuxt-link>
+    </template>
+  </i18n-t>
+</template>
+```
+
+這種做法很有彈性，因此目前沒有必要釋出 modifier。若未來有需求，仍可能在後續版本中加入。

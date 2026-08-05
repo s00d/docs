@@ -1,0 +1,243 @@
+---
+title: "翻译缓存与存储架构"
+description: "Nuxt I18n Micro v3 如何缓存翻译：多层缓存、premerged 与 source 两种 payload 模式、构建产物以及缓存失效。"
+---
+
+# 🗄️ 翻译缓存与存储架构
+
+## 📖 概述
+
+Nuxt I18n Micro v3 采用多层缓存架构处理翻译。Payload 的加载方式由 `translationPayloads.mode` 决定：
+
+- **`premerged`**（默认）—— 根级、页面级、回退和 layer 文件在构建时通过 `@i18n-micro/utils/build` 合并到 `\{page\}/\{locale\}/data.json`
+- **`source`** —— 保留精简的源文件，通过 `@i18n-micro/utils/source-loader` 与 `@i18n-micro/utils/merge-source` 在运行时进行合并（Edge 会把它们嵌入 Nitro 的 `serverAssets`；Node 在拷贝到 `public/` 后从中读取）
+
+本页介绍内置缓存的工作方式，以及如何为自定义场景（管理工具、外部 API、缓存失效）进行扩展。
+
+## 📊 架构概览
+
+### 数据流
+
+```mermaid
+flowchart TB
+    subgraph BuildPremerged["Build Time — mode: premerged (default)"]
+        F1["locales/*.json (root-level)"] -->|Merge layers + fallback| PM["preMergeLocales<br/>(@i18n-micro/utils/build)"]
+        F2["locales/pages/**/*.json"] -->|Merge layers + fallback| PM
+        PM -->|"page/locale/data.json"| OUT1["public/&lt;apiBaseUrl&gt;<br/>+ Edge assets:i18n"]
+    end
+
+    subgraph BuildSource["Build Time — mode: source"]
+        SF1["locales/*.json"] --> SLayers["buildTranslationSourceLayers<br/>(@i18n-micro/utils/build)"]
+        SF2["locales/pages/**/*.json"] --> SLayers
+        SLayers --> OUT2["compact source tree<br/>(Edge embed / optional public)"]
+    end
+
+    subgraph Server["Server Runtime"]
+        OUT1 -->|"#i18n-internal/payload-source"| SL["server-loader.ts<br/>loadTranslationsFromServer()"]
+        OUT2 -->|"#i18n-internal/payload-source + merge"| SL
+        SL -->|SERVER_CC_KEY cache| SC["Server Cache<br/>(process-global Map)"]
+        SC -->|JSON response| API["/_locales/:page/:locale/data.json"]
+    end
+
+    subgraph Client["Client Runtime"]
+        API -->|$fetch| TS["TranslationStorage<br/>(singleton via Symbol.for)"]
+        TS -->|getFromCache / load| NI["NuxtI18n<br/>active view layer"]
+        NI --> PL["01.plugin.ts"]
+    end
+```
+
+## 🧱 核心组件
+
+### 1. `TranslationStorage`（客户端 + 服务端）
+
+**文件**：`src/runtime/utils/storage.ts`
+
+一个为客户端和服务端提供统一翻译存储的单例类。它通过 `globalThis` 上的 `Symbol.for('__NUXT_I18N_STORAGE_CACHE__')` 保证即使在加载多个 bundle 时也只存在一个实例。
+
+**主要方法：**
+
+| 方法                              | 描述                                                            |
+| ----------------------------------- | ---------------------------------------------------------------------- |
+| `getFromCache(locale, routeName?)`  | 同步检查：返回内存中缓存的数据，若不存在返回 `null`            |
+| `load(locale, routeName?, options)` | 带缓存的异步加载：先查缓存，再通过 `$fetch` 拉取 |
+| `clear()`                           | 清空整个缓存                                                |
+
+**缓存键格式**：`\{locale\}:\{routeName\}`（例如 `en:index`、`fr:about`）
+
+```typescript
+import { translationStorage } from '../utils/storage'
+
+// Synchronous cache check
+const cached = translationStorage.getFromCache('en', 'index')
+
+// Async load (with automatic caching)
+const result = await translationStorage.load('en', 'index', {
+  apiBaseUrl: '_locales',
+  baseURL: '/',
+  dateBuild: '2024-01-01',
+})
+// result.data — merged translations
+// result.cacheKey — cache key used
+```
+
+### ⚙️ 可复现的缓存清理（`i18n.dateBuild`）
+
+默认情况下，本模块在构建时通过 `Date.now()` 生成 `dateBuild`。该值会被嵌入生成的 `#build/i18n.strategy.mjs`，并作为查询参数（`?v=...`）用于在重建后使翻译请求的缓存失效。
+
+如果你需要可复现的构建（例如为了在滚动部署中提升 chunk 缓存命中率），请在 `nuxt.config` 中设置一个稳定的值：
+
+```ts
+export default defineNuxtConfig({
+  i18n: {
+    // Any stable string/number (git SHA, CI build number, release tag, etc.)
+    dateBuild: process.env.GIT_SHA ?? 'local-dev',
+  },
+})
+```
+
+### 2. `loadTranslationsFromServer()`（仅服务器）
+
+**文件**：`src/runtime/server/utils/server-loader.ts`
+
+按 locale/page 加载翻译，并把合并后的结果缓存到进程全局的 `CacheControl` map 中，键由 `@i18n-micro/hmr/cache-keys`（`SERVER_CC_KEY`）提供。
+
+行为：SSR 从 `#i18n-internal/payload-source` 加载 —— **Node** 通过 `readFile` 从 `public/<apiBaseUrl>` 读取（在 premerged 模式下为 `\{page\}/\{locale\}/data.json`），**Edge** 通过 `assets:i18n` 读取。`premerged` 只读取单个文件；`source` 会通过 `@i18n-micro/utils/source-loader` 合并根级、页面级和回退。
+
+```typescript
+import { loadTranslationsFromServer } from '../server/utils/server-loader'
+
+// Returns { data: Translations, json: string }
+const { data, json } = await loadTranslationsFromServer('en', 'index')
+```
+
+### 3. 客户端加载（不嵌入 HTML）
+
+字典**不会**写入 `nuxtApp.payload`。服务器在内存中保留它们用于 SSR 渲染；客户端插件会 `await` `switchContext`，后者加载 `/\{apiBaseUrl\}/:page/:locale/data.json`（与 `@nuxtjs/i18n` 在 `experimental.preload: false` 下的默认姿态一致）。
+
+`NuxtI18n` 持有 `$t()` 与 `$has()` 使用的活跃视图层字典。`NuxtTranslationLoader` 负责切换 locale/route 上下文，并把 chunk 合并进该层。
+
+### 4. 服务器 API 路由
+
+**路由**：`/_locales/\{page\}/\{locale\}/data.json`
+
+**文件**：`src/runtime/server/routes/i18n.ts`
+
+此 Nitro 路由按当前 payload 模式返回合并后的翻译。它调用 `loadTranslationsFromServer()` 并把结果以 JSON 返回。
+
+在生产环境中还会设置：
+
+```http
+Cache-Control: public, max-age={httpCacheDuration}, immutable
+```
+
+默认 `httpCacheDuration` 为 `31536000`（1 年）。这是安全的，因为客户端会在请求 payload 时附带 `?v=\{dateBuild\}` 用于打破缓存。将 `httpCacheDuration: 0` 可以省略该 header。开发模式下不会应用该 header。
+
+## 📥 扩展：自定义翻译加载
+
+### 从缓存读取（服务器路由）
+
+```ts
+// server/api/i18n/load-cache.[post].ts
+import { defineEventHandler, readBody } from 'h3'
+import { loadTranslationsFromServer } from '#imports'
+
+export default defineEventHandler(async (event) => {
+  const { page, locale } = await readBody<{ page: string; locale: string }>(event)
+  const { data } = await loadTranslationsFromServer(locale, page)
+  return { locale, page, data }
+})
+```
+
+### 更新翻译（文件 + 使缓存失效）
+
+```ts
+// server/api/i18n/update.[post].ts
+import { defineEventHandler, readBody, createError } from 'h3'
+import { join } from 'node:path'
+import { readFile, writeFile } from 'node:fs/promises'
+import { deepMergeTranslations } from '@i18n-micro/utils/deep-merge'
+
+export default defineEventHandler(async (event) => {
+  const { path, updates } = await readBody<{ path: string; updates: Record<string, unknown> }>(event)
+
+  if (!path || !updates) {
+    throw createError({ statusCode: 400, statusMessage: 'Missing path or updates' })
+  }
+
+  const fullPath = join('locales', path)
+  let existing: Record<string, unknown> = {}
+
+  try {
+    const content = await readFile(fullPath, 'utf-8')
+    existing = JSON.parse(content) as Record<string, unknown>
+  } catch {
+    // File does not exist — create new
+  }
+
+  const merged = deepMergeTranslations(existing, updates)
+  await writeFile(fullPath, JSON.stringify(merged, null, 2), 'utf-8')
+
+  return { success: true, path, updated: merged }
+})
+```
+
+
+## 🧹 清空缓存
+
+### 以编程方式清空缓存（客户端）
+
+使用内置的 `$clearCache` 方法：
+
+```vue
+<script setup>
+const { $clearCache } = useNuxtApp()
+
+// Clears both TranslationStorage and plugin-level cache
+$clearCache()
+</script>
+```
+
+### 服务器缓存行为
+
+服务器端缓存（`loadTranslationsFromServer`）是进程全局的，会一直保留，直到：
+
+- 服务器进程重启
+- 检测到新的部署（`dateBuild` 值发生变化）
+
+对于 serverless 环境，每次冷启动都会得到一份全新的缓存。
+
+## ⚙️ Serverless 配置
+
+对于 serverless 环境（Cloudflare Workers、AWS Lambda 等），内置缓存使用内存中的 `Map` 对象。翻译缓存本身不需要额外的外部存储配置。
+
+不过，源翻译文件所使用的 Nitro 存储可能需要配置：
+
+```ts
+export default defineNuxtConfig({
+  nitro: {
+    storage: {
+      // Only needed if default file-system storage is unavailable
+      'assets:server': {
+        driver: 'cloudflare-kv-binding',
+        binding: 'MY_KV_NAMESPACE',
+      },
+    },
+  },
+})
+```
+
+## 💡 与 v2 的关键差异
+
+| 方面           | v2                            | v3                                                                       |
+| ---------------- | ----------------------------- | ------------------------------------------------------------------------ |
+| 客户端缓存     | `useStorage('cache')`         | `TranslationStorage` 单例（globalThis 上的 Symbol.for）                |
+| SSR 传输     | 运行时配置                | 通过 `payload.data` 传输完整 chunk（v3.0 使用 `useState`）                    |
+| 服务器缓存     | Nitro 缓存存储           | 通过 `Symbol.for` 实现的进程全局 `Map`                                    |
+| 合并逻辑      | 客户端                   | 构建期（`premerged`）或运行时（`source`），均使用 `@i18n-micro/utils/*` |
+| 缓存键格式 | `i18n:merged:\{page\}:\{locale\}` | `\{locale\}:\{routeName\}`                                                   |
+
+## 📚 相关内容
+
+- [性能指南](/guides/performance) —— 缓存如何影响性能
+- [服务器端翻译](/guides/server-side-translations) —— 在服务器路由中使用翻译
+- [Firebase 部署](/guides/firebase) —— 部署环境相关的缓存注意事项

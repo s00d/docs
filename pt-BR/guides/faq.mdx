@@ -1,0 +1,337 @@
+---
+title: "FAQ: problemas e soluções comuns"
+description: "Respostas para perguntas comuns sobre Nuxt I18n Micro: rotas ausentes, composables em plugins, carregamento de traduções e dicas de troubleshooting."
+---
+
+# ❓ FAQ: problemas e soluções comuns
+
+Encontre respostas para perguntas frequentes e soluções para problemas comuns com o Nuxt I18n Micro.
+
+## 🚀 Problemas iniciais
+
+### ❓ E se uma rota não carregar?
+
+Ao usar o `Nuxt I18n Micro`, certas rotas podem não carregar como esperado, especialmente se o router não atribui automaticamente um nome a uma rota em subpastas.
+
+**Solução:**
+Para resolver isso, defina manualmente o nome da rota para a página adicionando o seguinte ao arquivo Vue correspondente:
+
+```javascript
+definePageMeta({ name: 'pageName' })
+```
+
+Isso garante que a rota seja registrada corretamente, permitindo navegação sem problemas na aplicação.
+
+### ❓ Por que `$t` ou outros composables i18n não funcionam em plugins Nuxt?
+
+Os composables Nuxt I18n (`$t`, `$getLocale`, `$localePath`, etc.) podem não funcionar como esperado dentro de plugins Nuxt ou funções utilitárias, resultando em erros em runtime.
+
+**Causa e solução:**
+Os composables Nuxt exigem contextos específicos (por exemplo, hooks Nuxt ou funções setup do Vue) para acessar a instância Nuxt. Se usados fora desses contextos (por exemplo, em funções utilitárias ou plugins), o seguinte erro pode aparecer no console:
+
+```
+[nuxt] A composable that requires access to the Nuxt instance was called outside of a plugin, Nuxt hook, Nuxt middleware, or Vue setup function. This is probably not a Nuxt bug. Find out more at https://nuxt.com/docs/guide/concepts/auto-imports#vue-and-nuxt-composables
+```
+
+**Solução 1: use `runWithContext`**
+Para chamar composables i18n após uma operação assíncrona, use [`runWithContext`](https://nuxt.com/docs/api/composables/use-nuxt-app#runwithcontext) para preservar o contexto necessário.
+
+```javascript
+await nuxtApp.runWithContext(() => $t('test_key'))
+```
+
+**Solução 2: obtenha o valor primeiro**
+Alternativamente, obtenha o valor de tradução primeiro e depois passe para uma função utilitária.
+
+```javascript
+const val = nuxtApp.$t('common.errors.unknown.title')
+showError({
+  title: val,
+})
+```
+
+**Solução 3: passe chaves de tradução em serviços**
+Em serviços ou funções utilitárias, passe as chaves de tradução em vez de usar `$t` diretamente. Depois, obtenha a tradução no componente.
+
+```javascript
+showError({
+  title: 'common.errors.unknown.title',
+  message: 'common.errors.unknown.message',
+  i18n: true,
+})
+```
+
+## 🌐 Troca de locale
+
+### ❓ Trocar de locale sem alterar a URL?
+
+Sim, mas depende da sua [estratégia de roteamento](/guides/routing-strategies).
+
+**Estratégia `no_prefix`** o locale não faz parte da URL. Use `$switchLocale()` para trocar o locale e recarregar traduções permanecendo no mesmo path:
+
+```typescript
+const { $switchLocale } = useNuxtApp()
+$switchLocale('de') // /about stays /about, content switches to German
+```
+
+Ou atualize apenas a preferência com `useI18nLocale().setLocale('de')`. Para recarga completa de traduções no cliente, prefira `$switchLocale()`.
+
+**Estratégias com prefixo** (`prefix`, `prefix_except_default`, …) locale e URL estão vinculados. `$switchLocale()` sempre navega para a rota localizada. Não há opção `redirect: false`.
+
+Se você só precisa da URL de destino (por exemplo, um link do seletor de idioma), use `$switchLocalePath()`:
+
+```vue
+<NuxtLink :to="$switchLocalePath('fr')">Français</NuxtLink>
+```
+
+Consulte [Troca de rota e locale](/api/methods#-route-locale-switching) para todos os métodos de troca.
+
+### ❓ A página rola para o topo (ou salta) ao trocar de locale?
+
+Isso é esperado. É **comportamento de scroll do Vue Router / Nuxt**, não algo específico do nuxt-i18n-micro.
+
+Com estratégias de prefixo (`prefix`, `prefix_except_default`, …), `$switchLocale()` executa uma navegação de cliente normal (`/en/page` → `/de/page`). O [`scrollBehavior`](https://github.com/nuxt/nuxt/blob/main/packages/nuxt/src/pages/runtime/router.options.ts) padrão do Nuxt rola para o topo em mudanças de rota (exceto em back/forward do navegador via `savedPosition`).
+
+O nuxt-i18n-micro não adiciona tratamento oculto de scroll. Use um pequeno componente wrapper no seu app.
+
+**Wrapper `SwitchLocalePreserve`**
+
+Copie [`playground/components/SwitchLocalePreserve.vue`](https://github.com/s00d/nuxt-i18n-micro/blob/main/playground/components/SwitchLocalePreserve.vue) para o seu projeto (`components/SwitchLocalePreserve.vue`). Demo funcional: [`playground/pages/scroll-test.vue`](https://github.com/s00d/nuxt-i18n-micro/blob/main/playground/pages/scroll-test.vue).
+
+Na página, defina `scrollToTop: false` e envolva sua UI de troca. Marque os alvos clicáveis com `data-locale`. O wrapper intercepta cliques, chama `$switchLocale` e restaura o scroll (inclusive quando o tamanho da tradução muda o layout):
+
+```vue
+<script setup lang="ts">
+definePageMeta({ scrollToTop: false })
+
+const { $getLocales, $getLocale } = useI18n()
+</script>
+
+<template>
+  <SwitchLocalePreserve root-id="lang-switcher">
+    <button v-for="locale in $getLocales()" :key="locale.code" :data-locale="locale.code" :disabled="locale.code === $getLocale()">
+      {{ locale.code }}
+    </button>
+  </SwitchLocalePreserve>
+</template>
+```
+
+O componente:
+
+1. **No clique** lê `data-locale` no elemento clicado dentro do slot (botões, links ou qualquer marcação personalizada).
+2. **Antes** de `$switchLocale` armazena `scrollY` e a posição do elemento clicado (o mantém sob o cursor).
+3. **Durante** a navegação faz patch em `router.options.scrollBehavior` uma vez e retorna `\{ top: scrollY \}` em vez de rolar ao topo.
+4. **Após** a navegação aguarda `page:finish` e reaplica o scroll enquanto um `ResizeObserver` capta mudanças de layout de tamanhos diferentes de tradução.
+
+`scrollToTop: false` é obrigatório em páginas onde você usa esse wrapper. Docs: [Nuxt — `definePageMeta` / `scrollToTop`](https://nuxt.com/docs/4.x/api/utils/define-page-meta#meta).
+
+Não chame `$switchLocale` diretamente em controles envolvidos. O wrapper faz a troca. Para `<NuxtLink :to="$switchLocalePath('fr')">` fora do wrapper, o comportamento de scroll segue o roteamento normal do Nuxt, a menos que você adicione seu próprio `app/router.options.ts`.
+
+## 🌐 Problemas de tradução
+
+### ❓ Por que as traduções quebram durante transições de página, especialmente com `defineAsyncComponent`?
+
+Ao usar `nuxt-i18n-micro` com transições de página, as traduções podem parar brevemente de funcionar durante a transição. Esse problema ocorre porque a rota muda antes de a transição terminar, fazendo com que as traduções da nova página carreguem enquanto a antiga ainda está visível.
+
+**Causa raiz:**
+
+- Transições de página causam mudanças de rota antes de as traduções serem totalmente carregadas
+- `defineAsyncComponent` e `useAsyncData` podem atrasar o carregamento de traduções
+- Chaves de tradução podem aparecer como paths crus durante o carregamento
+
+**Solução 1: merge cumulativo (integrado, sem configuração necessária)**
+
+Na v3, o módulo usa automaticamente uma estratégia de merge cumulativo. Ao navegar dentro do mesmo locale, as novas traduções da página são mescladas ao dicionário ativo em vez de substituí-lo. Isso significa que as traduções da página anterior permanecem disponíveis durante a animação de transição. Após a transição terminar (`page:transition:finish` hook), as chaves antigas são limpas automaticamente.
+
+Nenhuma configuração é necessária. Funciona pronto para uso.
+
+**Solução 2: contexto explícito de rota**
+
+Se preferir controle manual, passe explicitamente a rota atual para `$_t`:
+
+```vue
+<script lang="ts" setup>
+import { useNuxtApp } from '#imports'
+const route = useRoute()
+const { $_t } = useNuxtApp()
+
+const $t = $_t(route)
+</script>
+
+<template>
+  {{ $t('page::blog-slug.title') }}
+</template>
+```
+
+**Solução 3: estados de carregamento**
+
+Implemente estados de carregamento para lidar com o carregamento de traduções de forma elegante:
+
+```vue
+<template>
+  <div v-if="pending">
+    <div class="loading-skeleton">
+      <!-- Loading placeholder -->
+    </div>
+  </div>
+  <div v-else>
+    {{ $t('page.title') }}
+  </div>
+</template>
+
+<script setup>
+const { data, pending } = await useAsyncData('page-data', () => {
+  // Your async data loading
+})
+</script>
+```
+
+### ❓ Por que as chaves de tradução não resolvem durante o SSR no Vercel?
+
+**Limitações de `$fetch` em SSR**
+Em plataformas serverless como o Vercel, `$fetch` só pode buscar arquivos estáticos do CDN, não do servidor Nitro interno. Isso significa que os arquivos de tradução estáticos podem não estar diretamente acessíveis a menos que a URL base correta seja definida.
+
+**Correção definindo `apiBaseClientHost` e `apiBaseServerHost`**
+Se as traduções são hospedadas externamente em um CDN ou domínio diferente, use `apiBaseClientHost` para requisições no cliente e `apiBaseServerHost` para requisições no servidor. `apiBaseUrl` deve conter apenas o prefixo do path (ex.: `_locales`).
+
+```typescript
+export default defineNuxtConfig({
+  i18n: {
+    apiBaseUrl: '/_locales', // Path prefix only
+    apiBaseClientHost: 'https://cdn.example.com', // CDN domain for client
+    apiBaseServerHost: 'https://cdn.example.com', // CDN domain for server (SSR)
+  },
+})
+```
+
+Ou via variáveis de ambiente:
+
+```bash
+NUXT_I18N_APP_BASE_URL=_locales
+NUXT_I18N_APP_BASE_CLIENT_HOST=https://cdn.example.com
+NUXT_I18N_APP_BASE_SERVER_HOST=https://cdn.example.com
+```
+
+As traduções serão buscadas em `https://cdn.example.com/_locales/\{routeName\}/\{locale\}/data.json` tanto no cliente quanto no servidor.
+
+## 🔗 Problemas de roteamento e navegação
+
+### ❓ Posso usar `NuxtLink` ou `<i18n-link>` diretamente em strings de tradução?
+
+Sim, o `Nuxt I18n Micro` permite o uso de `NuxtLink` ou `<i18n-link>` dentro de traduções por meio do componente `<i18n-t>`, o que é especialmente útil para lidar com requisitos de gramática e idiomas RTL sem dividir strings de tradução.
+
+**Exemplo:**
+
+Arquivo de tradução:
+
+```json
+{
+  "example": "Share your {link} with friends",
+  "link_text": "translation link"
+}
+```
+
+Template Vue:
+
+```vue
+<template>
+  <i18n-t keypath="example">
+    <template #link>
+      <nuxt-link :to="{ name: 'referral' }">
+        <i18n-t keypath="link_text" />
+      </nuxt-link>
+    </template>
+  </i18n-t>
+</template>
+```
+
+Isso permite links dinâmicos dentro de traduções preservando a estrutura de localização adequada.
+
+## 🏗️ Problemas de build e deploy
+
+### ❓ Por que os payloads de tradução aparecem em `public/_locales/` (ou no bundle do servidor no Edge)?
+
+Tanto o SSR quanto o cliente precisam dos mesmos payloads `/\{apiBaseUrl\}/\{page\}/\{locale\}/data.json`. Como são empacotados depende do alvo Nitro:
+
+**Explicação:**
+
+- **Node (padrão):** o módulo **não** embute traduções como `serverAssets` do Nitro / Rollup `raw:` (isso estourava a RAM de build em catálogos grandes). Em vez disso, copia a árvore premerged para `public/<apiBaseUrl>/` (padrão `_locales`) e o SSR lê esses arquivos com `readFile`. O cliente faz `$fetch` das mesmas URLs — como arquivos estáticos ou via o handler do Nitro.
+- **Edge** (`nitro.node === false`): não há FS público durável para SSR, então os payloads são embutidos via `serverAssets` do Nitro (`assets:i18n`). Prefira `translationPayloads.mode: 'source'` para que o embed fique compacto. Defina `publicAssets: true` só se você também precisar de uma cópia CDN/estática.
+- **`prerenderRoutes`:** opcional. No modo premerged, `publicAssets` já escreve `\{page\}/\{locale\}/data.json`, então prerenderar essas rotas geralmente é redundante.
+
+### ❓ Por que recebo um erro de build referindo-se a `@unhead/vue` ou um objeto indefinido, especialmente no Cloudflare Pages?
+
+**Causa:**
+Alguns projetos apresentam conflitos de build ou dependências ausentes ao usar `nuxt-i18n-micro`. Em particular:
+
+- Deploys em **Cloudflare Pages** ou **Cloudflare Workers** podem exigir flags de compatibilidade adicionais.
+- Etapas de prerender podem falhar se dependências como `@unhead/vue` não estão devidamente instaladas.
+- Certos módulos (ex.: **nuxthub**, **nitro-cloudflare-dev**) podem introduzir conflitos a menos que configurados com flags ou dependências corretas.
+
+**Soluções possíveis:**
+
+**Solução 1: instale `@unhead/vue` manualmente**
+Se o erro de build reclamar que não encontra `@unhead/vue`, instale-o diretamente nas dependências do seu projeto:
+
+<CodeGroup>
+```bash npm
+npm install @unhead/vue
+```
+
+```bash yarn
+yarn add @unhead/vue
+```
+
+```bash pnpm
+pnpm add @unhead/vue
+```
+</CodeGroup>
+
+Isso garante disponibilidade durante a fase de prerender do Nitro.
+
+**Solução 2: adicione flags de compatibilidade do Cloudflare**
+Ao usar Cloudflare Pages ou Cloudflare Workers, a compatibilidade Node.js está frequentemente desabilitada por padrão. Habilite-a em `wrangler.toml`:
+
+```toml
+compatibility_flags = [ "nodejs_compat_v2" ]
+```
+
+Essa flag permite que muitos módulos Node.js (incluindo os usados pelo `nuxt-i18n-micro`) rodem sem problemas.
+
+## 🔍 SEO e `@nuxtjs/seo`
+
+### ❓ Erro: `nuxt-seo:defaults depends on nuxt-site-config:i18n but they are not registered`
+
+Isso acontece quando **`@nuxtjs/seo`** puxa um **`nuxt-site-config` 3.x** antigo que registra seu plugin i18n apenas para `@nuxtjs/i18n`, não para **nuxt-i18n-micro**.
+
+**Correção:**
+
+1. Faça upgrade para **`@nuxtjs/seo` 3+** (inclui `nuxt-site-config` 4+ com suporte a micro).
+2. Coloque **`nuxt-i18n-micro` antes de `@nuxtjs/seo`** em `modules`.
+3. Mantenha **`i18n.meta: true`** para meta tags de head específicas de locale.
+
+Consulte o [guia de SEO — seção Nuxt SEO](/guides/seo#nuxt-seo-nuxtjs-seo) para um exemplo completo.
+
+## 🔧 Configuração e compatibilidade
+
+### ❓ O `Nuxt I18n Micro` é inspirado em `vue-i18n`? E os modificadores?
+
+Embora o `Nuxt I18n Micro` sirva como alternativa de desempenho ao `nuxt-i18n`, ele é construído independentemente do `vue-i18n`. Embora alguns nomes de métodos e parâmetros possam ser similares, a funcionalidade subjacente difere significativamente.
+
+**Modificadores**: o mantenedor considerou modificadores inicialmente, mas concluiu que componentes como `<i18n-t>` e `<i18n-link>` atendem efetivamente essas necessidades.
+
+Por exemplo:
+
+```vue
+<template>
+  <i18n-t keypath="feedback.text">
+    <template #link>
+      <nuxt-link :to="{ name: 'index' }">
+        <i18n-t keypath="feedback.link" />
+      </nuxt-link>
+    </template>
+  </i18n-t>
+</template>
+```
+
+Essa abordagem é flexível, então liberar modificadores é desnecessário no momento. No entanto, modificadores podem ser adicionados em versões futuras se houver demanda.

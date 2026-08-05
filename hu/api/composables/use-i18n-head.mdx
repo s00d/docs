@@ -1,0 +1,499 @@
+---
+title: "`useI18nHead` composable"
+description: "A useI18nHead composable oldalankénti felülbírálásokat alkalmaz az i18n SEO metához, canonical URL-ekhez, hreflang linkekhez és Open Graph címkékhez a Nuxt alkalmazásokban."
+---
+
+# `useI18nHead` composable
+
+A `useI18nHead` lehetővé teszi az i18n SEO címkék testreszabását **oldalanként** egyéni meta bővítmény nélkül. Ha `meta: true`, a modul beolvasztja a bemenetedet a [`useLocaleHead`](/api/composables/use-locale-head) kimenete tetejére.
+
+Tipikus esetek:
+
+- **CMS / blog cikkek** — csak néhány területi beállítás van lefordítva. Az alternatív URL-ek nyelvenként különböznek (különböző slugok vagy útvonalak).
+- **Dinamikus canonical** — a canonical URL-nek meg kell egyeznie a cikk URL-jével az API-ból, nem a `$switchLocalePath`-tal.
+- **Extra Open Graph** — `og:title`, `og:description`, `og:image` az automatikusan generált `og:locale` / `og:url` mellett.
+- **Részleges vezérlés** — tartsd meg a modul által generált canonical és `og:url` értékeket, de cseréld le csak a `hreflang` és `og:locale:alternate` értékeket.
+
+---
+
+## Aláírás
+
+{/* generated:symbol:useI18nHead — do not edit; run `pnpm run docs:generate` */}
+
+```ts
+useI18nHead(input?: MaybeRefOrGetter<I18nHeadInput | null>): { pageHead: any; resetPageHead: () => void }
+```
+
+Oldalszintű felülbírálások regisztrálása az i18n SEO head címkékhez.
+A `02.meta` bővítmény által a `useLocaleHead` kimenete tetejére olvasztva.
+
+| Paraméter | Típus | Leírás |
+| --- | --- | --- |
+| `input` *(opcionális)* | `MaybeRefOrGetter<I18nHeadInput \| null>` |  |
+
+{/* /generated:symbol:useI18nHead */}
+
+## Hogyan illeszkedik a folyamatba
+
+```mermaid
+flowchart LR
+    A[useLocaleHead] --> B[base tags]
+    C[useI18nHead on page] --> D[page overrides]
+    B --> E[mergeI18nHead]
+    D --> E
+    E --> F[useHead in 02.meta]
+```
+
+A `useI18nHead`-et egy oldalkomponensben hívod meg. A `02.meta` bővítmény minden `updateMeta()` után alkalmazza a felülbírálásokat (útvonalváltás, `$setI18nRouteParams`, `page:finish` a kliensen).
+
+---
+
+## 1. példa — Cikk fordításokkal csak néhány területi beállításban
+
+Gyakori minta: az API visszaadja, hogy mely területi beállítások léteznek, és azok abszolút vagy relatív URL-jeit.
+
+```ts
+interface Article {
+  title: string
+  slug: string
+  /** Locale code → page URL (absolute or site-relative) */
+  locales: Record<string, string>
+}
+```
+
+```vue
+<script setup lang="ts">
+const route = useRoute()
+const { data: article } = await useFetch<Article>(`/api/articles/${route.params.slug}`)
+
+const localeCodes = computed(() => Object.keys(article.value?.locales ?? {}))
+
+useI18nHead(() => {
+  if (!article.value) return null
+
+  return {
+    meta: [
+      { property: 'og:title', content: article.value.title },
+      { property: 'og:type', content: 'article' },
+    ],
+    replace: {
+      hreflang: localeCodes.value.map((locale) => ({
+        rel: 'alternate',
+        hreflang: locale,
+        href: article.value!.locales[locale]!,
+      })),
+      ogAlternates: localeCodes.value,
+    },
+  }
+})
+</script>
+```
+
+Az `ogAlternates` a **területi kódokat** veszi a `i18n.locales` konfigurációdból. Az `og:locale:alternate` értékei a `locale.og` vagy `iso` alapján kerülnek feloldásra (Open Graph `en_US` formátum).
+
+---
+
+## 2. példa — Cikk területi beállításonkénti slugokkal (`$defineI18nRoute` + `$setI18nRouteParams`)
+
+Amikor az URL-ek honosított útvonalsablonokból és dinamikus paraméterekből épülnek fel:
+
+```vue
+<script setup lang="ts">
+const { $defineI18nRoute, $setI18nRouteParams } = useNuxtApp()
+const route = useRoute()
+
+const { data: article } = await useFetch(`/api/articles/${route.params.slug}`)
+
+$defineI18nRoute({
+  localeRoutes: {
+    en: '/blog/[slug]',
+    de: '/de/blog/[slug]',
+    fr: '/fr/blog/[slug]',
+  },
+})
+
+if (article.value) {
+  $setI18nRouteParams({
+    en: { slug: article.value.slugEn },
+    de: { slug: article.value.slugDe },
+    fr: { slug: article.value.slugFr },
+  })
+
+  const availableLocales = article.value.availableLocales as string[]
+
+  useI18nHead({
+    meta: [{ property: 'og:title', content: article.value.title }],
+    replace: {
+      hreflang: availableLocales.map((locale) => ({
+        rel: 'alternate',
+        hreflang: locale,
+        href: article.value!.urls[locale],
+      })),
+      ogAlternates: availableLocales,
+    },
+  })
+}
+</script>
+```
+
+A modul által generált alternatívák **minden** konfigurált területi beállítást felsorolnának. A `replace.hreflang` a címkéket azokra a területi beállításokra korlátozza, amelyeknek ténylegesen van fordításuk.
+
+---
+
+## 3. példa — Egyéni `x-default` az alapértelmezett területi cikk URL-hez
+
+Alapértelmezés szerint az `x-default` a `$switchLocalePath` alapértelmezett területi URL-jére mutat. A cikkeknél mutasson az alapértelmezett fordítási URL-re:
+
+```vue
+<script setup lang="ts">
+const { $defaultLocale } = useNuxtApp()
+const article = await loadArticle()
+
+const defaultLocale = $defaultLocale() ?? 'en'
+const defaultHref = article.locales[defaultLocale]
+
+useI18nHead({
+  replace: {
+    hreflang: Object.entries(article.locales).map(([locale, href]) => ({
+      rel: 'alternate',
+      hreflang: locale,
+      href,
+    })),
+    xDefault: defaultHref ? { rel: 'alternate', hreflang: 'x-default', href: defaultHref } : false,
+    ogAlternates: Object.keys(article.locales),
+  },
+})
+</script>
+```
+
+---
+
+## 4. példa — Canonical és `og:url` lecserélése API adatokból
+
+Amikor a canonical-nak meg kell egyeznie egy CMS által biztosított URL-lel (több domain, egyéni útvonal vagy előre elkészített abszolút URL):
+
+```vue
+<script setup lang="ts">
+const article = await loadArticle()
+const canonical = article.canonicalUrl // e.g. https://www.example.com/en/blog/my-post
+
+useI18nHead({
+  replace: {
+    canonical,
+    ogUrl: canonical,
+    hreflang: buildAlternateLinks(article),
+    ogAlternates: Object.keys(article.locales),
+  },
+  meta: [
+    { property: 'og:title', content: article.title },
+    { name: 'description', content: article.excerpt },
+  ],
+})
+</script>
+```
+
+---
+
+## 5. példa — Automatikus canonical / `og:url` megtartása, csak az alternatívák cseréje
+
+Ha a `$switchLocalePath` + `$setI18nRouteParams` már helyes canonical és `og:url` értékeket produkál, cseréld le csak a felfedezési címkéket:
+
+```vue
+<script setup lang="ts">
+const article = await loadArticle()
+
+useI18nHead({
+  replace: {
+    hreflang: buildAlternateLinks(article),
+    ogAlternates: Object.keys(article.locales),
+  },
+})
+</script>
+```
+
+---
+
+## 6. példa — Teljes head egy tartalom részletező oldalhoz (meta + linkek)
+
+Hasonló minta ahhoz, mint az "oldal meta" és "alternatív linkek" különálló segédekbe szétosztása, egy hívásban egyesítve:
+
+```vue
+<script setup lang="ts">
+const article = await loadArticle()
+const alternates = Object.entries(article.locales).map(([locale, href]) => ({
+  rel: 'alternate' as const,
+  hreflang: locale,
+  href: normalizeSeoUrl(href), // strip ?query and #hash if needed
+}))
+
+useI18nHead({
+  meta: [
+    { property: 'og:title', content: article.title },
+    { property: 'og:description', content: article.description },
+    { property: 'og:image', content: article.imageUrl },
+    { name: 'twitter:card', content: 'summary_large_image' },
+    { name: 'twitter:title', content: article.title },
+  ],
+  replace: {
+    canonical: article.canonicalUrl,
+    ogUrl: article.canonicalUrl,
+    hreflang: alternates,
+    ogAlternates: Object.keys(article.locales),
+  },
+})
+</script>
+```
+
+```ts
+/** Remove query and hash — useful when CMS URLs must be clean for SEO */
+function normalizeSeoUrl(href: string): string {
+  try {
+    const url = new URL(href, 'https://placeholder.local')
+    url.search = ''
+    url.hash = ''
+    return href.startsWith('http') ? url.href : `${url.pathname}`
+  } catch {
+    return href.split(/[?#]/)[0] ?? href
+  }
+}
+```
+
+---
+
+## 7. példa — Két tartalomtípus, ugyanaz a minta (hírek vs útmutatók)
+
+Ugyanaz az API forma, különböző útvonalnevek. Használj újra egy kis segédet:
+
+```ts
+// composables/useArticleHead.ts
+import type { I18nHeadInput } from '@i18n-micro/types'
+
+interface LocalizedContent {
+  title: string
+  locales: Record<string, string>
+  canonicalUrl?: string
+}
+
+export function buildArticleHead(content: LocalizedContent): I18nHeadInput {
+  const localeCodes = Object.keys(content.locales)
+  const canonical = content.canonicalUrl ?? content.locales.en
+
+  return {
+    meta: [{ property: 'og:title', content: content.title }],
+    replace: {
+      canonical,
+      ogUrl: canonical,
+      hreflang: localeCodes.map((locale) => ({
+        rel: 'alternate',
+        hreflang: locale,
+        href: content.locales[locale]!,
+      })),
+      ogAlternates: localeCodes,
+    },
+  }
+}
+```
+
+```vue
+<!-- pages/blog/[slug].vue -->
+<script setup lang="ts">
+const article = await loadArticle()
+useI18nHead(buildArticleHead(article))
+</script>
+```
+
+```vue
+<!-- pages/guides/[slug].vue -->
+<script setup lang="ts">
+const guide = await loadGuide()
+useI18nHead(buildArticleHead(guide))
+</script>
+```
+
+---
+
+## 8. példa — Beépített alternatívák letiltása, saját lista biztosítása
+
+Megegyezik a modul hreflang generátorának letiltásával és egyéni lista átadásával (nincs duplikált alternatíva halmaz):
+
+```vue
+<script setup lang="ts">
+const article = await loadArticle()
+
+useI18nHead({
+  disable: ['hreflang', 'x-default', 'og-alternates'],
+  link: Object.entries(article.locales).map(([locale, href]) => ({
+    rel: 'alternate',
+    hreflang: locale,
+    href,
+  })),
+  replace: {
+    ogAlternates: Object.keys(article.locales),
+  },
+})
+</script>
+```
+
+Vagy előnyben részesítsd a `replace.hreflang`-et `disable` nélkül. Egy lépésben lecseréli az összes `rel="alternate"` linket.
+
+---
+
+## 9. példa — Landing page: csak extra OG, tartsd meg az összes i18n címkét
+
+```vue
+<script setup lang="ts">
+const { t } = useI18n()
+
+useI18nHead({
+  meta: [
+    { property: 'og:title', content: t('landing.ogTitle') },
+    { property: 'og:description', content: t('landing.ogDescription') },
+  ],
+})
+</script>
+```
+
+---
+
+## 10. példa — Termék oldal: hreflang letiltása egyetlen területi kísérlethez
+
+```vue
+<script setup lang="ts">
+useI18nHead({
+  disable: ['hreflang', 'x-default'],
+  // canonical, og:locale, og:url still generated
+})
+</script>
+```
+
+---
+
+## 11. példa — Reaktív frissítések kliensoldali fetch után
+
+```vue
+<script setup lang="ts">
+const article = ref<Article | null>(null)
+
+onMounted(async () => {
+  article.value = await $fetch('/api/articles/latest')
+})
+
+useI18nHead(() => {
+  if (!article.value) return null
+  return {
+    meta: [{ property: 'og:title', content: article.value.title }],
+    replace: {
+      hreflang: Object.entries(article.value.locales).map(([locale, href]) => ({
+        rel: 'alternate',
+        hreflang: locale,
+        href,
+      })),
+    },
+  }
+})
+</script>
+```
+
+A head frissül a `page:finish` eseménykor és amikor a `pageHead` állapot változik.
+
+---
+
+## 12. példa — HTTPS eredet fordított proxy mögött
+
+Ha korábban egy "nyilvános eredet" composable-t oldottál fel a canonical / alternatíva abszolút URL-ekhez, használd inkább a modul konfigurációját:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  i18n: {
+    meta: true,
+    // undefined = origin from current request (multi-domain friendly)
+    metaBaseUrl: undefined,
+    metaTrustForwardedHost: true,
+    metaTrustForwardedProto: true,
+  },
+})
+```
+
+Ezután add át az **útvonalakat vagy teljes URL-eket** a `replace.hreflang` / `replace.canonical` értékekhez. A modul a `useRequestURL`-t használja `X-Forwarded-Host` / `X-Forwarded-Proto` fejlécekkel SSR esetén.
+
+---
+
+## API referencia
+
+### `meta`
+
+Extra `<meta>` címkék. Deduplikálva `id`, `property` vagy `name` alapján.
+
+### `link`
+
+Extra `<link>` címkék. Deduplikálva `id` vagy `rel` + `hreflang` alapján.
+
+### `htmlAttrs`
+
+Beolvasztva a `<html>` attribútumokba a `useLocaleHead`-ből (`lang`, `dir`).
+
+### `replace`
+
+| Kulcs           | Típus                     | Hatás                                          |
+| -------------- | ------------------------- | ---------------------------------------------- |
+| `canonical`    | `string \| false`         | Canonical link lecserélése vagy eltávolítása   |
+| `hreflang`     | `I18nHeadLink[] \| false` | Minden `rel="alternate"` link lecserélése vagy eltávolítása |
+| `xDefault`     | `I18nHeadLink \| false`   | `hreflang="x-default"` lecserélése vagy eltávolítása |
+| `ogLocale`     | `string \| false`         | `og:locale` lecserélése vagy eltávolítása      |
+| `ogUrl`        | `string \| false`         | `og:url` lecserélése vagy eltávolítása         |
+| `ogAlternates` | `string[] \| false`       | `og:locale:alternate` újraépítése területi kódokhoz |
+
+### `disable`
+
+| Érték           | Eltávolítja                              |
+| --------------- | ---------------------------------------- |
+| `hreflang`      | Területi alternatíva linkek (nem `x-default`) |
+| `x-default`     | `hreflang="x-default"` link              |
+| `canonical`     | Canonical link                           |
+| `og`            | `og:locale` és `og:url`                  |
+| `og-alternates` | `og:locale:alternate` címkék             |
+| `html`          | `lang` / `dir` a `<html>`-en             |
+
+---
+
+## `useLocaleHead` vs `useI18nHead`
+
+| Composable      | Hatókör              | Mikor használd                             |
+| --------------- | -------------------- | ------------------------------------------ |
+| `useLocaleHead` | Globális / manuális head | `meta: false`, teljes egyéni `useHead` beállítás |
+| `useI18nHead`   | Oldalankénti felülbírálások | `meta: true`, adott oldalak testreszabása |
+
+Ha `meta: true`, **nem** van szükséged a `useLocaleHead`-re olyan oldalakon, amelyek csak a `useI18nHead`-et használják.
+
+---
+
+## Migráció egyéni i18n head bővítményből
+
+Sok projekt fenntart egy egyéni bővítményt, amely:
+
+- oldalspecifikus alternatíva linkeket olvaszt össze megosztott állapotból;
+- kiszűri a duplikált regionális `hreflang` bejegyzéseket;
+- normalizálja az `og:locale` értékeket;
+- eltávolítja a lekérdezési karakterláncokat a SEO URL-ekből.
+
+Ezt lecserélheted a `useI18nHead` használatával minden tartalom oldalon és a modul alapértelmezéseivel.
+
+| Korábbi megközelítés                                  | `useI18nHead`-del                                    |
+| ----------------------------------------------------- | ---------------------------------------------------- |
+| Megosztott állapot + "melyik területi beállítások léteznek ehhez a cikkhez" | `replace: \{ ogAlternates: localeCodes \}`             |
+| Külön segéd `rel="alternate"` linkek építéséhez       | `replace: \{ hreflang: links \}`                       |
+| Egyéni bővítmény, amely az oldalállapotot a head-be olvasztja | Beépített összeolvasztás a `02.meta`-ban              |
+| Egyéni "nyilvános eredet" abszolút URL-ekhez          | `metaBaseUrl` + továbbított fejlécek (lásd 12. példa) |
+| Rövid `og:locale` (`en` a `en_US` helyett)            | Állítsd be a `locale.og`-t, vagy használd az `iso`-t → `en_US` (OG protokoll) |
+
+**`hreflang` az `iso`-ból:** minden területi beállítás egy alternatívát bocsát ki `hreflang = iso || code` értékkel. Az útválasztási `code` soha nincs használva, ha az `iso` be van állítva (elkerüli az érvénytelen címkéket, mint a `hreflang="mx"`). Csupasz nyelvi tartalékokhoz (`es-ES` → `es` is) állítsd be a `hreflangBaseLanguage: true` értéket. Az `iso`-ból származik, nem a `code`-ból. Teljesen egyéni listákhoz használd a `replace.hreflang`-et.
+
+**JSON-LD:** a `useI18nHead` nem generál strukturált adatokat. Tartsd meg a `useHead(\{ script: [...] \})`-t vagy egy dedikált JSON-LD segédet mellette.
+
+---
+
+## Lásd még
+
+- [SEO útmutató](/guides/seo) — automatikus meta generálás és oldalszintű felülbírálások
+- [`useLocaleHead`](/api/composables/use-locale-head) — alacsony szintű head API

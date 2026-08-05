@@ -1,0 +1,497 @@
+---
+title: "Deployment til Firebase AppHosting"
+description: "Deploy Nuxt I18n Micro til Firebase AppHosting: løs JSON MIME-typer, konfigurer route rules og hold oversættelser kørende i produktion."
+---
+
+# 🔥 Deployment til Firebase AppHosting
+
+## 📖 Introduktion
+
+Firebase AppHosting er en kraftfuld platform til deployment af Nuxt-applikationer med serverless-infrastruktur. Når du deployer applikationer med `nuxt-i18n-micro`, kan du dog støde på specifikke problemer relateret til, hvordan oversættelses-JSON-filer serveres. Denne guide indeholder omfattende løsninger, der sikrer, at dine oversættelser fungerer korrekt i produktion.
+
+## ⚠️ Almindelige problemer
+
+### Oversættelsesfiler anvendes ikke
+
+**Symptomer:**
+
+- ✅ Oversættelser fungerer perfekt i udvikling (`nuxt dev`)
+- ❌ Efter deployment til Firebase AppHosting indlæses JSON-filerne, men oversættelserne anvendes ikke
+- ❌ Ingen fejl vises i konsollen
+- ❌ Oversættelsesfiler er synlige i Network-fanen, men har forkert `Content-Type: text/html` i stedet for `application/json`
+
+**Grundårsag:**
+
+Firebase AppHosting (og andre platforme, der bruger Nitro-prerendering) kan servere prerenderede JSON-filer med forkerte MIME-typer. Når browseren modtager JSON-filer med `Content-Type: text/html`, kan den ikke parse dem korrekt, og oversættelser fejler stille.
+
+## ✅ Løsninger
+
+### Løsning 1: Konfiguration af route rules (anbefalet)
+
+Den mest ligetil løsning er at tilføje eksplicitte headers for oversættelsesruter i din `nuxt.config.ts`:
+
+```typescript
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+
+  i18n: {
+    locales: [
+      { code: 'en', iso: 'en-US', dir: 'ltr' },
+      { code: 'fr', iso: 'fr-FR', dir: 'ltr' },
+      { code: 'de', iso: 'de-DE', dir: 'ltr' },
+      // ... other locales
+    ],
+    strategy: 'prefix_except_default',
+    defaultLocale: 'en',
+    translationDir: 'locales',
+    meta: true,
+    metaBaseUrl: 'https://your-domain.com',
+  },
+
+  // Add route rules for translation files
+  routeRules: {
+    '/_locales/**': {
+      headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'public, max-age=3600, s-maxage=3600',
+      },
+    },
+  },
+})
+```
+
+**Fordele:**
+
+- ✨ Simpel konfiguration
+- 🚀 Bedre performance med korrekt caching
+- 🔒 Fungerer på tværs af alle deployment-platforme
+
+### Løsning 2: Brugerdefineret API-base-URL
+
+Hvis du bruger en brugerdefineret `apiBaseUrl` (kun sti-præfiks), skal du justere route rules tilsvarende:
+
+```typescript
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+
+  i18n: {
+    apiBaseUrl: '/api/translations', // Path prefix only, not a full URL
+    locales: [
+      { code: 'en', iso: 'en-US', dir: 'ltr' },
+      { code: 'fr', iso: 'fr-FR', dir: 'ltr' },
+    ],
+    defaultLocale: 'en',
+  },
+
+  routeRules: {
+    '/api/translations/**': {
+      headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'public, max-age=3600',
+      },
+    },
+  },
+})
+```
+
+### Løsning 3: Firebase-specifik konfiguration
+
+Opret eller opdater din `firebase.json`-fil i projektets rod:
+
+```json
+{
+  "hosting": {
+    "public": ".output/public",
+    "cleanUrls": true,
+    "rewrites": [
+      {
+        "source": "**",
+        "function": "server"
+      }
+    ],
+    "headers": [
+      {
+        "source": "/_locales/**/*.json",
+        "headers": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Cache-Control",
+            "value": "public, max-age=3600, immutable"
+          },
+          {
+            "key": "Access-Control-Allow-Origin",
+            "value": "*"
+          }
+        ]
+      }
+    ]
+  },
+  "functions": {
+    "source": ".output/server"
+  }
+}
+```
+
+
+### Løsning 4: Konfiguration af Firebase Functions
+
+Til deployment af Firebase Functions skal du sikre, at din `functions/package.json` indeholder de nødvendige afhængigheder:
+
+```json
+{
+  "name": "functions",
+  "type": "module",
+  "engines": {
+    "node": "18"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.0.0",
+    "firebase-functions": "^5.0.0"
+  }
+}
+```
+
+## 🔍 Fejlfinding
+
+### Aktivér debug-tilstand
+
+Tilføj debug-logning for at identificere problemer:
+
+```typescript
+export default defineNuxtConfig({
+  i18n: {
+    debug: true,
+    // Your other config...
+  },
+})
+```
+
+Det udsender detaljerede logs om:
+
+- 📝 Indlæsning af oversættelsesfiler
+- 🔄 Cache-operationer
+- ⚠️ Indlæsningsfejl
+
+### Tjek Network-fanen
+
+1. Åbn DevTools → Network-fanen
+2. Filtrér efter "data.json"
+3. Klik på en oversættelsesfil-request
+4. Verificér **Response Headers**:
+   - ✅ `Content-Type: application/json` (korrekt)
+   - ❌ `Content-Type: text/html` (forkert, skal rettes)
+
+### Verificér prerender-output
+
+Efter build kan du tjekke, at oversættelsesfiler genereres:
+
+```bash
+pnpm build
+
+# Check public payload copy (premerged layout)
+ls -la .output/public/_locales/index/en/
+# → data.json
+```
+
+Du bør se `data.json` for hvert locale under hver side.
+
+## 🚀 Build-konfiguration
+
+### Nitro-preset
+
+Til Firebase AppHosting skal du sikre, at du bruger det korrekte preset:
+
+```typescript
+export default defineNuxtConfig({
+  nitro: {
+    preset: 'firebase-app-hosting',
+    firebase: {
+      gen: 2,
+      httpsOptions: {
+        region: 'us-central1',
+        maxInstances: 3,
+      },
+    },
+  },
+})
+```
+
+### Prerender-konfiguration
+
+Konfigurer prerendering for optimal performance:
+
+```typescript
+export default defineNuxtConfig({
+  nitro: {
+    prerender: {
+      crawlLinks: true,
+      routes: ['/'],
+      ignore: ['/api/**', '/admin/**'],
+    },
+  },
+})
+```
+
+## 📋 Komplet eksempel på konfiguration
+
+Her er en komplet, fungerende konfiguration til Firebase AppHosting:
+
+```typescript
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+
+  i18n: {
+    locales: [
+      { code: 'en', iso: 'en-US', dir: 'ltr' },
+      { code: 'fr', iso: 'fr-FR', dir: 'ltr' },
+      { code: 'de', iso: 'de-DE', dir: 'ltr' },
+      { code: 'es', iso: 'es-ES', dir: 'ltr' },
+      { code: 'it', iso: 'it-IT', dir: 'ltr' },
+      { code: 'pt', iso: 'pt-PT', dir: 'ltr' },
+      { code: 'ru', iso: 'ru-RU', dir: 'ltr' },
+      { code: 'zh', iso: 'zh-CN', dir: 'ltr' },
+      { code: 'ko', iso: 'ko-KR', dir: 'ltr' },
+    ],
+    strategy: 'prefix_except_default',
+    defaultLocale: 'en',
+    translationDir: 'locales',
+    meta: true,
+    metaBaseUrl: 'https://your-domain.com',
+    debug: false, // Enable in development if needed
+  },
+
+  routeRules: {
+    '/_locales/**': {
+      headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'public, max-age=3600, s-maxage=3600',
+      },
+    },
+  },
+
+  nitro: {
+    preset: 'firebase-app-hosting',
+    prerender: {
+      crawlLinks: true,
+      routes: ['/'],
+    },
+  },
+})
+```
+
+```json
+// firebase.json
+{
+  "hosting": {
+    "public": ".output/public",
+    "cleanUrls": true,
+    "headers": [
+      {
+        "source": "/_locales/**/*.json",
+        "headers": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Cache-Control",
+            "value": "public, max-age=3600, immutable"
+          }
+        ]
+      },
+      {
+        "source": "**/*.@(jpg|jpeg|gif|png|webp|svg|ico)",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "public, max-age=31536000, immutable"
+          }
+        ]
+      }
+    ],
+    "rewrites": [
+      {
+        "source": "**",
+        "function": "server"
+      }
+    ]
+  },
+  "functions": {
+    "source": ".output/server",
+    "runtime": "nodejs18"
+  }
+}
+```
+
+## ✅ Verifikationstjekliste
+
+Efter at have anvendt løsningerne skal du verificere, at alt fungerer:
+
+- [ ] Build gennemføres uden fejl
+- [ ] Oversættelses-JSON-filer ligger i `.output/public/_locales/\{page\}/\{locale\}/data.json`
+- [ ] Network-fanen viser `Content-Type: application/json` for oversættelsesfiler
+- [ ] Oversættelser vises korrekt ved første sideindlæsning
+- [ ] Ingen hydration-mismatches i konsollen
+- [ ] Sprogskift fungerer korrekt
+- [ ] SEO-metatags genereres korrekt
+
+## 🔄 Deployment-workflow
+
+### 1. Forbered build
+
+```bash
+# Install dependencies
+pnpm install
+
+# Build for production
+pnpm build
+
+# Verify public payload copy
+ls -la .output/public/_locales/index/en/data.json
+```
+
+### 2. Deploy til Firebase
+
+```bash
+# Install Firebase CLI if not already installed
+npm install -g firebase-tools
+
+# Login to Firebase
+firebase login
+
+# Initialize Firebase (first time only)
+firebase init hosting
+
+# Deploy
+firebase deploy --only hosting,functions
+```
+
+### 3. Verificér deployment
+
+1. Besøg dit deployede site
+2. Åbn DevTools → Network-fanen
+3. Naviger til en side
+4. Tjek at `/_locales/index/en/data.json` (eller dit standard-locale) indlæses med:
+   - Status: 200
+   - Content-Type: application/json
+   - Respons indeholder gyldig JSON
+
+## 🔧 Fejlfinding
+
+### Problem: 404-fejl for oversættelsesfiler
+
+**Løsning:** Sørg for, at oversættelsesfiler kopieres til output-mappen:
+
+```typescript
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: {
+    publicAssets: [
+      {
+        dir: 'locales',
+        maxAge: 60 * 60 * 24 * 365, // 1 year
+      },
+    ],
+  },
+})
+```
+
+### Problem: Oversættelser fungerer på nogle sider, men ikke andre
+
+**Løsning:** Tjek om sideafgrænsede oversættelser genereres:
+
+```bash
+# Should show data.json for each page/locale
+ls -la .output/public/_locales/index/en/
+ls -la .output/public/_locales/about/en/
+```
+
+Hvis sideafgrænsede oversættelser mangler, skal du sikre, at `disablePageLocales` ikke er sat til `true`:
+
+```typescript
+i18n: {
+  disablePageLocales: false, // Ensure this is false
+}
+```
+
+### Problem: Langsom indlæsning af oversættelser
+
+**Løsning:** Optimér caching og preloading:
+
+```typescript
+routeRules: {
+  '/_locales/**': {
+    headers: {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'public, max-age=31536000, immutable',
+      'X-Content-Type-Options': 'nosniff'
+    },
+    prerender: true
+  }
+}
+```
+
+## 📚 Yderligere ressourcer
+
+- [Dokumentation for Firebase AppHosting](https://firebase.google.com/docs/app-hosting)
+- [Nitro-presets](https://nitro.unjs.io/deploy/providers/firebase)
+- [Guide til Nuxt-deployment](https://nuxt.com/docs/getting-started/deployment)
+- [Modulkonfiguration](/guides/configuration)
+
+## 💡 Tips
+
+1. **Test altid i et produktionslignende miljø** før deployment
+2. **Brug debug-tilstand** under den indledende opsætning for at fange problemer tidligt
+3. **Overvåg cache-hit-rater** for at optimere ydeevnen
+4. **Hold oversættelsesfiler små** for hurtigere indlæsning
+5. **Brug korrekte cache-headers** for at reducere serverbelastningen
+
+## ⚡ Performance-optimering
+
+### Aktivér komprimering
+
+Firebase håndterer automatisk Gzip/Brotli-komprimering, men sørg for, at dit build er optimeret:
+
+```typescript
+export default defineNuxtConfig({
+  vite: {
+    build: {
+      minify: 'terser',
+      terserOptions: {
+        compress: {
+          drop_console: true,
+        },
+      },
+    },
+  },
+})
+```
+
+### Lazy-load oversættelser
+
+`Nuxt I18n Micro` lazy-loader automatisk oversættelser pr. side. Oversættelser indlæses kun, når det er nødvendigt, og det reducerer den indledende bundle-størrelse. Det er en indbygget funktion — ingen yderligere konfiguration kræves.
+
+For yderligere optimering:
+
+- Brug `disablePageLocales: false` (standard) for at aktivere sideafgrænsede oversættelser
+- Hold oversættelser på rodniveau minimale
+- Brug rutespecifikke oversættelsesfiler til sideindhold
+
+<Tip>
+Modulet sætter automatisk korrekte `Content-Type`-headers fra version **v3.0.0+**. Hvis du oplever problemer, kan du opgradere til den seneste version:
+
+```bash
+pnpm update nuxt-i18n-micro@latest
+```
+</Tip>
+
+## 🎯 Næste skridt
+
+- [Server-side oversættelser](/guides/server-side-translations)
+- [Performance-optimering](/guides/performance)
+- [SEO-konfiguration](/guides/seo)
+- [Test-guide](/guides/testing)

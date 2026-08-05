@@ -1,0 +1,243 @@
+---
+title: "Architecture du cache et du stockage des traductions"
+description: "Comment Nuxt I18n Micro met en cache les traductions en v3 : cache multi-couches, modes de payload premerged et source, sortie de build et invalidation du cache."
+---
+
+# 🗄️ Architecture du cache et du stockage des traductions
+
+## 📖 Vue d'ensemble
+
+Nuxt I18n Micro v3 utilise une architecture de cache multi-couches pour les traductions. Le chargement de la charge utile dépend de `translationPayloads.mode` :
+
+- **`premerged`** (par défaut) — les fichiers racine, de page, de repli et de couche sont fusionnés au moment du build via `@i18n-micro/utils/build` dans `\{page\}/\{locale\}/data.json`
+- **`source`** — les fichiers source compacts sont conservés pour une fusion à l'exécution via `@i18n-micro/utils/source-loader` et `@i18n-micro/utils/merge-source` (Edge les intègre dans les `serverAssets` de Nitro ; Node les lit depuis `public/` quand ils y sont copiés)
+
+Cette page décrit le fonctionnement du cache intégré et la manière de l'étendre pour des cas d'usage personnalisés (outils d'administration, API externes, invalidation du cache).
+
+## 📊 Vue d'ensemble de l'architecture
+
+### Flux de données
+
+```mermaid
+flowchart TB
+    subgraph BuildPremerged["Build Time — mode: premerged (default)"]
+        F1["locales/*.json (root-level)"] -->|Merge layers + fallback| PM["preMergeLocales<br/>(@i18n-micro/utils/build)"]
+        F2["locales/pages/**/*.json"] -->|Merge layers + fallback| PM
+        PM -->|"page/locale/data.json"| OUT1["public/&lt;apiBaseUrl&gt;<br/>+ Edge assets:i18n"]
+    end
+
+    subgraph BuildSource["Build Time — mode: source"]
+        SF1["locales/*.json"] --> SLayers["buildTranslationSourceLayers<br/>(@i18n-micro/utils/build)"]
+        SF2["locales/pages/**/*.json"] --> SLayers
+        SLayers --> OUT2["compact source tree<br/>(Edge embed / optional public)"]
+    end
+
+    subgraph Server["Server Runtime"]
+        OUT1 -->|"#i18n-internal/payload-source"| SL["server-loader.ts<br/>loadTranslationsFromServer()"]
+        OUT2 -->|"#i18n-internal/payload-source + merge"| SL
+        SL -->|SERVER_CC_KEY cache| SC["Server Cache<br/>(process-global Map)"]
+        SC -->|JSON response| API["/_locales/:page/:locale/data.json"]
+    end
+
+    subgraph Client["Client Runtime"]
+        API -->|$fetch| TS["TranslationStorage<br/>(singleton via Symbol.for)"]
+        TS -->|getFromCache / load| NI["NuxtI18n<br/>active view layer"]
+        NI --> PL["01.plugin.ts"]
+    end
+```
+
+## 🧱 Composants principaux
+
+### 1. `TranslationStorage` (client + serveur)
+
+**Fichier** : `src/runtime/utils/storage.ts`
+
+Une classe singleton qui fournit un stockage de traductions unifié à la fois pour le client et pour le serveur. Elle utilise `Symbol.for('__NUXT_I18N_STORAGE_CACHE__')` sur `globalThis` pour garantir qu'une seule instance existe, même lorsque plusieurs bundles sont chargés.
+
+**Méthodes clés :**
+
+| Méthode                              | Description                                                            |
+| ----------------------------------- | ---------------------------------------------------------------------- |
+| `getFromCache(locale, routeName?)`  | Vérification synchrone : renvoie les données en mémoire mises en cache, ou `null` |
+| `load(locale, routeName?, options)` | Chargement asynchrone avec mise en cache : vérifie d'abord le cache, puis récupère via `$fetch` |
+| `clear()`                           | Vide entièrement le cache                                              |
+
+**Format de la clé de cache** : `\{locale\}:\{routeName\}` (par exemple, `en:index`, `fr:about`)
+
+```typescript
+import { translationStorage } from '../utils/storage'
+
+// Synchronous cache check
+const cached = translationStorage.getFromCache('en', 'index')
+
+// Async load (with automatic caching)
+const result = await translationStorage.load('en', 'index', {
+  apiBaseUrl: '_locales',
+  baseURL: '/',
+  dateBuild: '2024-01-01',
+})
+// result.data — merged translations
+// result.cacheKey — cache key used
+```
+
+### ⚙️ Invalidation déterministe du cache (`i18n.dateBuild`)
+
+Par défaut, ce module génère `dateBuild` au moment du build via `Date.now()`. Cette valeur est ensuite intégrée dans le `#build/i18n.strategy.mjs` généré et utilisée comme paramètre de requête (`?v=...`) pour invalider les caches de récupération des traductions après un rebuild.
+
+Si vous avez besoin de builds reproductibles (par exemple pour améliorer les taux de succès du cache de chunks lors de déploiements progressifs), définissez une valeur stable dans `nuxt.config` :
+
+```ts
+export default defineNuxtConfig({
+  i18n: {
+    // Any stable string/number (git SHA, CI build number, release tag, etc.)
+    dateBuild: process.env.GIT_SHA ?? 'local-dev',
+  },
+})
+```
+
+### 2. `loadTranslationsFromServer()` (serveur uniquement)
+
+**Fichier** : `src/runtime/server/utils/server-loader.ts`
+
+Charge les traductions pour une locale/page et met en cache le résultat fusionné dans une map globale au processus `CacheControl`, indexée par `@i18n-micro/hmr/cache-keys` (`SERVER_CC_KEY`).
+
+Comportement : le SSR charge depuis `#i18n-internal/payload-source` — sur **Node**, `readFile` sous `public/<apiBaseUrl>` (`\{page\}/\{locale\}/data.json` en mode premerged) ; sur **Edge**, `assets:i18n`. `premerged` lit un fichier unique ; `source` fusionne root/page/fallback via `@i18n-micro/utils/source-loader`.
+
+```typescript
+import { loadTranslationsFromServer } from '../server/utils/server-loader'
+
+// Returns { data: Translations, json: string }
+const { data, json } = await loadTranslationsFromServer('en', 'index')
+```
+
+### 3. Chargement côté client (pas d'intégration HTML)
+
+Les dictionnaires **ne sont pas** écrits dans `nuxtApp.payload`. Le serveur les conserve en mémoire pour le rendu SSR ; le plugin client attend `switchContext`, qui charge `/\{apiBaseUrl\}/:page/:locale/data.json` (même posture par défaut que `@nuxtjs/i18n` avec `experimental.preload: false`).
+
+`NuxtI18n` détient le dictionnaire actif de la couche de vue utilisé par `$t()` et `$has()`. `NuxtTranslationLoader` change le contexte de locale/route et fusionne les fragments dans cette couche.
+
+### 4. Route API serveur
+
+**Route** : `/_locales/\{page\}/\{locale\}/data.json`
+
+**Fichier** : `src/runtime/server/routes/i18n.ts`
+
+Cette route Nitro sert les traductions fusionnées pour le mode de payload actif. Elle appelle `loadTranslationsFromServer()` et retourne le résultat en JSON.
+
+En production, elle définit également :
+
+```http
+Cache-Control: public, max-age={httpCacheDuration}, immutable
+```
+
+`httpCacheDuration` vaut par défaut `31536000` (1 an). C'est sûr car les clients demandent les payloads avec un cache-busting `?v=\{dateBuild\}`. Définissez `httpCacheDuration: 0` pour omettre l'en-tête. Cet en-tête n'est pas appliqué en développement.
+
+## 📥 Extension : chargement personnalisé des traductions
+
+### Lire depuis le cache (route serveur)
+
+```ts
+// server/api/i18n/load-cache.[post].ts
+import { defineEventHandler, readBody } from 'h3'
+import { loadTranslationsFromServer } from '#imports'
+
+export default defineEventHandler(async (event) => {
+  const { page, locale } = await readBody<{ page: string; locale: string }>(event)
+  const { data } = await loadTranslationsFromServer(locale, page)
+  return { locale, page, data }
+})
+```
+
+### Mettre à jour les traductions (fichier + invalider le cache)
+
+```ts
+// server/api/i18n/update.[post].ts
+import { defineEventHandler, readBody, createError } from 'h3'
+import { join } from 'node:path'
+import { readFile, writeFile } from 'node:fs/promises'
+import { deepMergeTranslations } from '@i18n-micro/utils/deep-merge'
+
+export default defineEventHandler(async (event) => {
+  const { path, updates } = await readBody<{ path: string; updates: Record<string, unknown> }>(event)
+
+  if (!path || !updates) {
+    throw createError({ statusCode: 400, statusMessage: 'Missing path or updates' })
+  }
+
+  const fullPath = join('locales', path)
+  let existing: Record<string, unknown> = {}
+
+  try {
+    const content = await readFile(fullPath, 'utf-8')
+    existing = JSON.parse(content) as Record<string, unknown>
+  } catch {
+    // File does not exist — create new
+  }
+
+  const merged = deepMergeTranslations(existing, updates)
+  await writeFile(fullPath, JSON.stringify(merged, null, 2), 'utf-8')
+
+  return { success: true, path, updated: merged }
+})
+```
+
+
+## 🧹 Vider le cache
+
+### Vidage programmatique du cache (client)
+
+Utilisez la méthode intégrée `$clearCache` :
+
+```vue
+<script setup>
+const { $clearCache } = useNuxtApp()
+
+// Clears both TranslationStorage and plugin-level cache
+$clearCache()
+</script>
+```
+
+### Comportement du cache serveur
+
+Le cache côté serveur (`loadTranslationsFromServer`) est global au processus et persiste jusqu'à :
+
+- Ce que le processus serveur redémarre.
+- Ce qu'un nouveau déploiement soit détecté (valeur `dateBuild` différente).
+
+Pour les environnements serverless, chaque cold start a un cache neuf.
+
+## ⚙️ Configuration serverless
+
+Pour les environnements serverless (Cloudflare Workers, AWS Lambda), le cache intégré utilise des objets `Map` en mémoire. Aucune configuration de stockage externe n'est nécessaire pour le cache de traductions lui-même.
+
+En revanche, le stockage Nitro pour les fichiers de traduction source peut nécessiter une configuration :
+
+```ts
+export default defineNuxtConfig({
+  nitro: {
+    storage: {
+      // Only needed if default file-system storage is unavailable
+      'assets:server': {
+        driver: 'cloudflare-kv-binding',
+        binding: 'MY_KV_NAMESPACE',
+      },
+    },
+  },
+})
+```
+
+## 💡 Principales différences avec la v2
+
+| Aspect           | v2                            | v3                                                                       |
+| ---------------- | ----------------------------- | ------------------------------------------------------------------------ |
+| Cache client     | `useStorage('cache')`         | Singleton `TranslationStorage` (Symbol.for sur globalThis)               |
+| Transfert SSR    | Config runtime                | Fragments complets via `payload.data` (v3.0 utilisait `useState`)        |
+| Cache serveur    | Stockage de cache Nitro       | `Map` globale au processus via `Symbol.for`                              |
+| Logique de fusion| Côté client                   | Au moment du build (`premerged`) ou à l'exécution (`source`) via `@i18n-micro/utils/*` |
+| Format de la clé | `i18n:merged:\{page\}:\{locale\}` | `\{locale\}:\{routeName\}`                                                   |
+
+## 📚 Voir aussi
+
+- [Guide de performance](/guides/performance) — L'impact du cache sur les performances
+- [Traductions côté serveur](/guides/server-side-translations) — Utilisation des traductions dans les routes serveur
+- [Déploiement Firebase](/guides/firebase) — Considérations de cache spécifiques au déploiement

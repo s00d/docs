@@ -1,0 +1,150 @@
+---
+title: "升级指南：v2.x 到 v3.x"
+description: "把 Nuxt I18n Micro 从 v2.x 升级到 v3.x：破坏性变更、新的 payload 模式、更新的组合式函数以及必要的配置更新。"
+---
+
+# 📦 从 v2.x 升级到 v3.x
+
+<Tip>
+参见[从 nuxt-i18n 迁移](/migration/from-nuxtjs-i18n) —— 那份指南适用于从 vue-i18n 生态迁移，而不是从 nuxt-i18n-micro v2 迁移。
+</Tip>
+
+v3.0.0 引入了根本性的架构变化：策略包、新的缓存系统、通过 `useI18nLocale()` 集中管理语言以及重新设计的重定向流水线。本节介绍所有破坏性变更以及如何更新你的代码。
+
+## 迁移步骤
+
+```mermaid
+flowchart LR
+    A["1. Update deps"] --> B["2. Fix config"] --> C["3. Update plugins"] --> D["4. Test"] --> E["✅ Done"]
+```
+
+## 破坏性变更总览
+
+- **语言状态** —— 手动使用 `useState` / `useCookie` → 改用 `useI18nLocale()` 组合式函数
+- **配置访问** —— `useRuntimeConfig().public.i18nConfig` → 改用 `#build/i18n.strategy.mjs` 的 `getI18nConfig()`
+- **重定向组件** —— `fallbackRedirectComponentPath` 选项 → 服务器重定向插件 + 客户端路由中间件（自动化）
+- **`includeDefaultLocaleRoute`** —— 支持（已弃用） → 移除，请使用 `strategy` 选项
+- **`experimental.hmr`** —— 位于 `experimental` 下 → 已提升为根级选项
+- **`previousPageFallback`** —— 完全移除（累积合并策略已自动处理这种情况）
+- **缓存** —— `useStorage('cache')` → 单例 `TranslationStorage`（`globalThis` 上的 `Symbol.for`）
+- **SSR 传输** —— 运行时配置 → Nuxt payload（v3 使用 `useState`；chunk 现在位于 `payload.data`，参见[性能](/guides/performance#server-side-payload-transfer)）
+- **策略类** —— 内部化 → 拆分为独立包（`@i18n-micro/route-strategy`、`@i18n-micro/path-strategy`）
+
+## 已移除：`fallbackRedirectComponentPath`
+
+`fallbackRedirectComponentPath` 选项以及 `locale-redirect.vue` 回退组件已被移除。重定向逻辑现在由以下部分处理：
+
+1. **服务器中间件**（`i18n.global.ts`）—— 设置 `event.context.i18n.locale`
+2. **服务器重定向插件**（`06.redirect.ts`，仅服务器）—— 在渲染前发出 302 重定向
+3. **客户端路由中间件**（`i18n-redirect.global.ts`）—— hydration 后处理 SPA 重定向
+
+```diff
+ i18n: {
+   strategy: 'prefix_except_default',
+-  fallbackRedirectComponentPath: '~/components/MyRedirect.vue',
+ }
+```
+
+如果你原本在回退组件里实现了自定义重定向逻辑，请改在服务器插件中实现：
+
+```ts
+// plugins/i18n-loader.server.ts
+export default defineNuxtPlugin({
+  name: 'i18n-custom-redirect',
+  enforce: 'pre',
+  order: -10,
+  setup() {
+    const { setLocale } = useI18nLocale()
+    // Your custom detection logic
+    setLocale(detectedLocale)
+  },
+})
+```
+
+## 已移除：`includeDefaultLocaleRoute`
+
+请改用 `strategy` 选项：
+
+- `includeDefaultLocaleRoute: true` → `strategy: 'prefix'`
+- `includeDefaultLocaleRoute: false` → `strategy: 'prefix_except_default'`（默认值）
+
+```diff
+ i18n: {
+-  includeDefaultLocaleRoute: true,
++  strategy: 'prefix',
+ }
+```
+
+## 配置访问：`getI18nConfig()` 取代 `useRuntimeConfig`
+
+```diff
+- const config = useRuntimeConfig()
+- const cookieName = config.public.i18nConfig?.localeCookie || 'user-locale'
++ import { getI18nConfig } from '#build/i18n.strategy.mjs'
++ const { localeCookie: configCookie } = getI18nConfig()
++ const cookieName = configCookie ?? 'user-locale'
+```
+
+## 语言管理：`useI18nLocale()` 取代手动状态
+
+在 v2 中你可能直接使用 `useState('i18n-locale')` 或 `useCookie('user-locale')`。在 v3 中，请使用集中式的 `useI18nLocale()` 组合式函数：
+
+```diff
+- const locale = useState('i18n-locale')
+- const cookie = useCookie('user-locale')
+- locale.value = 'fr'
+- cookie.value = 'fr'
++ const { setLocale } = useI18nLocale()
++ setLocale('fr') // Updates both state and cookie atomically
+```
+
+详细示例参见[自定义语言检测](/guides/custom-language-detection)。
+
+## 实验性选项的迁移 / 移除
+
+`hmr` 已从 `experimental` 提升为根级选项。`previousPageFallback` 已完全移除 —— 模块现在使用累积式深合并策略（2 层深度），能在页面过渡动画期间自动保留上一页的翻译，即便页面之间存在嵌套键重叠。过渡动画结束后，`page:transition:finish` 钩子会从内存中清理上一页的键。
+
+```diff
+ i18n: {
+-  experimental: {
+-    hmr: true,
+-    previousPageFallback: true
+-  }
++  hmr: true,
++  // previousPageFallback removed — handled automatically
+ }
+```
+
+## 重定向架构（v3）
+
+重定向现在由两个组件自动处理：
+
+1. **服务端**（`06.redirect.ts`，仅服务器）：在 SSR 期间运行，在任何页面渲染之前发出 302 重定向——无“错误闪烁”
+2. **客户端**（`i18n-redirect.global.ts`）：SPA 导航时的全局路由中间件；保留查询串和 hash
+
+重定向时的语言优先级：
+
+1. `useState('i18n-locale')` —— 通过 `useI18nLocale().setLocale()` 设置
+2. Cookie —— 若配置了 `localeCookie`
+3. `Accept-Language` header —— 若 `autoDetectLanguage: true`
+4. `defaultLocale` —— 回退
+
+标准设置无需改动代码。
+
+<Warning>
+对于 `prefix` 与 `prefix_except_default` 策略且 `redirects: true` 时，请设置 `localeCookie: 'user-locale'` 以在页面刷新之间保持语言。否则重定向只能依赖 `Accept-Language` 或 `defaultLocale`。
+</Warning>
+
+## TypeScript：内部模块类型（可选）
+
+如果遇到与内部导入相关的类型错误（例如 `#i18n-internal/plural`、`#i18n-internal/strategy`、`#i18n-internal/config`），请在项目 `package.json` 中添加 `imports` 部分：
+
+```json
+{
+  "imports": {
+    "#i18n-internal/plural": "nuxt-i18n-micro/internals",
+    "#i18n-internal/strategy": "nuxt-i18n-micro/internals",
+    "#i18n-internal/config": "nuxt-i18n-micro/internals"
+  }
+}
+```

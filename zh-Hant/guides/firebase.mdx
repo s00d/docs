@@ -1,0 +1,497 @@
+---
+title: "Firebase AppHosting 部署"
+description: "將 Nuxt I18n Micro 部署到 Firebase AppHosting：修正 JSON MIME 類型、設定路由規則，讓翻譯在正式環境正常運作。"
+---
+
+# 🔥 Firebase AppHosting 部署
+
+## 📖 介紹
+
+Firebase AppHosting 是強大的 Nuxt 應用 serverless 部署平台。然而，部署使用 `nuxt-i18n-micro` 的應用時，可能會遇到與翻譯 JSON 檔案提供方式相關的特定問題。本指南提供完整解法，確保正式環境中翻譯正確運作。
+
+## ⚠️ 常見問題
+
+### 翻譯檔案未套用
+
+**症狀：**
+
+- ✅ 開發（`nuxt dev`）中翻譯完全正常
+- ❌ 部署到 Firebase AppHosting 後，JSON 檔案有載入，但翻譯未套用
+- ❌ Console 沒有錯誤
+- ❌ Network tab 看得到翻譯檔案，但 `Content-Type` 為 `text/html` 而非 `application/json`
+
+**根本原因：**
+
+Firebase AppHosting（以及使用 Nitro prerendering 的其他平台）可能會以錯誤的 MIME 類型提供預先渲染的 JSON 檔案。當瀏覽器收到 `Content-Type: text/html` 的 JSON 檔時，無法正確解析，導致翻譯沉默失敗。
+
+## ✅ 解法
+
+### 解法 1：Route Rules 設定（建議）
+
+最直接的解法是在 `nuxt.config.ts` 中為翻譯路由加入明確標頭：
+
+```typescript
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+
+  i18n: {
+    locales: [
+      { code: 'en', iso: 'en-US', dir: 'ltr' },
+      { code: 'fr', iso: 'fr-FR', dir: 'ltr' },
+      { code: 'de', iso: 'de-DE', dir: 'ltr' },
+      // ... other locales
+    ],
+    strategy: 'prefix_except_default',
+    defaultLocale: 'en',
+    translationDir: 'locales',
+    meta: true,
+    metaBaseUrl: 'https://your-domain.com',
+  },
+
+  // Add route rules for translation files
+  routeRules: {
+    '/_locales/**': {
+      headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'public, max-age=3600, s-maxage=3600',
+      },
+    },
+  },
+})
+```
+
+**優點：**
+
+- ✨ 設定簡單
+- 🚀 透過適當快取提升效能
+- 🔒 適用於所有部署平台
+
+### 解法 2：自訂 API 基底 URL
+
+若你使用自訂 `apiBaseUrl`（僅路徑前綴），請相應調整 route rules：
+
+```typescript
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+
+  i18n: {
+    apiBaseUrl: '/api/translations', // Path prefix only, not a full URL
+    locales: [
+      { code: 'en', iso: 'en-US', dir: 'ltr' },
+      { code: 'fr', iso: 'fr-FR', dir: 'ltr' },
+    ],
+    defaultLocale: 'en',
+  },
+
+  routeRules: {
+    '/api/translations/**': {
+      headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'public, max-age=3600',
+      },
+    },
+  },
+})
+```
+
+### 解法 3：Firebase 專屬設定
+
+在專案根目錄建立或更新 `firebase.json`：
+
+```json
+{
+  "hosting": {
+    "public": ".output/public",
+    "cleanUrls": true,
+    "rewrites": [
+      {
+        "source": "**",
+        "function": "server"
+      }
+    ],
+    "headers": [
+      {
+        "source": "/_locales/**/*.json",
+        "headers": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Cache-Control",
+            "value": "public, max-age=3600, immutable"
+          },
+          {
+            "key": "Access-Control-Allow-Origin",
+            "value": "*"
+          }
+        ]
+      }
+    ]
+  },
+  "functions": {
+    "source": ".output/server"
+  }
+}
+```
+
+
+### 解法 4：Firebase Functions 設定
+
+若要部署到 Firebase Functions，請確認 `functions/package.json` 包含必要相依：
+
+```json
+{
+  "name": "functions",
+  "type": "module",
+  "engines": {
+    "node": "18"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.0.0",
+    "firebase-functions": "^5.0.0"
+  }
+}
+```
+
+## 🔍 除錯
+
+### 啟用除錯模式
+
+加入除錯記錄以找出問題：
+
+```typescript
+export default defineNuxtConfig({
+  i18n: {
+    debug: true,
+    // Your other config...
+  },
+})
+```
+
+這會輸出以下詳細記錄：
+
+- 📝 翻譯檔案載入
+- 🔄 快取操作
+- ⚠️ 載入錯誤
+
+### 檢查 Network Tab
+
+1. 開啟 DevTools → Network tab
+2. 篩選 "data.json"
+3. 點擊翻譯檔案請求
+4. 檢查 **Response Headers**：
+   - ✅ `Content-Type: application/json`（正確）
+   - ❌ `Content-Type: text/html`（不正確，需修正）
+
+### 驗證 Prerender 輸出
+
+建置後，確認翻譯檔已產生：
+
+```bash
+pnpm build
+
+# Check public payload copy (premerged layout)
+ls -la .output/public/_locales/index/en/
+# → data.json
+```
+
+你應該能看到每個頁面／語系下都有 `data.json`。
+
+## 🚀 建置設定
+
+### Nitro Preset
+
+Firebase AppHosting 上請使用正確的 preset：
+
+```typescript
+export default defineNuxtConfig({
+  nitro: {
+    preset: 'firebase-app-hosting',
+    firebase: {
+      gen: 2,
+      httpsOptions: {
+        region: 'us-central1',
+        maxInstances: 3,
+      },
+    },
+  },
+})
+```
+
+### Prerender 設定
+
+為最佳效能設定預先渲染：
+
+```typescript
+export default defineNuxtConfig({
+  nitro: {
+    prerender: {
+      crawlLinks: true,
+      routes: ['/'],
+      ignore: ['/api/**', '/admin/**'],
+    },
+  },
+})
+```
+
+## 📋 完整範例設定
+
+以下是 Firebase AppHosting 的完整可運作設定：
+
+```typescript
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+
+  i18n: {
+    locales: [
+      { code: 'en', iso: 'en-US', dir: 'ltr' },
+      { code: 'fr', iso: 'fr-FR', dir: 'ltr' },
+      { code: 'de', iso: 'de-DE', dir: 'ltr' },
+      { code: 'es', iso: 'es-ES', dir: 'ltr' },
+      { code: 'it', iso: 'it-IT', dir: 'ltr' },
+      { code: 'pt', iso: 'pt-PT', dir: 'ltr' },
+      { code: 'ru', iso: 'ru-RU', dir: 'ltr' },
+      { code: 'zh', iso: 'zh-CN', dir: 'ltr' },
+      { code: 'ko', iso: 'ko-KR', dir: 'ltr' },
+    ],
+    strategy: 'prefix_except_default',
+    defaultLocale: 'en',
+    translationDir: 'locales',
+    meta: true,
+    metaBaseUrl: 'https://your-domain.com',
+    debug: false, // Enable in development if needed
+  },
+
+  routeRules: {
+    '/_locales/**': {
+      headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'public, max-age=3600, s-maxage=3600',
+      },
+    },
+  },
+
+  nitro: {
+    preset: 'firebase-app-hosting',
+    prerender: {
+      crawlLinks: true,
+      routes: ['/'],
+    },
+  },
+})
+```
+
+```json
+// firebase.json
+{
+  "hosting": {
+    "public": ".output/public",
+    "cleanUrls": true,
+    "headers": [
+      {
+        "source": "/_locales/**/*.json",
+        "headers": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Cache-Control",
+            "value": "public, max-age=3600, immutable"
+          }
+        ]
+      },
+      {
+        "source": "**/*.@(jpg|jpeg|gif|png|webp|svg|ico)",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "public, max-age=31536000, immutable"
+          }
+        ]
+      }
+    ],
+    "rewrites": [
+      {
+        "source": "**",
+        "function": "server"
+      }
+    ]
+  },
+  "functions": {
+    "source": ".output/server",
+    "runtime": "nodejs18"
+  }
+}
+```
+
+## ✅ 驗證清單
+
+套用修正後，確認以下各項都正常：
+
+- [ ] 建置無錯誤完成
+- [ ] 翻譯 JSON 檔位於 `.output/public/_locales/\{page\}/\{locale\}/data.json`
+- [ ] Network tab 顯示翻譯檔的 `Content-Type: application/json`
+- [ ] 首次頁面載入時翻譯正確顯示
+- [ ] Console 無 hydration mismatch
+- [ ] 語言切換正常運作
+- [ ] SEO meta 標籤正確產生
+
+## 🔄 部署流程
+
+### 1. 準備建置
+
+```bash
+# Install dependencies
+pnpm install
+
+# Build for production
+pnpm build
+
+# Verify public payload copy
+ls -la .output/public/_locales/index/en/data.json
+```
+
+### 2. 部署到 Firebase
+
+```bash
+# Install Firebase CLI if not already installed
+npm install -g firebase-tools
+
+# Login to Firebase
+firebase login
+
+# Initialize Firebase (first time only)
+firebase init hosting
+
+# Deploy
+firebase deploy --only hosting,functions
+```
+
+### 3. 驗證部署
+
+1. 造訪你部署的站點
+2. 開啟 DevTools → Network tab
+3. 導覽到某頁面
+4. 確認 `/_locales/index/en/data.json`（或你的預設語系）以以下狀態載入：
+   - Status：200
+   - Content-Type：application/json
+   - Response 內容為合法 JSON
+
+## 🔧 疑難排解
+
+### 問題：翻譯檔 404
+
+**解法：** 確認翻譯檔已複製到輸出目錄：
+
+```typescript
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: {
+    publicAssets: [
+      {
+        dir: 'locales',
+        maxAge: 60 * 60 * 24 * 365, // 1 year
+      },
+    ],
+  },
+})
+```
+
+### 問題：某些頁面翻譯正常但其他頁面不行
+
+**解法：** 檢查頁面專屬翻譯是否有被產生：
+
+```bash
+# Should show data.json for each page/locale
+ls -la .output/public/_locales/index/en/
+ls -la .output/public/_locales/about/en/
+```
+
+若頁面專屬翻譯缺失，確認 `disablePageLocales` 未設為 `true`：
+
+```typescript
+i18n: {
+  disablePageLocales: false, // Ensure this is false
+}
+```
+
+### 問題：翻譯載入緩慢
+
+**解法：** 最佳化快取與預先載入：
+
+```typescript
+routeRules: {
+  '/_locales/**': {
+    headers: {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'public, max-age=31536000, immutable',
+      'X-Content-Type-Options': 'nosniff'
+    },
+    prerender: true
+  }
+}
+```
+
+## 📚 延伸資源
+
+- [Firebase AppHosting 文件](https://firebase.google.com/docs/app-hosting)
+- [Nitro Presets](https://nitro.unjs.io/deploy/providers/firebase)
+- [Nuxt 部署指南](https://nuxt.com/docs/getting-started/deployment)
+- [模組設定](/guides/configuration)
+
+## 💡 提示
+
+1. **在類正式環境測試**：部署前先在類似正式的環境測試。
+2. **使用除錯模式**：初期設定時使用，及早發現問題。
+3. **監控快取命中率**：以最佳化效能。
+4. **保持翻譯檔精簡**：加快載入。
+5. **使用適當的快取標頭**：降低伺服器負擔。
+
+## ⚡ 效能最佳化
+
+### 啟用壓縮
+
+Firebase 會自動處理 Gzip／Brotli 壓縮，但仍請確保你的建置經過最佳化：
+
+```typescript
+export default defineNuxtConfig({
+  vite: {
+    build: {
+      minify: 'terser',
+      terserOptions: {
+        compress: {
+          drop_console: true,
+        },
+      },
+    },
+  },
+})
+```
+
+### 延遲載入翻譯
+
+`Nuxt I18n Micro` 會自動以逐頁方式延遲載入翻譯。翻譯僅在需要時載入，減少初始 bundle 大小。此為內建功能，不需額外設定。
+
+進一步最佳化：
+
+- 使用 `disablePageLocales: false`（預設）啟用頁面專屬翻譯
+- 保持根層翻譯精簡
+- 為頁面內容使用逐路由翻譯檔
+
+<Tip>
+自 **v3.0.0+** 起，模組會自動設定正確的 `Content-Type` 標頭。若你遇到問題，請更新到最新版本：
+
+```bash
+pnpm update nuxt-i18n-micro@latest
+```
+</Tip>
+
+## 🎯 下一步
+
+- [伺服器端翻譯](/guides/server-side-translations)
+- [效能最佳化](/guides/performance)
+- [SEO 設定](/guides/seo)
+- [測試指南](/guides/testing)

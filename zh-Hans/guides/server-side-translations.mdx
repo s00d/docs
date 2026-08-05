@@ -1,0 +1,304 @@
+---
+title: "服务器端翻译与语言数据"
+description: "在 Nitro 路由和中间件中通过 Nuxt I18n Micro 的 useI18n 辅助函数在服务器端获取翻译与语言信息。"
+---
+
+# 🌍 Nuxt I18n Micro 中的服务器端翻译与语言信息
+
+## 📖 概述
+
+Nuxt I18n Micro 支持服务器端翻译与语言信息，让你能够在服务器上翻译内容并访问语言细节。这在需要在到达客户端之前完成本地化的 API 或服务端渲染应用中尤为有用。
+
+翻译会使用 Nuxt I18n 配置中定义的语言消息，并根据检测到的语言动态解析。
+
+在默认（`translationPayloads.mode: 'premerged'`）模式下，根级文件会在构建期以 `\{page\}/\{locale\}/data.json` 的形式烘焙进每个页面 payload。服务器加载的正是客户端在 `/\{apiBaseUrl\}/...` 下获取的同一批预构建文件，因此所有键（共享的和页面级的）在服务器处理器中都可用。
+
+在 `translationPayloads.mode: 'source'` 下，精简的源文件会在调用 `loadTranslationsFromServer()`（或访问 `/_locales` 路由）时在运行时合并——**Edge** 通过 Nitro `serverAssets` 完成，**Node** 从可选的 public 副本读取。详见[性能指南 —— Serverless payload 输出](/guides/performance#serverless-payload-output)与[缓存与存储架构](/api/cache)。
+
+有关运行时和服务器 API 的完整清单，请参见 [API 参考](/api/overview)。
+
+## 🛠️ 配置服务器端中间件
+
+要启用服务器端翻译与语言信息，请使用以下中间件函数：
+
+- `useTranslationServerMiddleware` —— 用于翻译内容
+- `useLocaleServerMiddleware` —— 用于访问语言信息
+
+这两个函数在所有服务器路由中都自动可用。
+
+两个中间件之间通过共享的 `detectCurrentLocale` 工具来复用语言检测逻辑，以在模块中保持一致性。
+
+## ✨ 在服务器处理器中使用翻译
+
+你可以在任何 `eventHandler` 中无缝翻译内容——只需使用翻译中间件。
+
+### 示例：基本翻译用法
+
+```typescript
+import { defineEventHandler } from 'h3'
+
+export default defineEventHandler(async (event) => {
+  const t = await useTranslationServerMiddleware(event)
+  return {
+    message: t('greeting'), // Returns the translated value for the key "greeting"
+  }
+})
+```
+
+在此示例中：
+
+- 用户语言会自动从查询参数、cookie 或请求头中检测。
+- `t` 函数会根据检测到的语言取回相应翻译。
+
+## 🌍 在服务器处理器中使用语言信息
+
+### 语言信息的基本用法
+
+```typescript
+import { defineEventHandler } from 'h3'
+
+export default defineEventHandler((event) => {
+  const localeInfo = useLocaleServerMiddleware(event)
+
+  return {
+    success: true,
+    data: localeInfo,
+    timestamp: new Date().toISOString(),
+  }
+})
+```
+
+### 提供自定义语言参数
+
+```typescript
+import { defineEventHandler } from 'h3'
+
+export default defineEventHandler((event) => {
+  // Force specific locale with custom default
+  const localeInfo = useLocaleServerMiddleware(event, 'en', 'ru')
+
+  return {
+    success: true,
+    data: localeInfo,
+    timestamp: new Date().toISOString(),
+  }
+})
+```
+
+### 响应结构
+
+locale 中间件返回一个具有以下属性的 `LocaleInfo` 对象：
+
+```typescript
+interface LocaleInfo {
+  current: string // Current detected locale code
+  default: string // Default locale code
+  fallback: string // Fallback locale code
+  available: string[] // Array of all available locale codes
+  locale: Locale | null // Full locale configuration object
+  isDefault: boolean // Whether current locale is the default
+  isFallback: boolean // Whether current locale is the fallback
+}
+```
+
+### 响应示例
+
+```json
+{
+  "success": true,
+  "data": {
+    "current": "ru",
+    "default": "en",
+    "fallback": "en",
+    "available": ["en", "ru", "de"],
+    "locale": {
+      "code": "ru",
+      "iso": "ru-RU",
+      "dir": "ltr",
+      "displayName": "Русский"
+    },
+    "isDefault": false,
+    "isFallback": false
+  },
+  "timestamp": "2024-01-15T10:30:00.000Z"
+}
+```
+
+## 🌐 提供自定义语言
+
+若你需要手动指定语言（例如用于测试或特定请求），可以将其传给翻译中间件：
+
+### 示例：自定义语言
+
+```typescript
+import { defineEventHandler } from 'h3'
+
+function detectLocale(event): string | null {
+  const urlSearchParams = new URLSearchParams(event.node.req.url?.split('?')[1])
+  const localeFromQuery = urlSearchParams.get('locale')
+  if (localeFromQuery) return localeFromQuery
+
+  return 'en'
+}
+
+export default defineEventHandler(async (event) => {
+  const t = await useTranslationServerMiddleware(event, 'en', detectLocale(event)) // Force French local, en - default locale
+  return {
+    message: t('welcome'), // Returns the French translation for "welcome"
+  }
+})
+```
+
+## 📋 语言检测逻辑
+
+两个中间件都会按以下优先级自动确定用户的语言：
+
+```mermaid
+flowchart TB
+    A[Incoming Request] --> B{URL Parameter?}
+    B -->|"?locale=ru"| Z[Use 'ru']
+    B -->|No| C{Route Parameter?}
+    C -->|"/ru/api/..."| Z
+    C -->|No| D{Cookie?}
+    D -->|"user-locale=de"| Y{Valid Locale?}
+    Y -->|Yes| Z2[Use Cookie Value]
+    Y -->|No| E
+    D -->|No| E{Accept-Language?}
+    E -->|"Accept-Language: fr"| Z3[Use Header Value]
+    E -->|No| F{Fallback Locale?}
+    F -->|Configured| Z4[Use Fallback]
+    F -->|No| G{Default Locale?}
+    G -->|Configured| Z5[Use Default]
+    G -->|No| H["Use 'en'"]
+
+    Z --> I[Return Locale]
+    Z2 --> I
+    Z3 --> I
+    Z4 --> I
+    Z5 --> I
+    H --> I
+```
+
+1. **URL 参数**：`?locale=ru`
+2. **路由参数**：`/ru/api/endpoint`
+3. **Cookie**：`user-locale` cookie
+4. **HTTP 请求头**：`Accept-Language`
+5. **回退语言**：模块选项中的配置
+6. **默认语言**：模块选项中的配置
+7. **硬编码回退**：`'en'`
+
+> **注意**：`useLocaleServerMiddleware` 与 `useTranslationServerMiddleware` 共享该语言检测逻辑，以在模块中保持一致。
+
+## 📋 进阶用法示例
+
+### 根据语言返回不同响应
+
+```typescript
+import { defineEventHandler } from 'h3'
+
+export default defineEventHandler((event) => {
+  const { current, isDefault, locale } = useLocaleServerMiddleware(event)
+
+  // Return different content based on locale
+  if (current === 'ru') {
+    return {
+      message: 'Привет, мир!',
+      locale: current,
+      isDefault,
+    }
+  }
+
+  if (current === 'de') {
+    return {
+      message: 'Hallo, Welt!',
+      locale: current,
+      isDefault,
+    }
+  }
+
+  // Default English response
+  return {
+    message: 'Hello, World!',
+    locale: current,
+    isDefault,
+  }
+})
+```
+
+### 自定义语言检测
+
+```typescript
+import { defineEventHandler } from 'h3'
+
+export default defineEventHandler((event) => {
+  // Force German locale with English as fallback
+  const { current, isDefault, locale } = useLocaleServerMiddleware(event, 'en', 'de')
+
+  return {
+    message: 'Hallo, Welt!',
+    locale: current,
+    isDefault: false, // Will be false since we forced German
+  }
+})
+```
+
+### 带校验的语言感知 API
+
+```typescript
+import { defineEventHandler, createError } from 'h3'
+
+export default defineEventHandler((event) => {
+  const { current, available, locale } = useLocaleServerMiddleware(event)
+
+  // Validate if the detected locale is supported
+  if (!available.includes(current)) {
+    throw createError({
+      statusCode: 400,
+      statusMessage: `Unsupported locale: ${current}. Available locales: ${available.join(', ')}`,
+    })
+  }
+
+  // Return locale-specific configuration
+  return {
+    locale: current,
+    direction: locale?.dir || 'ltr',
+    displayName: locale?.displayName || current,
+    availableLocales: available,
+  }
+})
+```
+
+### 与翻译中间件结合使用
+
+你可以把语言信息与翻译中间件结合，以获得完整的国际化能力：
+
+```typescript
+import { defineEventHandler } from 'h3'
+
+export default defineEventHandler(async (event) => {
+  const localeInfo = useLocaleServerMiddleware(event)
+  const t = await useTranslationServerMiddleware(event)
+
+  return {
+    locale: localeInfo.current,
+    message: t('welcome_message'),
+    availableLocales: localeInfo.available,
+    isDefault: localeInfo.isDefault,
+  }
+})
+```
+
+## 📝 最佳实践
+
+1. **始终校验语言**：检查检测到的语言是否在你的可用语言列表中
+2. **使用回退逻辑**：在语言检测失败时提供合理的默认值
+3. **缓存语言信息**：对性能敏感的应用，考虑缓存语言检测结果
+4. **处理边界情况**：为不受支持的语言提供适当的错误响应
+5. **与翻译结合**：结合翻译中间件与语言信息，实现完整的 i18n 能力
+
+## 🚀 性能考虑
+
+- 两个中间件都很轻量，为快速执行而设计
+- 语言检测使用高效的回退链
+- 语言检测过程中不进行外部 API 调用
+- 结果为同步计算，性能最佳

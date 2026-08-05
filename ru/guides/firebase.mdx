@@ -1,0 +1,497 @@
+---
+title: "Деплой на Firebase AppHosting"
+description: "Деплой Nuxt I18n Micro на Firebase AppHosting: исправляем MIME-типы JSON, настраиваем route rules и держим переводы рабочими в продакшне."
+---
+
+# 🔥 Деплой на Firebase AppHosting
+
+## 📖 Введение
+
+Firebase AppHosting — мощная платформа для деплоя приложений Nuxt на serverless-инфраструктуре. Однако при деплое приложений с `nuxt-i18n-micro` вы можете столкнуться со специфическими проблемами, связанными с тем, как раздаются JSON-файлы переводов. Это руководство даёт подробные решения, чтобы ваши переводы корректно работали в продакшне.
+
+## ⚠️ Типичные проблемы
+
+### Файлы переводов не применяются
+
+**Симптомы:**
+
+- ✅ Переводы отлично работают в разработке (`nuxt dev`)
+- ❌ После деплоя на Firebase AppHosting JSON-файлы загружаются, но переводы не применяются
+- ❌ В консоли нет ошибок
+- ❌ Файлы переводов видны во вкладке Network, но у них некорректный `Content-Type: text/html` вместо `application/json`
+
+**Корень проблемы:**
+
+Firebase AppHosting (и другие платформы с Nitro-пререндером) могут отдавать пререндеренные JSON-файлы с неверным MIME-типом. Когда браузер получает JSON с `Content-Type: text/html`, он не может корректно его распарсить, и переводы молча ломаются.
+
+## ✅ Решения
+
+### Решение 1: настройка Route Rules (рекомендуется)
+
+Самое прямолинейное решение — добавить явные заголовки для маршрутов переводов в `nuxt.config.ts`:
+
+```typescript
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+
+  i18n: {
+    locales: [
+      { code: 'en', iso: 'en-US', dir: 'ltr' },
+      { code: 'fr', iso: 'fr-FR', dir: 'ltr' },
+      { code: 'de', iso: 'de-DE', dir: 'ltr' },
+      // ... other locales
+    ],
+    strategy: 'prefix_except_default',
+    defaultLocale: 'en',
+    translationDir: 'locales',
+    meta: true,
+    metaBaseUrl: 'https://your-domain.com',
+  },
+
+  // Add route rules for translation files
+  routeRules: {
+    '/_locales/**': {
+      headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'public, max-age=3600, s-maxage=3600',
+      },
+    },
+  },
+})
+```
+
+**Плюсы:**
+
+- ✨ Простая конфигурация
+- 🚀 Улучшает производительность за счёт правильного кэширования
+- 🔒 Работает на всех платформах деплоя
+
+### Решение 2: свой API-базовый URL
+
+Если вы используете кастомный `apiBaseUrl` (только префикс пути), скорректируйте route rules соответственно:
+
+```typescript
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+
+  i18n: {
+    apiBaseUrl: '/api/translations', // Path prefix only, not a full URL
+    locales: [
+      { code: 'en', iso: 'en-US', dir: 'ltr' },
+      { code: 'fr', iso: 'fr-FR', dir: 'ltr' },
+    ],
+    defaultLocale: 'en',
+  },
+
+  routeRules: {
+    '/api/translations/**': {
+      headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'public, max-age=3600',
+      },
+    },
+  },
+})
+```
+
+### Решение 3: специфичная для Firebase конфигурация
+
+Создайте или обновите файл `firebase.json` в корне проекта:
+
+```json
+{
+  "hosting": {
+    "public": ".output/public",
+    "cleanUrls": true,
+    "rewrites": [
+      {
+        "source": "**",
+        "function": "server"
+      }
+    ],
+    "headers": [
+      {
+        "source": "/_locales/**/*.json",
+        "headers": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Cache-Control",
+            "value": "public, max-age=3600, immutable"
+          },
+          {
+            "key": "Access-Control-Allow-Origin",
+            "value": "*"
+          }
+        ]
+      }
+    ]
+  },
+  "functions": {
+    "source": ".output/server"
+  }
+}
+```
+
+
+### Решение 4: конфигурация Firebase Functions
+
+Для деплоя через Firebase Functions убедитесь, что `functions/package.json` содержит нужные зависимости:
+
+```json
+{
+  "name": "functions",
+  "type": "module",
+  "engines": {
+    "node": "18"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.0.0",
+    "firebase-functions": "^5.0.0"
+  }
+}
+```
+
+## 🔍 Отладка
+
+### Включите режим отладки
+
+Добавьте отладочное логирование, чтобы найти проблемы:
+
+```typescript
+export default defineNuxtConfig({
+  i18n: {
+    debug: true,
+    // Your other config...
+  },
+})
+```
+
+Это выведет подробные логи о:
+
+- 📝 Загрузке файлов переводов
+- 🔄 Операциях с кэшем
+- ⚠️ Ошибках загрузки
+
+### Проверьте вкладку Network
+
+1. Откройте DevTools → вкладку Network
+2. Отфильтруйте по "data.json"
+3. Кликните на запрос файла перевода
+4. Проверьте **Response Headers**:
+   - ✅ `Content-Type: application/json` (правильно)
+   - ❌ `Content-Type: text/html` (неправильно, нужно исправить)
+
+### Проверьте вывод пререндера
+
+После сборки проверьте, что файлы переводов сгенерированы:
+
+```bash
+pnpm build
+
+# Check public payload copy (premerged layout)
+ls -la .output/public/_locales/index/en/
+# → data.json
+```
+
+Вы должны увидеть `data.json` для каждой локали под каждой страницей.
+
+## 🚀 Конфигурация сборки
+
+### Nitro preset
+
+Для Firebase AppHosting используйте правильный preset:
+
+```typescript
+export default defineNuxtConfig({
+  nitro: {
+    preset: 'firebase-app-hosting',
+    firebase: {
+      gen: 2,
+      httpsOptions: {
+        region: 'us-central1',
+        maxInstances: 3,
+      },
+    },
+  },
+})
+```
+
+### Конфигурация пререндера
+
+Настройте пререндеринг для оптимальной производительности:
+
+```typescript
+export default defineNuxtConfig({
+  nitro: {
+    prerender: {
+      crawlLinks: true,
+      routes: ['/'],
+      ignore: ['/api/**', '/admin/**'],
+    },
+  },
+})
+```
+
+## 📋 Полный пример конфигурации
+
+Готовая рабочая конфигурация для Firebase AppHosting:
+
+```typescript
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+
+  i18n: {
+    locales: [
+      { code: 'en', iso: 'en-US', dir: 'ltr' },
+      { code: 'fr', iso: 'fr-FR', dir: 'ltr' },
+      { code: 'de', iso: 'de-DE', dir: 'ltr' },
+      { code: 'es', iso: 'es-ES', dir: 'ltr' },
+      { code: 'it', iso: 'it-IT', dir: 'ltr' },
+      { code: 'pt', iso: 'pt-PT', dir: 'ltr' },
+      { code: 'ru', iso: 'ru-RU', dir: 'ltr' },
+      { code: 'zh', iso: 'zh-CN', dir: 'ltr' },
+      { code: 'ko', iso: 'ko-KR', dir: 'ltr' },
+    ],
+    strategy: 'prefix_except_default',
+    defaultLocale: 'en',
+    translationDir: 'locales',
+    meta: true,
+    metaBaseUrl: 'https://your-domain.com',
+    debug: false, // Enable in development if needed
+  },
+
+  routeRules: {
+    '/_locales/**': {
+      headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'public, max-age=3600, s-maxage=3600',
+      },
+    },
+  },
+
+  nitro: {
+    preset: 'firebase-app-hosting',
+    prerender: {
+      crawlLinks: true,
+      routes: ['/'],
+    },
+  },
+})
+```
+
+```json
+// firebase.json
+{
+  "hosting": {
+    "public": ".output/public",
+    "cleanUrls": true,
+    "headers": [
+      {
+        "source": "/_locales/**/*.json",
+        "headers": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Cache-Control",
+            "value": "public, max-age=3600, immutable"
+          }
+        ]
+      },
+      {
+        "source": "**/*.@(jpg|jpeg|gif|png|webp|svg|ico)",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "public, max-age=31536000, immutable"
+          }
+        ]
+      }
+    ],
+    "rewrites": [
+      {
+        "source": "**",
+        "function": "server"
+      }
+    ]
+  },
+  "functions": {
+    "source": ".output/server",
+    "runtime": "nodejs18"
+  }
+}
+```
+
+## ✅ Чек-лист проверки
+
+После применения фиксов убедитесь, что всё работает:
+
+- [ ] Сборка проходит без ошибок
+- [ ] JSON-файлы переводов лежат в `.output/public/_locales/\{page\}/\{locale\}/data.json`
+- [ ] В Network указан `Content-Type: application/json` для файлов переводов
+- [ ] Переводы отображаются корректно при первой загрузке страницы
+- [ ] В консоли нет hydration mismatch
+- [ ] Переключение языка работает корректно
+- [ ] SEO мета-теги генерируются правильно
+
+## 🔄 Процесс деплоя
+
+### 1. Подготовка билда
+
+```bash
+# Install dependencies
+pnpm install
+
+# Build for production
+pnpm build
+
+# Verify public payload copy
+ls -la .output/public/_locales/index/en/data.json
+```
+
+### 2. Деплой в Firebase
+
+```bash
+# Install Firebase CLI if not already installed
+npm install -g firebase-tools
+
+# Login to Firebase
+firebase login
+
+# Initialize Firebase (first time only)
+firebase init hosting
+
+# Deploy
+firebase deploy --only hosting,functions
+```
+
+### 3. Проверка деплоя
+
+1. Откройте задеплоенный сайт
+2. Откройте DevTools → вкладку Network
+3. Перейдите на страницу
+4. Убедитесь, что `/_locales/index/en/data.json` (или ваша дефолтная локаль) грузится с:
+   - Status: 200
+   - Content-Type: application/json
+   - Response содержит валидный JSON
+
+## 🔧 Устранение неполадок
+
+### Проблема: 404 для файлов переводов
+
+**Решение:** Убедитесь, что файлы переводов копируются в выходной каталог:
+
+```typescript
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: {
+    publicAssets: [
+      {
+        dir: 'locales',
+        maxAge: 60 * 60 * 24 * 365, // 1 year
+      },
+    ],
+  },
+})
+```
+
+### Проблема: переводы работают на одних страницах и не работают на других
+
+**Решение:** Проверьте, что постраничные переводы генерируются:
+
+```bash
+# Should show data.json for each page/locale
+ls -la .output/public/_locales/index/en/
+ls -la .output/public/_locales/about/en/
+```
+
+Если постраничных переводов нет, убедитесь, что `disablePageLocales` не установлен в `true`:
+
+```typescript
+i18n: {
+  disablePageLocales: false, // Ensure this is false
+}
+```
+
+### Проблема: медленная загрузка переводов
+
+**Решение:** Оптимизируйте кэширование и предзагрузку:
+
+```typescript
+routeRules: {
+  '/_locales/**': {
+    headers: {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'public, max-age=31536000, immutable',
+      'X-Content-Type-Options': 'nosniff'
+    },
+    prerender: true
+  }
+}
+```
+
+## 📚 Дополнительные материалы
+
+- [Документация Firebase AppHosting](https://firebase.google.com/docs/app-hosting)
+- [Nitro Presets](https://nitro.unjs.io/deploy/providers/firebase)
+- [Руководство Nuxt по деплою](https://nuxt.com/docs/getting-started/deployment)
+- [Конфигурация модуля](/guides/configuration)
+
+## 💡 Советы
+
+1. **Всегда тестируйте в production-подобном окружении** перед деплоем
+2. **Используйте режим отладки** на этапе первоначальной настройки, чтобы ловить ошибки раньше
+3. **Мониторьте попадания в кэш**, чтобы оптимизировать производительность
+4. **Держите файлы переводов небольшими** для быстрой загрузки
+5. **Используйте правильные cache-заголовки**, чтобы снизить нагрузку на сервер
+
+## ⚡ Оптимизация производительности
+
+### Включите сжатие
+
+Firebase автоматически обрабатывает Gzip/Brotli-сжатие, но убедитесь, что ваш билд оптимизирован:
+
+```typescript
+export default defineNuxtConfig({
+  vite: {
+    build: {
+      minify: 'terser',
+      terserOptions: {
+        compress: {
+          drop_console: true,
+        },
+      },
+    },
+  },
+})
+```
+
+### Ленивая загрузка переводов
+
+`Nuxt I18n Micro` автоматически лениво подгружает переводы постранично. Переводы загружаются только по необходимости, уменьшая начальный размер бандла. Это встроенная функция — дополнительной настройки не требуется.
+
+Для дополнительной оптимизации:
+
+- Используйте `disablePageLocales: false` (по умолчанию), чтобы включить постраничные переводы
+- Держите корневые переводы минимальными
+- Используйте файлы переводов на маршрут для контента страницы
+
+<Tip>
+Модуль автоматически выставляет корректные заголовки `Content-Type` начиная с версии **v3.0.0+**. Если проблема сохраняется, обновитесь до последней версии:
+
+```bash
+pnpm update nuxt-i18n-micro@latest
+```
+</Tip>
+
+## 🎯 Дальнейшие шаги
+
+- [Серверные переводы](/guides/server-side-translations)
+- [Оптимизация производительности](/guides/performance)
+- [Настройка SEO](/guides/seo)
+- [Руководство по тестированию](/guides/testing)

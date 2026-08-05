@@ -1,0 +1,352 @@
+---
+title: "Estratégias de encaminhamento no Nuxt I18n Micro"
+description: "Compare as estratégias de encaminhamento do Nuxt I18n Micro: no_prefix, prefix, prefix_except_default e prefix_and_default, com tradeoffs de URL e SEO."
+---
+
+# 🗂️ Estratégias de encaminhamento no Nuxt I18n Micro
+
+## 📖 Visão geral
+
+O Nuxt I18n Micro controla como os prefixos de locale aparecem nos URLs através da opção `strategy`. Nos bastidores, dois pacotes implementam isto:
+
+- **`@i18n-micro/route-strategy`** — geração de rotas em tempo de build (estende as páginas Nuxt com rotas localizadas)
+- **`@i18n-micro/path-strategy`** — resolução de caminhos em runtime, redirecionamentos, atributos de SEO e geração de ligações
+
+O módulo Nuxt seleciona a classe de estratégia correta em tempo de build e cria um alias via `#i18n-strategy`, pelo que apenas a implementação escolhida é incluída no bundle.
+
+## 🚦 Estratégias disponíveis
+
+{/* generated:option:strategy — do not edit; run `pnpm run docs:generate` */}
+
+**Tipo** `Strategies` · **Predefinição** `'prefix_except_default'`
+
+Estratégia de encaminhamento de URL para prefixos de locale.
+
+- `'no_prefix'` — sem locale no URL; locale armazenado em cookie.
+- `'prefix_except_default'` — prefixa todos os locales exceto o predefinido.
+- `'prefix'` — prefixa sempre, incluindo o locale predefinido.
+- `'prefix_and_default'` — como `prefix`, mas o predefinido também está acessível sem prefixo.
+
+{/* /generated:option:strategy */}
+
+### Comparação de estratégias
+
+```mermaid
+flowchart LR
+    subgraph no_prefix["no_prefix"]
+        N1["/about"] --> N2["Any locale"]
+        N3["/contact"] --> N2
+    end
+
+    subgraph prefix_except_default["prefix_except_default"]
+        P1["/about"] --> P2["Default (en)"]
+        P3["/fr/about"] --> P4["French"]
+        P5["/de/about"] --> P6["German"]
+    end
+
+    subgraph prefix["prefix"]
+        X1["/en/about"] --> X2["English"]
+        X3["/fr/about"] --> X4["French"]
+        X5["/de/about"] --> X6["German"]
+    end
+
+    subgraph prefix_and_default["prefix_and_default"]
+        A1["/about"] --> A2["Default (en)"]
+        A3["/en/about"] --> A2
+        A5["/fr/about"] --> A6["French"]
+    end
+```
+
+### 🛑 `no_prefix`
+
+Os URLs não têm segmento de locale. O locale é determinado por cookies, pelo estado de `useI18nLocale()` ou por deteção do browser.
+
+- **Rotas**: `/about`, `/contact` — o mesmo padrão de URL para todos os locales (sem prefixo `/en/`, `/fr/`)
+- **Persistência do locale**: via `localeCookie` (definido automaticamente como `'user-locale'` se não for especificado)
+- **Caminhos personalizados**: suportados via [`globalLocaleRoutes`](/guides/configuration#globallocaleroutes) e [`defineI18nRoute`](/guides/custom-locale-routes) — os slugs localizados são gerados sem adicionar um prefixo de locale aos URLs (por exemplo, `/about` vs `/ueber-uns`). Rotas aninhadas, aliases e restrições por locale são mais simples do que em `prefix_except_default`.
+
+<Tip>
+Quando utiliza `no_prefix`, `localeCookie` é automaticamente definido como `'user-locale'` se não for especificado. Isto é necessário porque o URL não contém informação de locale.
+</Tip>
+
+```typescript
+i18n: {
+  strategy: 'no_prefix'
+  // localeCookie is automatically set to 'user-locale'
+}
+```
+
+### 🚧 `prefix_except_default`
+
+Todas as rotas têm um prefixo de locale **exceto** o locale predefinido.
+
+- **Locale predefinido**: `/about`, `/contact`
+- **Outros locales**: `/fr/about`, `/de/contact`
+- **Locale predefinido com prefixo devolve 404**: `/en/about` → 404 (quando `en` é predefinido)
+
+```typescript
+i18n: {
+  strategy: 'prefix_except_default' // This is the default
+}
+```
+
+### 🌍 `prefix`
+
+Todas as rotas têm um prefixo de locale, incluindo o predefinido.
+
+- **Todos os locales**: `/en/about`, `/fr/about`, `/de/about`
+- **Raiz `/`**: redireciona para `/\{locale\}/` com base na preferência do utilizador
+
+```typescript
+i18n: {
+  strategy: 'prefix'
+}
+```
+
+### 🔄 `prefix_and_default`
+
+O locale predefinido está disponível tanto com como sem prefixo. Locales não predefinidos têm sempre prefixo.
+
+- **Locale predefinido**: tanto `/about` como `/en/about` são válidos
+- **Outros locales**: `/fr/about`, `/de/about`
+- **Sem redirecionamento de `/`**: tanto `/` como `/en/` servem o locale predefinido
+
+```typescript
+i18n: {
+  strategy: 'prefix_and_default'
+}
+```
+
+## 🔀 Arquitetura de redirecionamento (v3)
+
+Na v3, a lógica de redirecionamento é dividida em duas camadas para desempenho ótimo:
+
+### Como funciona
+
+```mermaid
+flowchart TB
+    A["Request"] --> B{Server or Client?}
+
+    B -->|Server SSR| C["Nitro Middleware<br/>i18n.global.ts"]
+    C --> D["Sets event.context.i18n.locale"]
+    D --> E["Redirect Plugin<br/>06.redirect.ts server only"]
+    E --> F{Needs redirect?}
+    F -->|Yes| G["302 sendRedirect<br/>(no page render)"]
+    F -->|No| H["Continue to render"]
+
+    B -->|Client SPA| I["Route Middleware<br/>i18n-redirect.global.ts"]
+    I --> J["Target route locale + getPreferredLocale()"]
+    J --> K{Needs redirect?}
+    K -->|Yes| L["navigateTo with query and hash"]
+    K -->|No| M["Stay on page"]
+```
+
+### No servidor (sem flash)
+
+1. **Middleware do Nitro** (`i18n.global.ts`) corre primeiro — deteta o locale a partir do URL, cookie ou cabeçalho `Accept-Language` e define `event.context.i18n.locale`
+2. **Plugin de redirecionamento** (`06.redirect.ts`, apenas servidor) verifica se o caminho atual precisa de redirecionamento usando `i18nStrategy.getClientRedirect()` e emite um 302 **antes** de qualquer renderização de página
+3. Isto evita o "error flash" em que os utilizadores veem brevemente a página errada antes do redirecionamento
+
+### No cliente (navegação SPA)
+
+1. O middleware global de rota (`i18n-redirect.global.ts`) corre em cada navegação de cliente quando `redirects` está ativado
+2. Deriva o locale preferido primeiro a partir da **rota de destino**, depois recorre a `useI18nLocale().getPreferredLocale()`
+3. Usa `i18nStrategy.getClientRedirect()` para decidir se é necessário redirecionamento
+4. Preserva `query` e `hash` ao redirecionar
+
+### Ordem de prioridade do locale
+
+No servidor, o plugin de redirecionamento determina o locale preferido nesta ordem:
+
+1. **`useState('i18n-locale')`** — prioridade máxima (definido programaticamente via `useI18nLocale().setLocale()`)
+2. **Cookie** — se `localeCookie` estiver configurado
+3. **Cabeçalho `Accept-Language`** — se `autoDetectLanguage: true`
+4. **`defaultLocale`** — fallback final
+
+No cliente, o middleware de rota prefere o locale da rota de destino e depois usa a mesma cadeia de fallback estado/cookie.
+
+### Comportamento de redirecionamento por estratégia
+
+| Estratégia              | Comportamento em `GET /`                      | Cookie necessário? |
+| ----------------------- | --------------------------------------------- | ------------------ |
+| `no_prefix`             | Sem redirecionamento (locale do cookie/estado) | Definido automaticamente |
+| `prefix`                | 302 → `/\{locale\}/`                          | Recomendado        |
+| `prefix_except_default` | 302 → `/\{locale\}/` se locale ≠ predefinido  | Recomendado        |
+| `prefix_and_default`    | Sem redirecionamento (tanto `/` como `/\{locale\}/` válidos) | Opcional |
+
+### Desativar redirecionamentos
+
+```typescript
+i18n: {
+  redirects: false // Disables automatic locale redirects
+}
+```
+
+Quando `redirects: false`, os redirecionamentos automáticos de locale são desativados:
+
+- **Servidor**: o plugin de redirecionamento (`06.redirect.ts`, apenas servidor) permanece registado, mas ignora a lógica de redirecionamento. Continua a fazer **verificações de 404** para prefixos de locale inválidos (por exemplo, `/xx/about` onde `xx` não é um locale válido) e **sincronização de cookie** a partir do prefixo do URL (por exemplo, visitar `/fr/about` sincroniza o cookie para `fr`)
+- **Cliente**: o middleware global de rota `i18n-redirect` **não é registado** — sem auto-redirecionamentos SPA
+
+## 🍪 Persistência de locale por cookie
+
+<Warning>
+Ao usar `prefix` ou `prefix_except_default` com `redirects: true` (predefinição), **tem** de definir `localeCookie` para que os redirecionamentos funcionem corretamente. Sem um cookie, o plugin de redirecionamento não pode recordar a preferência de locale do utilizador entre recargas de página.
+
+```typescript
+i18n: {
+  strategy: 'prefix_except_default',
+  localeCookie: 'user-locale' // Required for redirects to work properly
+}
+```
+</Warning>
+
+**Como funciona `localeCookie` na v3:**
+
+- Gerido internamente por `useI18nLocale()` — **não o defina manualmente** via `useCookie()`
+- Quando um utilizador visita um URL com prefixo (por exemplo, `/fr/about`), o cookie é sincronizado automaticamente para `fr`
+- Na visita seguinte a `/`, o valor do cookie é usado para redirecionar para `/\{locale\}/`
+- Se o cookie contiver um locale inválido (não presente na lista `locales`), recai para `defaultLocale`
+
+| Estratégia              | Predefinição de `localeCookie` | Notas                                |
+| ----------------------- | ------------------------------ | ------------------------------------ |
+| `no_prefix`             | Auto: `'user-locale'`          | Necessário; definido automaticamente |
+| `prefix`                | `null` (desativado)            | Defina como `'user-locale'` para redirecionamentos |
+| `prefix_except_default` | `null` (desativado)            | Defina como `'user-locale'` para redirecionamentos |
+| `prefix_and_default`    | `null` (desativado)            | Opcional                             |
+
+## 🔍 `autoDetectLanguage` e `autoDetectPath`
+
+### `autoDetectLanguage`
+
+{/* generated:option:autoDetectLanguage — do not edit; run `pnpm run docs:generate` */}
+
+**Tipo** `boolean` · **Predefinição** `true`
+
+Deteta automaticamente o idioma preferido do utilizador a partir do cabeçalho HTTP `Accept-Language`. Usado em conjunto com `autoDetectPath` para decidir quando a deteção ocorre.
+
+{/* /generated:option:autoDetectLanguage */}
+
+A verificação corre no middleware de servidor e é um fallback: um cookie ou estado existente têm precedência.
+
+```typescript
+i18n: {
+  autoDetectLanguage: true
+}
+```
+
+### `autoDetectPath`
+
+{/* generated:option:autoDetectPath — do not edit; run `pnpm run docs:generate` */}
+
+**Tipo** `string` · **Predefinição** `'/'`
+
+Onde podem ocorrer redirecionamentos por preferência de cookie/Accept-Language (quando `redirects` está ativado).
+
+- `'/'` — apenas `/` (deep links no locale predefinido continuam acessíveis; predefinição)
+- `'no_prefix'` — apenas caminhos sem prefixo de locale
+- `'*'` — todos os caminhos, incluindo reescrever um prefixo explícito de locale (por exemplo, `/fr/about` → `/de/about` quando o cookie prefere `de`)
+
+- qualquer outra string — correspondência exata do caminho (por exemplo, `'/welcome'`)
+
+A limpeza de prefixos da estratégia (por exemplo, `/en` → `/` em `prefix_except_default`) não está condicionada.
+
+{/* /generated:option:autoDetectPath */}
+
+```typescript
+i18n: {
+  autoDetectPath: '/' // Default: only root
+  // autoDetectPath: '*' // All paths — redirects even /fr/about to /de/about
+}
+```
+
+<Warning>
+Com `autoDetectPath: '*'`, mesmo URLs com prefixo explícito de locale (por exemplo, `/fr/about`) serão redirecionados se o locale preferido do utilizador for diferente. Isto pode ser útil em setups baseados em domínio, mas pode confundir utilizadores que partilhem URLs.
+</Warning>
+
+Com a predefinição `autoDetectPath: '/'` e um cookie de locale:
+
+| pedido | cookie | resultado |
+| --- | --- | --- |
+| `/` | `de` | 302 → `/de` |
+| `/about` | `de` | 200, locale predefinido (sem reescrita) |
+
+```typescript
+i18n: {
+  localeCookie: 'user-locale',
+  strategy: 'prefix_except_default',
+  // Default — remember language on entry, keep deep links stable
+  autoDetectPath: '/',
+  // Or redirect on every unprefixed path (but not /de/… → /fr/…):
+  // autoDetectPath: 'no_prefix',
+}
+```
+
+## ⚠️ Problemas conhecidos e boas práticas
+
+### 1. Divergência de hidratação na estratégia `no_prefix`
+
+Ao usar `no_prefix`, o locale é determinado dinamicamente. Se o servidor e o cliente discordarem quanto ao locale, verá uma divergência de hidratação.
+
+**Solução**: use `useI18nLocale().setLocale()` num plugin de servidor (com `order: -10`) para definir o locale antes da inicialização do i18n:
+
+```ts
+// plugins/i18n-loader.server.ts
+export default defineNuxtPlugin({
+  name: 'i18n-custom-loader',
+  enforce: 'pre',
+  order: -10,
+  setup() {
+    const { setLocale } = useI18nLocale()
+    setLocale('ja') // Your detection logic here
+  },
+})
+```
+
+Consulte [Deteção de idioma personalizada](/guides/custom-language-detection) para exemplos detalhados.
+
+### 2. Utilize rotas nomeadas com `localeRoute`
+
+O encaminhamento baseado em caminho pode causar problemas de resolução:
+
+```typescript
+// May cause issues
+$localeRoute('/page')
+
+// Preferred approach
+$localeRoute({ name: 'page' })
+```
+
+### 3. Usar `pages: false` com i18n
+
+Ao usar Nuxt com `pages: false`:
+
+```typescript
+export default defineNuxtConfig({
+  pages: false,
+  i18n: {
+    strategy: 'no_prefix', // Recommended
+    disablePageLocales: true, // Required
+    localeCookie: 'user-locale', // Required for persistence
+  },
+})
+```
+
+**Limitações com `pages: false`:**
+
+- Sem redirecionamentos automáticos
+- Sem deteção de locale por URL
+- A troca de locale no cliente exige recarregamento de página ou carregamento manual de traduções
+
+### 4. Tratamento de cookie inválido
+
+Se um cookie contiver um locale inválido (não presente na lista `locales`), o módulo recorre elegantemente a `defaultLocale`. Não são lançados erros.
+
+## 📝 Resumo de boas práticas
+
+| Recomendação              | Detalhes                                                                            |
+| ------------------------- | ----------------------------------------------------------------------------------- |
+| **Defina `localeCookie`** | Defina sempre para estratégias de prefixo com `redirects: true`                     |
+| **Utilize `useI18nLocale()`** | A forma centralizada de gerir o estado de locale (substitui `useState`/`useCookie` manuais) |
+| **Utilize rotas nomeadas** | `$localeRoute(\{ name: 'page' \})` em vez de `$localeRoute('/page')`               |
+| **Locale programático**   | Utilize `useI18nLocale().setLocale()` num plugin de servidor com `order: -10`       |
+| **Evite cookies manuais** | Não use `useCookie('user-locale')` diretamente — `useI18nLocale()` gere isto        |

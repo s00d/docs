@@ -1,0 +1,498 @@
+---
+title: "`useI18nHead` kompozīts"
+description: "Kompozīts useI18nHead piemēro pēc lapas noteiktus pārrakstījumus i18n SEO meta, canonical URL, hreflang saitēm un Open Graph tagiem Nuxt lietotnēs."
+---
+
+# `useI18nHead` kompozīts
+
+`useI18nHead` ļauj tev pielāgot i18n SEO tagus **pēc lapas** bez pielāgota meta spraudņa. Kad `meta: true`, modulis sapludina tavu ievadi virs [`useLocaleHead`](/api/composables/use-locale-head) izvades.
+
+Tipiski gadījumi:
+
+- **CMS / emuāra raksti** — tikai dažas lokalizācijas ir iztulkotas; alternatīvie URL atšķiras atkarībā no valodas (dažādi slug vai ceļi).
+- **Dinamisks canonical** — canonical URL jāatbilst raksta URL no API, nevis `$switchLocalePath`.
+- **Papildu Open Graph** — `og:title`, `og:description`, `og:image` līdzās automātiski ģenerētajiem `og:locale` / `og:url`.
+- **Daļēja kontrole** — saglabā moduļa ģenerētos canonical un `og:url`, bet aizvieto tikai `hreflang` un `og:locale:alternate`.
+
+---
+
+## Paraksts
+
+{/* generated:symbol:useI18nHead — do not edit; run `pnpm run docs:generate` */}
+
+```ts
+useI18nHead(input?: MaybeRefOrGetter<I18nHeadInput | null>): { pageHead: any; resetPageHead: () => void }
+```
+
+Reģistrē lapas līmeņa pārrakstījumus i18n SEO galvas tagiem. Sapludināti virs `useLocaleHead` izvades ar spraudni `02.meta`.
+
+| Parametrs | Tips | Apraksts |
+| --- | --- | --- |
+| `input` *(neobligāti)* | `MaybeRefOrGetter<I18nHeadInput \| null>` |  |
+
+{/* /generated:symbol:useI18nHead */}
+
+## Kā tas iekļaujas cauruļvadā
+
+```mermaid
+flowchart LR
+    A[useLocaleHead] --> B[base tags]
+    C[useI18nHead on page] --> D[page overrides]
+    B --> E[mergeI18nHead]
+    D --> E
+    E --> F[useHead in 02.meta]
+```
+
+Tu izsauc `useI18nHead` lapas komponentā. Spraudnis `02.meta` piemēro pārrakstījumus pēc katra `updateMeta()` (maršruta maiņa, `$setI18nRouteParams`, `page:finish` klientā).
+
+---
+
+## 1. piemērs — Raksts ar tulkojumiem tikai dažās lokalizācijās
+
+Bieži sastopams paraugs: API atgriež, kuras lokalizācijas eksistē, un to absolūtos vai relatīvos URL.
+
+```ts
+interface Article {
+  title: string
+  slug: string
+  /** Locale code → page URL (absolute or site-relative) */
+  locales: Record<string, string>
+}
+```
+
+```vue
+<script setup lang="ts">
+const route = useRoute()
+const { data: article } = await useFetch<Article>(`/api/articles/${route.params.slug}`)
+
+const localeCodes = computed(() => Object.keys(article.value?.locales ?? {}))
+
+useI18nHead(() => {
+  if (!article.value) return null
+
+  return {
+    meta: [
+      { property: 'og:title', content: article.value.title },
+      { property: 'og:type', content: 'article' },
+    ],
+    replace: {
+      hreflang: localeCodes.value.map((locale) => ({
+        rel: 'alternate',
+        hreflang: locale,
+        href: article.value!.locales[locale]!,
+      })),
+      ogAlternates: localeCodes.value,
+    },
+  }
+})
+</script>
+```
+
+`ogAlternates` pieņem **lokalizācijas kodus** no tavas `i18n.locales` konfigurācijas. Vērtības priekš `og:locale:alternate` tiek atrisinātas caur `locale.og` vai `iso` (Open Graph `en_US` formāts).
+
+---
+
+## 2. piemērs — Raksts ar slug atbilstoši lokalizācijai (`$defineI18nRoute` + `$setI18nRouteParams`)
+
+Kad URL tiek veidoti no lokalizētiem maršruta šabloniem un dinamiskiem parametriem:
+
+```vue
+<script setup lang="ts">
+const { $defineI18nRoute, $setI18nRouteParams } = useNuxtApp()
+const route = useRoute()
+
+const { data: article } = await useFetch(`/api/articles/${route.params.slug}`)
+
+$defineI18nRoute({
+  localeRoutes: {
+    en: '/blog/[slug]',
+    de: '/de/blog/[slug]',
+    fr: '/fr/blog/[slug]',
+  },
+})
+
+if (article.value) {
+  $setI18nRouteParams({
+    en: { slug: article.value.slugEn },
+    de: { slug: article.value.slugDe },
+    fr: { slug: article.value.slugFr },
+  })
+
+  const availableLocales = article.value.availableLocales as string[]
+
+  useI18nHead({
+    meta: [{ property: 'og:title', content: article.value.title }],
+    replace: {
+      hreflang: availableLocales.map((locale) => ({
+        rel: 'alternate',
+        hreflang: locale,
+        href: article.value!.urls[locale],
+      })),
+      ogAlternates: availableLocales,
+    },
+  })
+}
+</script>
+```
+
+Moduļa ģenerētie alternatīvie tagi uzskaitītu **visas** konfigurētās lokalizācijas. `replace.hreflang` ierobežo tagus līdz lokalizācijām, kurām patiešām ir tulkojums.
+
+---
+
+## 3. piemērs — Pielāgots `x-default` noklusējuma lokalizācijas raksta URL
+
+Pēc noklusējuma `x-default` norāda uz noklusējuma lokalizācijas URL no `$switchLocalePath`. Rakstiem norādi to uz noklusējuma tulkojuma URL:
+
+```vue
+<script setup lang="ts">
+const { $defaultLocale } = useNuxtApp()
+const article = await loadArticle()
+
+const defaultLocale = $defaultLocale() ?? 'en'
+const defaultHref = article.locales[defaultLocale]
+
+useI18nHead({
+  replace: {
+    hreflang: Object.entries(article.locales).map(([locale, href]) => ({
+      rel: 'alternate',
+      hreflang: locale,
+      href,
+    })),
+    xDefault: defaultHref ? { rel: 'alternate', hreflang: 'x-default', href: defaultHref } : false,
+    ogAlternates: Object.keys(article.locales),
+  },
+})
+</script>
+```
+
+---
+
+## 4. piemērs — Aizvieto canonical un `og:url` no API datiem
+
+Kad canonical jāatbilst CMS sniegtajam URL (vairāki domēni, pielāgots ceļš vai iepriekš izveidots absolūts URL):
+
+```vue
+<script setup lang="ts">
+const article = await loadArticle()
+const canonical = article.canonicalUrl // e.g. https://www.example.com/en/blog/my-post
+
+useI18nHead({
+  replace: {
+    canonical,
+    ogUrl: canonical,
+    hreflang: buildAlternateLinks(article),
+    ogAlternates: Object.keys(article.locales),
+  },
+  meta: [
+    { property: 'og:title', content: article.title },
+    { name: 'description', content: article.excerpt },
+  ],
+})
+</script>
+```
+
+---
+
+## 5. piemērs — Saglabā automātisko canonical / `og:url`, aizvieto tikai alternatīvos
+
+Ja `$switchLocalePath` + `$setI18nRouteParams` jau rada pareizu canonical un `og:url`, aizvieto tikai atklāšanas tagus:
+
+```vue
+<script setup lang="ts">
+const article = await loadArticle()
+
+useI18nHead({
+  replace: {
+    hreflang: buildAlternateLinks(article),
+    ogAlternates: Object.keys(article.locales),
+  },
+})
+</script>
+```
+
+---
+
+## 6. piemērs — Pilna galva satura detaļu lapai (meta + saites)
+
+Paraugs, kas līdzīgs "lapas meta" un "alternatīvo saišu" sadalīšanai atsevišķos palīgos, apvienots vienā izsaukumā:
+
+```vue
+<script setup lang="ts">
+const article = await loadArticle()
+const alternates = Object.entries(article.locales).map(([locale, href]) => ({
+  rel: 'alternate' as const,
+  hreflang: locale,
+  href: normalizeSeoUrl(href), // strip ?query and #hash if needed
+}))
+
+useI18nHead({
+  meta: [
+    { property: 'og:title', content: article.title },
+    { property: 'og:description', content: article.description },
+    { property: 'og:image', content: article.imageUrl },
+    { name: 'twitter:card', content: 'summary_large_image' },
+    { name: 'twitter:title', content: article.title },
+  ],
+  replace: {
+    canonical: article.canonicalUrl,
+    ogUrl: article.canonicalUrl,
+    hreflang: alternates,
+    ogAlternates: Object.keys(article.locales),
+  },
+})
+</script>
+```
+
+```ts
+/** Remove query and hash — useful when CMS URLs must be clean for SEO */
+function normalizeSeoUrl(href: string): string {
+  try {
+    const url = new URL(href, 'https://placeholder.local')
+    url.search = ''
+    url.hash = ''
+    return href.startsWith('http') ? url.href : `${url.pathname}`
+  } catch {
+    return href.split(/[?#]/)[0] ?? href
+  }
+}
+```
+
+---
+
+## 7. piemērs — Divi satura veidi, tas pats paraugs (ziņas pret ceļvežiem)
+
+Tā pati API forma, atšķirīgi maršrutu nosaukumi — atkārtoti izmanto nelielu palīgu:
+
+```ts
+// composables/useArticleHead.ts
+import type { I18nHeadInput } from '@i18n-micro/types'
+
+interface LocalizedContent {
+  title: string
+  locales: Record<string, string>
+  canonicalUrl?: string
+}
+
+export function buildArticleHead(content: LocalizedContent): I18nHeadInput {
+  const localeCodes = Object.keys(content.locales)
+  const canonical = content.canonicalUrl ?? content.locales.en
+
+  return {
+    meta: [{ property: 'og:title', content: content.title }],
+    replace: {
+      canonical,
+      ogUrl: canonical,
+      hreflang: localeCodes.map((locale) => ({
+        rel: 'alternate',
+        hreflang: locale,
+        href: content.locales[locale]!,
+      })),
+      ogAlternates: localeCodes,
+    },
+  }
+}
+```
+
+```vue
+<!-- pages/blog/[slug].vue -->
+<script setup lang="ts">
+const article = await loadArticle()
+useI18nHead(buildArticleHead(article))
+</script>
+```
+
+```vue
+<!-- pages/guides/[slug].vue -->
+<script setup lang="ts">
+const guide = await loadGuide()
+useI18nHead(buildArticleHead(guide))
+</script>
+```
+
+---
+
+## 8. piemērs — Atspējo iebūvētos alternatīvos, sniedz savu sarakstu
+
+Ekvivalents moduļa hreflang ģeneratora atspējošanai un pielāgota saraksta nodošanai (nav dublēto alternatīvo komplektu):
+
+```vue
+<script setup lang="ts">
+const article = await loadArticle()
+
+useI18nHead({
+  disable: ['hreflang', 'x-default', 'og-alternates'],
+  link: Object.entries(article.locales).map(([locale, href]) => ({
+    rel: 'alternate',
+    hreflang: locale,
+    href,
+  })),
+  replace: {
+    ogAlternates: Object.keys(article.locales),
+  },
+})
+</script>
+```
+
+Vai dod priekšroku `replace.hreflang` bez `disable` — tas vienā solī aizstāj visas `rel="alternate"` saites.
+
+---
+
+## 9. piemērs — Piezemēšanās lapa: tikai papildu OG, saglabā visus i18n tagus
+
+```vue
+<script setup lang="ts">
+const { t } = useI18n()
+
+useI18nHead({
+  meta: [
+    { property: 'og:title', content: t('landing.ogTitle') },
+    { property: 'og:description', content: t('landing.ogDescription') },
+  ],
+})
+</script>
+```
+
+---
+
+## 10. piemērs — Produkta lapa: atspējo hreflang atsevišķas lokalizācijas eksperimentam
+
+```vue
+<script setup lang="ts">
+useI18nHead({
+  disable: ['hreflang', 'x-default'],
+  // canonical, og:locale, og:url still generated
+})
+</script>
+```
+
+---
+
+## 11. piemērs — Reaktīvi atjauninājumi pēc klienta puses ielādes
+
+```vue
+<script setup lang="ts">
+const article = ref<Article | null>(null)
+
+onMounted(async () => {
+  article.value = await $fetch('/api/articles/latest')
+})
+
+useI18nHead(() => {
+  if (!article.value) return null
+  return {
+    meta: [{ property: 'og:title', content: article.value.title }],
+    replace: {
+      hreflang: Object.entries(article.value.locales).map(([locale, href]) => ({
+        rel: 'alternate',
+        hreflang: locale,
+        href,
+      })),
+    },
+  }
+})
+</script>
+```
+
+Galva tiek atsvaidzināta uz `page:finish` un kad `pageHead` stāvoklis mainās.
+
+---
+
+## 12. piemērs — HTTPS izcelsme aiz apgrieztā starpniekservera
+
+Ja iepriekš atrisināji "publiskās izcelsmes" kompozītu canonical / alternatīviem absolūtiem URL, tā vietā izmanto moduļa konfigurāciju:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  i18n: {
+    meta: true,
+    // undefined = origin from current request (multi-domain friendly)
+    metaBaseUrl: undefined,
+    metaTrustForwardedHost: true,
+    metaTrustForwardedProto: true,
+  },
+})
+```
+
+Pēc tam nodod **ceļus vai pilnus URL** `replace.hreflang` / `replace.canonical`. Modulis izmanto `useRequestURL` ar `X-Forwarded-Host` / `X-Forwarded-Proto` uz SSR.
+
+---
+
+## API atsauce
+
+### `meta`
+
+Papildu `<meta>` tagi. Dublikāti tiek noņemti pēc `id`, `property` vai `name`.
+
+### `link`
+
+Papildu `<link>` tagi. Dublikāti tiek noņemti pēc `id` vai `rel` + `hreflang`.
+
+### `htmlAttrs`
+
+Sapludināti `<html>` atribūtos no `useLocaleHead` (`lang`, `dir`).
+
+### `replace`
+
+| Atslēga            | Tips                      | Efekts                                         |
+| -------------- | ------------------------- | ---------------------------------------------- |
+| `canonical`    | `string \| false`         | Aizvieto vai noņem canonical saiti.               |
+| `hreflang`     | `I18nHeadLink[] \| false` | Aizvieto vai noņem visas `rel="alternate"` saites.  |
+| `xDefault`     | `I18nHeadLink \| false`   | Aizvieto vai noņem `hreflang="x-default"`.       |
+| `ogLocale`     | `string \| false`         | Aizvieto vai noņem `og:locale`.                  |
+| `ogUrl`        | `string \| false`         | Aizvieto vai noņem `og:url`.                     |
+| `ogAlternates` | `string[] \| false`       | Pārbūvē `og:locale:alternate` lokalizācijas kodiem. |
+
+### `disable`
+
+| Vērtība           | Noņem                                  |
+| --------------- | ---------------------------------------- |
+| `hreflang`      | Lokalizācijas alternatīvās saites (ne `x-default`). |
+| `x-default`     | `hreflang="x-default"` saiti.              |
+| `canonical`     | Canonical saiti.                           |
+| `og`            | `og:locale` un `og:url`.                 |
+| `og-alternates` | `og:locale:alternate` tagus.               |
+| `html`          | `lang` / `dir` uz `<html>`.               |
+
+---
+
+## `useLocaleHead` pret `useI18nHead`
+
+| Kompozīts      | Tvērums                | Kad izmantot                                |
+| --------------- | -------------------- | ------------------------------------------ |
+| `useLocaleHead` | Globāla / manuāla galva | `meta: false`, pilnībā pielāgots `useHead` iestatījums. |
+| `useI18nHead`   | Pēc lapas pārrakstījumi   | `meta: true`, pielāgo konkrētas lapas.     |
+
+Kad `meta: true`, tev **nav** vajadzīgs `useLocaleHead` lapās, kas izmanto tikai `useI18nHead`.
+
+---
+
+## Migrācija no pielāgota i18n galvas spraudņa
+
+Daudzi projekti uztur pielāgotu spraudni, kas:
+
+- sapludina konkrētai lapai specifiskās alternatīvās saites no koplietota stāvokļa;
+- filtrē dublējošos reģionālos `hreflang` ierakstus;
+- normalizē `og:locale` vērtības;
+- noņem vaicājumu virknes no SEO URL.
+
+To vari aizvietot ar `useI18nHead` katrā satura lapā un moduļa noklusējumiem.
+
+| Iepriekšējā pieeja                                     | Ar `useI18nHead`                                   |
+| ----------------------------------------------------- | ---------------------------------------------------- |
+| Koplietots stāvoklis + "kuras lokalizācijas eksistē šim rakstam". | `replace: \{ ogAlternates: localeCodes \}`.             |
+| Atsevišķs palīgs, kas veido `rel="alternate"` saites.      | `replace: \{ hreflang: links \}`.                       |
+| Pielāgots spraudnis, kas sapludina lapas stāvokli galvā.            | Iebūvēta sapludināšana `02.meta`.                          |
+| Pielāgota "publiskā izcelsme" absolūtiem URL.              | `metaBaseUrl` + pārsūtītās galvenes (skati 12. piemēru).   |
+| Īss `og:locale` (`en`, nevis `en_US`).           | Iestati `locale.og` vai izmanto `iso` → `en_US` (OG protokols). |
+
+**`hreflang` no `iso`:** katra lokalizācija emitē vienu alternatīvu ar `hreflang = iso || code`. Maršrutēšanas `code` nekad netiek izmantots, kad `iso` ir iestatīts (izvairās no nederīgiem tagiem, piemēram, `hreflang="mx"`). Piesakies tīras valodas atkāpšanās (`es-ES` → arī `es`) ar `hreflangBaseLanguage: true` — atvasināts no `iso`, nevis `code`. Pilnīgi pielāgotiem sarakstiem izmanto `replace.hreflang`.
+
+**JSON-LD:** `useI18nHead` neģenerē strukturētus datus. Paturi `useHead(\{ script: [...] \})` vai īpašu JSON-LD palīgu blakus tam.
+
+---
+
+## Skati arī
+
+- [SEO ceļvedis](/guides/seo) — automātiska meta ģenerēšana un lapas līmeņa pārrakstījumi.
+- [`useLocaleHead`](/api/composables/use-locale-head) — zema līmeņa galvas API.
