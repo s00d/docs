@@ -1,0 +1,220 @@
+---
+title: "Custom language detection"
+description: "Programmatic locale detection with useI18nLocale in a server plugin."
+---
+
+Nuxt I18n Micro provides a centralized composable, `useI18nLocale()`, for all locale management. By calling `useI18nLocale().setLocale()` in a server plugin, you can implement any custom detection logic while keeping full compatibility with the module's redirect and cookie systems.
+
+## Why not use `useState` directly
+
+`useI18nLocale()` updates both `useState('i18n-locale')` and the locale cookie **atomically**. If you write to `useState` or `useCookie` directly, one side can lag behind the other and the module's i18n plugin (`order: -5`) and server redirect plugin (`order: 10`) may see conflicting values.
+
+<Warning>
+Do **not** use `useCookie('user-locale')` or `useState('i18n-locale')` directly. Use `useI18nLocale().setLocale()` instead so both state and cookie stay in sync.
+</Warning>
+
+## Disable the built-in auto-detection
+
+For full control, disable the built-in mechanism:
+
+```typescript nuxt.config.ts
+export default defineNuxtConfig({
+  i18n: {
+    autoDetectLanguage: false,
+  },
+})
+```
+
+## Server plugin pattern
+
+The recommended approach works with **all routing strategies**. Create a server-only plugin with `enforce: 'pre'` and `order: -10` so it runs **before** the i18n plugin (which uses `order: -5`).
+
+### Configure `nuxt.config.ts`
+
+```typescript nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    strategy: 'no_prefix',
+    defaultLocale: 'en',
+    localeCookie: 'user-locale',
+    autoDetectLanguage: false,
+    locales: [
+      { code: 'en', iso: 'en-US' },
+      { code: 'de', iso: 'de-DE' },
+      { code: 'ja', iso: 'ja-JP' },
+    ],
+  },
+})
+```
+
+### Create `plugins/i18n-loader.server.ts`
+
+```typescript plugins/i18n-loader.server.ts
+import { defineNuxtPlugin, useRequestHeaders } from '#imports'
+
+export default defineNuxtPlugin({
+  name: 'i18n-custom-loader',
+  enforce: 'pre',
+  order: -10, // must run before the i18n plugin (order: -5)
+
+  setup() {
+    const { setLocale } = useI18nLocale()
+    const headers = useRequestHeaders(['host', 'x-country', 'accept-language'])
+    let detectedLocale = 'en'
+
+    // Detect by domain
+    const host = headers['host']
+    if (host?.includes('example.de')) {
+      detectedLocale = 'de'
+    }
+    // Detect by custom header
+    else if (headers['x-country'] === 'JP') {
+      detectedLocale = 'ja'
+    }
+    // Detect by Accept-Language
+    else if (headers['accept-language']?.includes('de')) {
+      detectedLocale = 'de'
+    }
+
+    setLocale(detectedLocale)
+  },
+})
+```
+
+### How it flows
+
+1. Your plugin runs first (`order: -10`) and detects a locale from headers, domain, or other signals.
+2. `setLocale()` updates both `useState('i18n-locale')` and the cookie so all later plugins see the same value.
+3. The i18n plugin (`order: -5`) reads the locale and loads the correct translations.
+4. The server redirect plugin (`order: 10`) uses the locale for SSR redirect decisions.
+5. The client route middleware (`i18n-redirect`) applies redirects on SPA navigation when the URL locale does not match preference.
+
+## Strategy-specific behavior
+
+`useI18nLocale().setLocale()` works with all strategies. The redirect behavior depends on which strategy you picked:
+
+| Strategy                | Effect of `setLocale('de')`                                    |
+| ----------------------- | -------------------------------------------------------------- |
+| `no_prefix`             | Renders in German with no URL change.                          |
+| `prefix`                | Server-side redirect (302) to `/de/`.                          |
+| `prefix_except_default` | Redirect to `/de/` when `de` is not the default; otherwise no redirect. |
+| `prefix_and_default`    | No redirect (both `/` and `/de/` are valid).                   |
+
+<Info>
+Cookie-based locale detection is disabled by default (`localeCookie: null`). Set `localeCookie: 'user-locale'` to enable cookie persistence. If the cookie or state value is not in the `locales` list, the module falls back to `defaultLocale`.
+</Info>
+
+## Domain-based detection
+
+For multi-domain setups where each domain serves a different locale:
+
+```typescript plugins/i18n-domain.server.ts
+import { defineNuxtPlugin, useRequestHeaders } from '#imports'
+
+export default defineNuxtPlugin({
+  name: 'i18n-domain-loader',
+  enforce: 'pre',
+  order: -10,
+
+  setup() {
+    const { setLocale } = useI18nLocale()
+    const headers = useRequestHeaders(['host'])
+    const host = headers['host'] || ''
+
+    let detectedLocale = 'en'
+
+    if (host.endsWith('.de') || host.includes('german.')) {
+      detectedLocale = 'de'
+    } else if (host.endsWith('.fr') || host.includes('french.')) {
+      detectedLocale = 'fr'
+    } else if (host.endsWith('.jp') || host.includes('japanese.')) {
+      detectedLocale = 'ja'
+    }
+
+    setLocale(detectedLocale)
+  },
+})
+```
+
+## Respecting user preference
+
+If users can manually switch language, respect the existing choice over auto-detection. `getLocale()` returns the current value stored in state or cookie:
+
+```typescript plugins/i18n-smart.server.ts
+import { defineNuxtPlugin, useRequestHeaders } from '#imports'
+
+export default defineNuxtPlugin({
+  name: 'i18n-smart-loader',
+  enforce: 'pre',
+  order: -10,
+
+  setup() {
+    const { getLocale, setLocale } = useI18nLocale()
+
+    // Respect an existing preference (cookie or state)
+    if (getLocale()) {
+      return
+    }
+
+    const headers = useRequestHeaders(['accept-language'])
+    let detectedLocale = 'en'
+    const acceptLanguage = headers['accept-language'] || ''
+
+    if (acceptLanguage.includes('de')) detectedLocale = 'de'
+    else if (acceptLanguage.includes('ja')) detectedLocale = 'ja'
+
+    setLocale(detectedLocale)
+  },
+})
+```
+
+## Detecting from a query parameter
+
+Reading `?lang=` on the initial SSR request:
+
+```typescript plugins/i18n-query.server.ts
+import { defineNuxtPlugin, useRequestURL } from '#imports'
+
+export default defineNuxtPlugin({
+  name: 'i18n-query-loader',
+  enforce: 'pre',
+  order: -10,
+
+  setup() {
+    const { setLocale } = useI18nLocale()
+    const url = useRequestURL()
+    const requested = url.searchParams.get('lang')
+
+    if (requested) {
+      setLocale(requested)
+    }
+  },
+})
+```
+
+## Server-only versus client-only plugins
+
+Use [Nuxt filename conventions](https://nuxt.com/docs/getting-started/directory-structure#plugins) to control where your plugin runs:
+
+- `i18n-loader.server.ts` runs only during SSR. Recommended for header-based detection.
+- `i18n-loader.client.ts` runs only in the browser. Useful for `localStorage` or DOM signals.
+
+<Tip>
+For locale detection that relies on server headers (`x-country`, `accept-language`, `host`), always use a **server-only** plugin. Headers are not available on the client.
+</Tip>
+
+## API summary
+
+| Function                                 | Description                                                       |
+| ---------------------------------------- | ----------------------------------------------------------------- |
+| `useI18nLocale().setLocale(code)`        | Updates `useState` and cookie atomically. Works with all strategies. |
+| `useI18nLocale().getLocale()`            | Returns the current locale from state or cookie.                  |
+| `useI18nLocale().getPreferredLocale()`   | Returns the preferred locale, validated against `locales`.        |
+
+See [`useI18nLocale`](/api/composables/use-i18n-locale) for the full reference.
+
+<Warning>
+- Do **not** set `order` greater than or equal to `-5`. Your plugin must run before the i18n plugin.
+- Do **not** call `useCookie` or `useState` directly for locale.
+</Warning>

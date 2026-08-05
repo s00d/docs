@@ -1,0 +1,335 @@
+---
+title: "Node.js"
+description: "Load and use Nuxt I18n Micro translations from any Node.js server, CLI, or worker."
+---
+
+`@i18n-micro/node` runs the same translation engine as the Nuxt module in a pure Node.js environment. It reads your existing `locales/` folder, supports root and route-scoped translations, and exposes the same `t`, `tc`, `tn`, `td`, `tdr` API you already use on the client.
+
+Use it for standalone servers (Express, Fastify, Hono, Koa), Nuxt server routes, background workers, and CLIs.
+
+## Install
+
+<CodeGroup>
+```bash npm
+npm install @i18n-micro/node
+```
+
+```bash pnpm
+pnpm add @i18n-micro/node
+```
+
+```bash yarn
+yarn add @i18n-micro/node
+```
+
+```bash bun
+bun add @i18n-micro/node
+```
+</CodeGroup>
+
+## Quick start
+
+```typescript
+import { createI18n } from '@i18n-micro/node'
+
+const i18n = createI18n({
+  locale: 'en',
+  fallbackLocale: 'en',
+  translationDir: './locales',
+})
+
+await i18n.loadTranslations()
+
+console.log(i18n.t('greeting', { name: 'John' })) // "Hello, John!"
+console.log(i18n.tc('apples', 5))                 // "5 apples"
+console.log(i18n.tn(1234.56))                     // "1,234.56"
+```
+
+## Directory layout
+
+The loader accepts the same layout as the Nuxt module:
+
+```bash
+locales/
+├── en.json
+├── de.json
+└── pages/
+    ├── home/
+    │   ├── en.json
+    │   └── de.json
+    └── about/
+        ├── en.json
+        └── de.json
+```
+
+Root files are always available. Files under `pages/<route>/` are scoped to that route name and applied automatically when you call `setRoute()` or pass `routeName` to `t()`.
+
+## API
+
+### createI18n(options)
+
+```typescript
+import { createI18n } from '@i18n-micro/node'
+
+const i18n = createI18n({
+  locale: 'en',
+  fallbackLocale: 'en',
+  translationDir: './locales',
+  plural: undefined,
+  missingWarn: true,
+  missingHandler: (locale, key, routeName) => {
+    console.warn(`Missing ${key} in ${locale} for ${routeName}`)
+  },
+})
+```
+
+| Option           | Type                                                       | Description |
+| ---------------- | ---------------------------------------------------------- | ----------- |
+| `locale`         | `string`                                                   | Active locale. |
+| `fallbackLocale` | `string`                                                   | Fallback locale (defaults to `locale`). |
+| `translationDir` | `string`                                                   | Path to the locales folder. |
+| `plural`         | `PluralFunc`                                               | Optional custom plural resolver. |
+| `missingWarn`    | `boolean`                                                  | Log warnings when a key is missing. |
+| `missingHandler` | `(locale, key, routeName) => void`                         | Callback for missing keys. |
+
+### Loading translations
+
+Use `loadTranslations()` on the instance, or the standalone `loadTranslations` / `loadRootTranslations` helpers.
+
+```typescript
+import { createI18n, loadTranslations, loadRootTranslations } from '@i18n-micro/node'
+
+await i18n.loadTranslations()               // read translationDir
+await i18n.loadTranslations('./other')      // read a different folder
+
+// Reload from disk (clears the cache).
+await i18n.reload()
+```
+
+<Note>
+Translations stay cached in memory after the first read. Call `i18n.reload()` when JSON files change, or wire a file watcher (see below).
+</Note>
+
+### Translation methods
+
+| Method | Purpose |
+| ------ | ------- |
+| `t(key, params?, defaultValue?, routeName?)` | Translate a key. Uses `currentRoute` if set. |
+| `ts(key, params?, defaultValue?, routeName?)` | Same as `t` but always returns a string. |
+| `tc(key, count \| params, defaultValue?)` | Plural translation. |
+| `tn(value, options?)` | Format a number with `Intl.NumberFormat`. |
+| `td(value, options?)` | Format a date with `Intl.DateTimeFormat`. |
+| `tdr(value, options?)` | Format relative time. |
+| `hasTranslation(key)` | Check whether a key exists. |
+| `setRoute(routeName)` / `getRoute()` | Manage the active route context. |
+| `reload()` | Clear cache and reload translation files. |
+
+```typescript
+i18n.t('welcome')                              // "Welcome"
+i18n.t('nested.key')                           // supports dotted paths
+i18n.tc('apples', 0)                           // "no apples"
+i18n.tn(1234.56, { style: 'currency', currency: 'USD' }) // "$1,234.56"
+i18n.td(new Date(), { year: 'numeric', month: 'long' })
+i18n.tdr(new Date(Date.now() - 3600_000))      // "1 hour ago"
+```
+
+## Caching model
+
+- Files are read once, then held in an in-memory cache keyed by locale and route.
+- `i18n.t()` first looks up the current route's messages, then falls back to root, then to `fallbackLocale`, and finally to the provided `defaultValue`.
+- Setting `i18n.locale = 'fr'` swaps the active locale without touching the cache.
+- `i18n.reload()` and `i18n.clearCache()` invalidate the cache so the next call reloads from disk.
+
+## Express
+
+Create the instance at startup, then set the request-scoped locale and route in a middleware.
+
+```typescript
+import express from 'express'
+import { createI18n } from '@i18n-micro/node'
+
+const app = express()
+
+const i18n = createI18n({ locale: 'en', translationDir: './locales' })
+await i18n.loadTranslations()
+
+app.use((req, _res, next) => {
+  const locale = req.headers['accept-language']?.split(',')[0]?.split('-')[0] ?? 'en'
+  const route = req.path.split('/').filter(Boolean)[0] ?? 'index'
+
+  i18n.locale = locale
+  i18n.setRoute(route)
+  req.i18n = i18n
+  next()
+})
+
+app.get('/greet', (req, res) => {
+  res.json({ message: req.i18n.t('greeting', { name: 'World' }) })
+})
+```
+
+## Fastify
+
+```typescript
+import Fastify from 'fastify'
+import { createI18n } from '@i18n-micro/node'
+
+const fastify = Fastify()
+
+const i18n = createI18n({ locale: 'en', translationDir: './locales' })
+await i18n.loadTranslations()
+
+fastify.addHook('onRequest', async (request) => {
+  const locale = request.headers['accept-language']?.split(',')[0] ?? 'en'
+  i18n.locale = locale
+  request.i18n = i18n
+})
+
+fastify.get('/greet', async (request) => ({
+  message: request.i18n.t('greeting', { name: 'World' }),
+}))
+```
+
+## Hono
+
+```typescript
+import { Hono } from 'hono'
+import { createI18n } from '@i18n-micro/node'
+
+const i18n = createI18n({ locale: 'en', translationDir: './locales' })
+await i18n.loadTranslations()
+
+const app = new Hono()
+
+app.use('*', async (c, next) => {
+  const locale = c.req.header('accept-language')?.split(',')[0] ?? 'en'
+  i18n.locale = locale
+  c.set('i18n', i18n)
+  await next()
+})
+
+app.get('/greet', (c) => c.json({ message: c.get('i18n').t('greeting', { name: 'World' }) }))
+```
+
+<Warning>
+Sharing a single instance across concurrent requests works because `locale` and `route` are set synchronously on each request. If you need to run async work with different locales in parallel, clone your own instance per request or serialize access.
+</Warning>
+
+## Nuxt server routes
+
+Use it inside `server/api/*.ts` to render translations in API responses or during SSR:
+
+```typescript server/api/hello.get.ts
+import { defineEventHandler, getQuery } from 'h3'
+import { createI18n } from '@i18n-micro/node'
+import { join } from 'node:path'
+
+let instance: ReturnType<typeof createI18n> | null = null
+
+async function getI18n() {
+  if (!instance) {
+    instance = createI18n({
+      locale: 'en',
+      fallbackLocale: 'en',
+      translationDir: join(process.cwd(), 'locales'),
+    })
+    await instance.loadTranslations()
+  }
+  return instance
+}
+
+export default defineEventHandler(async (event) => {
+  const { locale = 'en', route = 'index' } = getQuery(event) as Record<string, string>
+  const i18n = await getI18n()
+
+  i18n.locale = locale
+  i18n.setRoute(route)
+
+  return {
+    locale: i18n.locale,
+    welcome: i18n.t('welcome'),
+    greeting: i18n.t('greeting', { name: 'Nuxt' }),
+    apples: [0, 1, 5].map((n) => i18n.tc('apples', n)),
+    number: i18n.tn(1234.56),
+    date: i18n.td(new Date()),
+  }
+})
+```
+
+## Hot reload with a file watcher
+
+```typescript
+import { watch } from 'node:fs'
+import { createI18n } from '@i18n-micro/node'
+
+const i18n = createI18n({ locale: 'en', translationDir: './locales' })
+await i18n.loadTranslations()
+
+let timer: NodeJS.Timeout
+watch('./locales', { recursive: true }, (_type, filename) => {
+  if (!filename?.endsWith('.json')) return
+  clearTimeout(timer)
+  timer = setTimeout(() => i18n.reload().catch(console.error), 100)
+})
+```
+
+## Locale detection helper
+
+```typescript
+import type { IncomingMessage } from 'node:http'
+
+function detectLocale(req: IncomingMessage, fallback = 'en') {
+  const url = new URL(req.url ?? '/', `http://${req.headers.host}`)
+  const query = url.searchParams.get('locale')
+  if (query) return query
+
+  const cookie = req.headers.cookie
+    ?.split(';')
+    .map((c) => c.trim())
+    .find((c) => c.startsWith('user-locale='))
+    ?.split('=')[1]
+  if (cookie) return cookie
+
+  const header = req.headers['accept-language']
+  if (header) return header.split(',')[0].split('-')[0]
+
+  return fallback
+}
+```
+
+Combine it with a whitelist of supported locales before calling `i18n.locale = ...`.
+
+## Use with SSR frameworks
+
+`@i18n-micro/node` powers the server side of every framework integration. Compose it with:
+
+- [Nuxt module](/guides/configuration) when you already run Nuxt.
+- [`@i18n-micro/astro`](/integrations/astro) middleware for Astro SSR.
+- Any custom SSR pipeline where you render on Node.js and stream translated markup.
+
+Because it has no framework dependencies, it also works inside CLIs, cron jobs, transactional-email renderers, and background workers.
+
+## Best practices
+
+- Create a **singleton instance** at boot and reuse it. Do not call `createI18n` per request.
+- Load translations **once** at startup with `loadTranslations()`; call `reload()` only on file changes.
+- Validate incoming locales against a whitelist before assigning `i18n.locale`.
+- Use `setRoute()` to avoid passing `routeName` to every `t()` call.
+- For request isolation under high concurrency, wrap access in a mutex or clone per request.
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Methods reference" icon="code" href="/api/methods">
+    Full behavior of every translation helper.
+  </Card>
+  <Card title="Astro integration" icon="a" href="/integrations/astro">
+    SSR i18n for Astro built on the same core.
+  </Card>
+  <Card title="Types generator" icon="wand-magic-sparkles" href="/integrations/types-generator">
+    Type-safe translation keys in Node.js code.
+  </Card>
+  <Card title="Overview" icon="puzzle-piece" href="/integrations/overview">
+    Compare every runtime integration.
+  </Card>
+</CardGroup>

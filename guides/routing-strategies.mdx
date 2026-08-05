@@ -1,0 +1,303 @@
+---
+title: "Routing strategies"
+description: "Choose how locale prefixes appear in your URLs, how redirects behave, and how the module detects user language."
+---
+
+Nuxt I18n Micro controls locale-in-URL behaviour through the `strategy` option. Two internal packages implement it:
+
+- **`@i18n-micro/route-strategy`** generates locale routes at build time (extends Nuxt's pages).
+- **`@i18n-micro/path-strategy`** handles runtime path resolution, redirects, SEO attributes, and link generation.
+
+The module picks the correct strategy class at build and aliases it via `#i18n-strategy`, so only the chosen implementation ends up in your bundle.
+
+## Available strategies
+
+**Type:** `'no_prefix' | 'prefix_except_default' | 'prefix' | 'prefix_and_default'` &nbsp;·&nbsp; **Default:** `'prefix_except_default'`
+
+<Tabs>
+  <Tab title="no_prefix">
+    URLs have no locale segment. The active locale is determined by the cookie, `useI18nLocale()` state, or the `Accept-Language` header.
+
+    | URL | Locale |
+    | --- | --- |
+    | `/about` | Any locale (resolved dynamically) |
+    | `/contact` | Any locale |
+
+    ```typescript
+    i18n: {
+      strategy: 'no_prefix',
+      // localeCookie is automatically set to 'user-locale'
+    }
+    ```
+
+    <Tip>
+      Under `no_prefix`, `localeCookie` is automatically set to `'user-locale'` when not specified. The URL cannot encode the locale, so a cookie is required.
+    </Tip>
+
+    Custom paths through [`globalLocaleRoutes`](/guides/configuration#globallocaleroutes) and [`defineI18nRoute`](/guides/custom-locale-routes) are still supported. Localised slugs (`/about` vs `/ueber-uns`) generate without adding a locale prefix.
+  </Tab>
+  <Tab title="prefix_except_default">
+    Every locale except the default gets a URL prefix.
+
+    | URL | Locale |
+    | --- | --- |
+    | `/about` | Default (e.g. `en`) |
+    | `/fr/about` | French |
+    | `/de/contact` | German |
+    | `/en/about` | 404 (default locale with prefix) |
+
+    ```typescript
+    i18n: {
+      strategy: 'prefix_except_default', // default
+    }
+    ```
+  </Tab>
+  <Tab title="prefix">
+    Every route carries a locale prefix, including the default.
+
+    | URL | Locale |
+    | --- | --- |
+    | `/en/about` | English |
+    | `/fr/about` | French |
+    | `/de/about` | German |
+    | `/` | 302 → `/{locale}/` |
+
+    ```typescript
+    i18n: { strategy: 'prefix' }
+    ```
+  </Tab>
+  <Tab title="prefix_and_default">
+    Default locale is reachable both with and without a prefix. Non-default locales always have a prefix.
+
+    | URL | Locale |
+    | --- | --- |
+    | `/about` | Default |
+    | `/en/about` | Default (also valid) |
+    | `/fr/about` | French |
+
+    ```typescript
+    i18n: { strategy: 'prefix_and_default' }
+    ```
+  </Tab>
+</Tabs>
+
+## Redirect architecture
+
+Redirect logic in v3 is split across two layers so you never see a wrong-locale flash before a redirect.
+
+### Server-side (no flash)
+
+<Steps>
+  <Step title="Nitro middleware runs first">
+    `i18n.global.ts` detects the locale from URL, cookie, or `Accept-Language`, and writes it to `event.context.i18n.locale`.
+  </Step>
+  <Step title="Redirect plugin issues 302 before render">
+    `06.redirect.ts` (server-only) checks the request through `i18nStrategy.getClientRedirect()` and issues a 302 **before** any page rendering.
+  </Step>
+  <Step title="No error flash">
+    The user never sees a briefly-rendered wrong locale. The response is a clean redirect.
+  </Step>
+</Steps>
+
+### Client-side (SPA navigation)
+
+<Steps>
+  <Step title="Global route middleware">
+    `i18n-redirect.global.ts` runs on every client navigation while `redirects: true`.
+  </Step>
+  <Step title="Locale preference">
+    The middleware prefers the locale from the target route, then falls back to `useI18nLocale().getPreferredLocale()`.
+  </Step>
+  <Step title="Redirect or continue">
+    `i18nStrategy.getClientRedirect()` decides whether a redirect is required. If so, the middleware calls `navigateTo` and preserves both `query` and `hash`.
+  </Step>
+</Steps>
+
+## Locale priority
+
+On the server, the redirect plugin resolves the preferred locale in this order:
+
+1. `useState('i18n-locale')`: highest priority, set through `useI18nLocale().setLocale()`.
+2. Cookie value, when `localeCookie` is configured.
+3. `Accept-Language` header, when `autoDetectLanguage: true`.
+4. `defaultLocale` as the final fallback.
+
+On the client, the route middleware first prefers the locale from the target route, then uses the same state / cookie / default chain.
+
+## Redirect behaviour per strategy
+
+| Strategy | `GET /` behaviour | Cookie required |
+| --- | --- | --- |
+| `no_prefix` | No redirect (locale from cookie / state) | Auto-set to `'user-locale'` |
+| `prefix` | 302 → `/{locale}/` | Recommended |
+| `prefix_except_default` | 302 → `/{locale}/` when locale ≠ default | Recommended |
+| `prefix_and_default` | No redirect (both `/` and `/{locale}/` valid) | Optional |
+
+## Disabling redirects
+
+```typescript nuxt.config.ts
+i18n: { redirects: false }
+```
+
+When `redirects: false`:
+
+- **Server**: `06.redirect.ts` stays registered and still performs 404 checks for invalid locale prefixes (`/xx/about` where `xx` is not a valid locale) plus cookie synchronisation from an explicit URL prefix (`/fr/about` syncs the cookie to `fr`). It skips redirect issuance.
+- **Client**: the `i18n-redirect` global middleware is not registered, so no SPA auto-redirects happen.
+
+## Cookie-based locale persistence
+
+<Warning>
+  When using `prefix` or `prefix_except_default` with `redirects: true` (the default), you **must** configure `localeCookie` for redirects to work correctly. Without it, the redirect plugin cannot remember the user's locale between visits.
+</Warning>
+
+```typescript
+i18n: {
+  strategy: 'prefix_except_default',
+  localeCookie: 'user-locale',
+}
+```
+
+How `localeCookie` behaves in v3:
+
+- Managed internally by `useI18nLocale()`. Do not read or write it directly through `useCookie()`.
+- Visiting a prefixed URL (`/fr/about`) auto-syncs the cookie to `fr`.
+- Visiting `/` reads the cookie and redirects to `/{locale}/` when appropriate.
+- Cookies with invalid locale codes fall back to `defaultLocale`. No errors are thrown.
+
+| Strategy | `localeCookie` default | Notes |
+| --- | --- | --- |
+| `no_prefix` | Auto: `'user-locale'` | Required; set automatically |
+| `prefix` | `null` (disabled) | Set to `'user-locale'` for redirects |
+| `prefix_except_default` | `null` (disabled) | Set to `'user-locale'` for redirects |
+| `prefix_and_default` | `null` (disabled) | Optional |
+
+## `autoDetectLanguage`
+
+**Type:** `boolean` &nbsp;·&nbsp; **Default:** `true`
+
+Detects the user's preferred language from the `Accept-Language` header. Runs in the server middleware, and only as a fallback: a cookie or explicit state wins.
+
+```typescript
+i18n: { autoDetectLanguage: true }
+```
+
+## `autoDetectPath`
+
+**Type:** `string` &nbsp;·&nbsp; **Default:** `'/'`
+
+Where cookie / `Accept-Language` preference redirects may run when `redirects: true`.
+
+- `'/'`: only on `/`. Deep links in the default locale stay reachable.
+- `'no_prefix'`: only paths without a locale prefix.
+- `'*'`: every path, including rewriting an explicit locale prefix (for example `/fr/about` → `/de/about` when the cookie prefers `de`).
+- Any other string: exact path match (for example `'/welcome'`).
+
+Prefixed strategy cleanup (`/en` → `/` under `prefix_except_default`) is never gated by this option.
+
+<Warning>
+  `autoDetectPath: '*'` will rewrite an explicit `/fr/about` to `/de/about` when the user's cookie prefers `de`. Useful for domain-based setups, but can confuse users who share URLs.
+</Warning>
+
+Behaviour with the default `autoDetectPath: '/'` and a locale cookie set to `de`:
+
+| Request | Cookie | Result |
+| --- | --- | --- |
+| `/` | `de` | 302 → `/de` |
+| `/about` | `de` | 200, default locale (no rewrite) |
+
+```typescript
+i18n: {
+  localeCookie: 'user-locale',
+  strategy: 'prefix_except_default',
+  // Default: remember language on entry, keep deep links stable
+  autoDetectPath: '/',
+  // Alternative: redirect on every unprefixed path, but never rewrite /de/... → /fr/...
+  // autoDetectPath: 'no_prefix',
+}
+```
+
+## Known issues and best practices
+
+### Hydration mismatch under `no_prefix`
+
+Under `no_prefix`, locale is resolved dynamically. If server and client pick different locales, hydration mismatches occur.
+
+Use `useI18nLocale().setLocale()` in a server plugin with `order: -10` so the locale is set before i18n initialisation:
+
+```typescript plugins/i18n-loader.server.ts
+export default defineNuxtPlugin({
+  name: 'i18n-custom-loader',
+  enforce: 'pre',
+  order: -10,
+  setup() {
+    const { setLocale } = useI18nLocale()
+    setLocale('ja') // your detection logic here
+  },
+})
+```
+
+For a full walkthrough, see [Custom language detection](/guides/custom-language-detection).
+
+### Prefer named routes with `localeRoute`
+
+Path-based routing can trip up route resolution:
+
+```typescript
+// May cause issues
+$localeRoute('/page')
+
+// Preferred
+$localeRoute({ name: 'page' })
+```
+
+### Using `pages: false` with i18n
+
+When Nuxt runs without pages:
+
+```typescript nuxt.config.ts
+export default defineNuxtConfig({
+  pages: false,
+  i18n: {
+    strategy: 'no_prefix',        // recommended
+    disablePageLocales: true,     // required
+    localeCookie: 'user-locale',  // required for persistence
+  },
+})
+```
+
+Limitations with `pages: false`:
+
+- No automatic redirects.
+- No URL-based locale detection.
+- Client-side switching requires a page reload or manual translation loading.
+
+### Invalid cookie handling
+
+If the cookie holds a locale that is not in your `locales` list, the module silently falls back to `defaultLocale`. No errors are thrown.
+
+## Best practices
+
+| Recommendation | Details |
+| --- | --- |
+| Set `localeCookie` | Always set for prefix strategies with `redirects: true`. |
+| Use `useI18nLocale()` | The centralised way to manage locale state (replaces manual `useState` / `useCookie`). |
+| Use named routes | `$localeRoute({ name: 'page' })` over `$localeRoute('/page')`. |
+| Programmatic locale | Use `useI18nLocale().setLocale()` in a server plugin with `order: -10`. |
+| Avoid manual cookies | Do not call `useCookie('user-locale')` yourself. `useI18nLocale()` manages it. |
+
+## Related guides
+
+<CardGroup cols={2}>
+  <Card title="Configuration reference" href="/guides/configuration">
+    Every option available under the `i18n` key.
+  </Card>
+  <Card title="Custom locale routes" href="/guides/custom-locale-routes">
+    Per-locale paths for individual pages.
+  </Card>
+  <Card title="Custom language detection" href="/guides/custom-language-detection">
+    Overriding the detection chain.
+  </Card>
+  <Card title="Multi-domain locales" href="/guides/multi-domain-locales">
+    Serving locales from separate hostnames.
+  </Card>
+</CardGroup>
