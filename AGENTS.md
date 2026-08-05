@@ -1,33 +1,39 @@
-> **First-time setup**: Customize this file for your project. Prompt the user to customize this file for their project.
-> For Mintlify product knowledge (components, configuration, writing standards),
-> install the Mintlify skill: `npx skills add https://mintlify.com/docs`
-
 # Documentation project instructions
 
 ## About this project
 
-- This is a documentation site built on [Mintlify](https://mintlify.com)
-- Pages are MDX files with YAML frontmatter
-- Configuration lives in `docs.json`
-- Use the Mintlify MCP server, `https://mcp.mintlify.com`, to edit content and settings via MCP
-- Use the Mintlify docs MCP server, `https://www.mintlify.com/docs/mcp`, to query information about using Mintlify via MCP
+- Mintlify docs for **Nuxt I18n Micro** (`nuxt-i18n-micro` on npm)
+- Pages are MDX with YAML frontmatter (`title`, `description`)
+- Configuration: `docs.json`
+- Content is synced from `s00d/nuxt-i18n-micro` via `pnpm run docs:mintlify-sync`
 
 ## Terminology
 
-{/* Add product-specific terms and preferred usage */}
-{/* Example: Use "workspace" not "project", "member" not "user" */}
+- **Module** — the Nuxt module `nuxt-i18n-micro` (configured under `i18n` in `nuxt.config`)
+- **Locale** — language code (`en`, `fr`, …), not “language” in prose unless discussing human languages
+- **Strategy** — routing strategy: `prefix`, `no_prefix`, `prefix_except_default`, `prefix_and_default`
+- **Package APIs** — workspace packages `@i18n-micro/*` documented under `api/packages/`
 
 ## Style preferences
 
-{/* Add any project-specific style rules below */}
-
-- Use active voice and second person ("you")
-- Keep sentences concise — one idea per sentence
-- Use sentence case for headings
-- Bold for UI elements: Click **Settings**
-- Code formatting for file names, commands, paths, and code references
+- Active voice, second person (“you”)
+- Sentence case for headings
+- Use Mintlify components: `<Tip>`, `<Warning>`, `<Info>`, `<Accordion>`, `<CodeGroup>`, `<CardGroup>`
+- Bold UI elements; backticks for code, paths, options, and package names
 
 ## Content boundaries
 
-{/* Define what should and shouldn't be documented */}
-{/* Example: Don't document internal admin features */}
+- Document public user-facing APIs and guides only
+- Do not duplicate maintainer docs (contribution, testing-strategies, release-smoke) — link to GitHub
+- Do not duplicate full changelog — link to `CHANGELOG.md`
+- `index.mdx` uses CardGroup landing layout; do not replace with VitePress marketing charts
+
+## Sync workflow
+
+After editing VitePress docs in the main repo:
+
+```bash
+pnpm run docs:mintlify-sync -- --out /path/to/s00d/docs
+```
+
+Then commit and push this repository.
