@@ -1,0 +1,120 @@
+---
+title: "सर्वर रूट और API"
+description: "Nitro सर्वर रूट और API handlers के अंदर strings का अनुवाद करें और रिक्वेस्ट का locale पढ़ें।"
+---
+
+`server/api/` और `server/routes/` में सर्वर handlers दो auto-imported helpers से strings का अनुवाद कर सकते हैं और रिक्वेस्ट का locale पढ़ सकते हैं। इनका उपयोग API responses, ईमेल, feeds या Vue पेज के बाहर render होने वाली किसी भी चीज़ के लिए करें। ये आपके पेजों जैसी ही अनुवाद फ़ाइलें पढ़ते हैं और रिक्वेस्ट से locale का पता लगाते हैं।
+
+## Handler में अनुवाद करें {#translate-in-a-handler}
+
+```ts
+// server/api/greeting.get.ts
+export default defineEventHandler(async (event) => {
+  const t = await useTranslationServerMiddleware(event)
+  return { message: t('greeting', { name: 'Ada' }) }
+})
+```
+
+```bash
+curl 'http://localhost:3000/api/greeting?locale=de'
+# {"message":"Hallo, Ada!"}
+```
+
+`useTranslationServerMiddleware(event, defaultLocale?, locale?)` async है और `t(key, params?, defaultValue?)` लौटाता है। `t` string लौटाता है, `{name}` params को interpolate करता है, और key न मिलने पर एक non-empty `defaultValue`, अन्यथा key, लौटाता है।
+
+`t` केवल `index` chunk देखता है: root फ़ाइलें (`locales/<locale>.json`) और साथ में `locales/pages/index/` जब वह मौजूद हो (`disablePageLocales` के साथ केवल root फ़ाइलें)। दूसरे पेजों की keys लोड नहीं होतीं। उनके लिए chunk ख़ुद लोड करें:
+
+```ts
+const { data } = await loadTranslationsFromServer('de', 'about') // Translations object of the about page
+```
+
+## रिक्वेस्ट का locale पढ़ें {#read-the-request-locale}
+
+```ts
+// server/api/locale.get.ts
+export default defineEventHandler((event) => {
+  const { current, isDefault, locale } = useLocaleServerMiddleware(event)
+  return { current, isDefault, dir: locale?.dir ?? 'ltr' }
+})
+```
+
+`useLocaleServerMiddleware(event, defaultLocale?, locale?)` synchronous है और लौटाता है:
+
+```ts
+interface LocaleInfo {
+  current: string // detected locale code
+  default: string // defaultLocale, runtime overrides included (fixed at build under prefix_except_default / prefix_and_default)
+  fallback: string // fallbackLocale, else the default
+  available: string[] // enabled locale codes
+  locale: Locale | null // the config entry of `current`
+  isDefault: boolean
+  isFallback: boolean
+}
+```
+
+## Locale कैसे चुना जाता है {#how-the-locale-is-chosen}
+
+दोनों helpers हर सर्वर रूट पर, `/api` हो या न हो, एक ही क्रम इस्तेमाल करते हैं:
+
+1. `?locale=` query (दोहराए जाने पर पहला मान);
+2. एक `[locale]` route param, या पाथ में locale prefix (`/de/...`);
+3. locale cookie, जब [`localeCookie`](/hi/api/module-options#localecookie) सेट हो (`hashMode` के तहत `hash-locale`);
+4. `Accept-Language`, जब `autoDetectLanguage` चालू हो (q-values का सम्मान किया जाता है);
+5. `defaultLocale`।
+
+अमान्य और अक्षम codes हर चरण पर छोड़ दिए जाते हैं। यह API का क्रम है; prefix strategies के तहत पेज render `?locale=` को अनदेखा करता है। दोनों क्रमों की तुलना [Locale detection](/hi/guide/locale-detection) पर की गई है।
+
+## Locale को बाध्य करें {#force-a-locale}
+
+detection छोड़ने के लिए तीसरा argument पास करें, उदाहरण के लिए किसी ऐसे job में जो उपयोगकर्ता की भाषा में मेल भेजता है:
+
+```ts
+export default defineEventHandler(async (event) => {
+  const user = await getUser(event) // your code
+  const t = await useTranslationServerMiddleware(event, undefined, user.locale)
+  return sendMail(user.email, t('mail.welcome.subject'))
+})
+```
+
+दूसरा argument इस कॉल के detection के लिए `defaultLocale` की जगह लेता है, इसलिए locale बाध्य होने पर इसका कोई प्रभाव नहीं होता। Dictionaries प्रति रिक्वेस्ट और प्रति locale कैश होती हैं, और रिक्वेस्ट्स के बीच सर्वर के translation cache में, इसलिए किसी helper को कई बार कॉल करना सस्ता है।
+
+## सर्वर components {#server-components}
+
+सर्वर component (`.server.vue`, `<NuxtIsland>`) अपने ख़ुद के URL, `/__nuxt_island/...`, से render होता है, इसलिए वह पेज का URL नहीं देखता, और Nuxt उसे केवल उसके props पास करता है। locale को `locale` prop के रूप में पास करें। तब वह उस locale में render होता है, और locale बदलने पर उसे फिर से fetch किया जाता है, क्योंकि props island के URL और cache key का हिस्सा हैं। यह नाम आरक्षित है: `locale` नाम के prop में कोई भी सक्षम locale code render का locale सेट करता है, इसलिए किसी दूसरे अर्थ वाले prop, जैसे number format, को कोई दूसरा नाम दें:
+
+```vue
+<!-- components/Greeting.server.vue -->
+<template><p>{{ $t('greeting') }}</p></template>
+<script setup lang="ts">
+defineProps<{ locale?: string }>()
+</script>
+```
+
+```vue
+<template>
+  <Greeting :locale="$getLocale()" />
+  <NuxtIsland name="Greeting" :props="{ locale: $getLocale() }" />
+</template>
+```
+
+prop के बिना वह cookie के locale में, अन्यथा डिफ़ॉल्ट locale में render होता है, URL चाहे जो कहे, और वह locale बदलने का अनुसरण नहीं करता। उसका `$t` `index` chunk देखता है: root फ़ाइलें और साथ में `locales/pages/index/`।
+
+## संबंधित {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Locale detection" icon="book-open" href="/hi/guide/locale-detection">
+
+</Card>
+
+<Card title="अनुवाद फ़ाइलें" icon="book-open" href="/hi/guide/translations">
+
+</Card>
+
+<Card title="Deployment" icon="book-open" href="/hi/guide/deployment">
+
+सर्वर अनुवाद कहाँ से पढ़ता है
+
+</Card>
+
+</CardGroup>

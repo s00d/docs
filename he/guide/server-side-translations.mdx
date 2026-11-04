@@ -1,0 +1,120 @@
+---
+title: "נתיבי שרת ו-API"
+description: "תרגום מחרוזות וקריאת ה-locale של הבקשה בתוך נתיבי שרת של Nitro ו-handlers של API."
+---
+
+handlers של השרת ב-`server/api/` וב-`server/routes/` יכולים לתרגם מחרוזות ולקרוא את ה-locale של הבקשה באמצעות שתי פונקציות עזר שמיובאות אוטומטית. השתמשו בהן לתגובות API, הודעות דוא"ל, פידים או כל דבר שמתרנדר מחוץ לעמוד Vue. הן קוראות את אותם קובצי תרגום כמו העמודים שלכם ומזהות את ה-locale מהבקשה.
+
+## תרגום בתוך handler {#translate-in-a-handler}
+
+```ts
+// server/api/greeting.get.ts
+export default defineEventHandler(async (event) => {
+  const t = await useTranslationServerMiddleware(event)
+  return { message: t('greeting', { name: 'Ada' }) }
+})
+```
+
+```bash
+curl 'http://localhost:3000/api/greeting?locale=de'
+# {"message":"Hallo, Ada!"}
+```
+
+`useTranslationServerMiddleware(event, defaultLocale?, locale?)` היא אסינכרונית ומחזירה `t(key, params?, defaultValue?)`. ‏`t` מחזירה את המחרוזת, משבצת פרמטרים מסוג `{name}`, וכשהמפתח חסר מחזירה `defaultValue` שאינו ריק, ואחרת את המפתח.
+
+`t` רואה רק את ה-chunk ‏`index`: קובצי השורש (`locales/<locale>.json`) ובנוסף `locales/pages/index/` כשהוא קיים (רק קובצי השורש עם `disablePageLocales`). מפתחות של עמודים אחרים לא נטענים. עבורם, טענו את ה-chunk בעצמכם:
+
+```ts
+const { data } = await loadTranslationsFromServer('de', 'about') // Translations object of the about page
+```
+
+## קריאת ה-locale של הבקשה {#read-the-request-locale}
+
+```ts
+// server/api/locale.get.ts
+export default defineEventHandler((event) => {
+  const { current, isDefault, locale } = useLocaleServerMiddleware(event)
+  return { current, isDefault, dir: locale?.dir ?? 'ltr' }
+})
+```
+
+`useLocaleServerMiddleware(event, defaultLocale?, locale?)` היא סינכרונית ומחזירה:
+
+```ts
+interface LocaleInfo {
+  current: string // detected locale code
+  default: string // defaultLocale, runtime overrides included (fixed at build under prefix_except_default / prefix_and_default)
+  fallback: string // fallbackLocale, else the default
+  available: string[] // enabled locale codes
+  locale: Locale | null // the config entry of `current`
+  isDefault: boolean
+  isFallback: boolean
+}
+```
+
+## איך נבחר ה-locale {#how-the-locale-is-chosen}
+
+שתי פונקציות העזר משתמשות באותו סדר בכל נתיב שרת, `/api` או לא:
+
+1. ה-query ‏`?locale=` (הערך הראשון כשהוא חוזר);
+2. פרמטר נתיב `[locale]`, או קידומת locale בנתיב (`/de/...`);
+3. עוגיית ה-locale, כש-[`localeCookie`](/he/api/module-options#localecookie) מוגדר (`hash-locale` תחת `hashMode`);
+4. `Accept-Language`, כש-`autoDetectLanguage` מופעל (תוך התחשבות בערכי q);
+5. `defaultLocale`.
+
+קודים לא תקינים ומושבתים מדולגים בכל שלב. זהו הסדר של ה-API; רינדור עמוד מתעלם מ-`?locale=` תחת אסטרטגיות הקידומת. שני הסדרים מושווים בעמוד [זיהוי locale](/he/guide/locale-detection).
+
+## כפיית locale {#force-a-locale}
+
+העבירו את הארגומנט השלישי כדי לדלג על הזיהוי, למשל במשימה ששולחת דוא"ל בשפת המשתמש:
+
+```ts
+export default defineEventHandler(async (event) => {
+  const user = await getUser(event) // your code
+  const t = await useTranslationServerMiddleware(event, undefined, user.locale)
+  return sendMail(user.email, t('mail.welcome.subject'))
+})
+```
+
+הארגומנט השני מחליף את `defaultLocale` לצורך הזיהוי בקריאה הזו, ולכן אין לו השפעה כש-locale נכפה. המילונים נשמרים במטמון לכל בקשה ולכל locale, וגם בין בקשות במטמון התרגומים של השרת, כך שקריאה לפונקציית עזר כמה פעמים היא זולה.
+
+## קומפוננטות שרת {#server-components}
+
+קומפוננטת שרת (`.server.vue`, ‏`<NuxtIsland>`) מתרנדרת מכתובת ה-URL שלה, `/__nuxt_island/...`, ולכן היא לא רואה את כתובת העמוד, ו-Nuxt מעביר לה רק את ה-props שלה. העבירו את ה-locale כ-prop בשם `locale`. היא תתרנדר אז ב-locale הזה, והחלפה תטען אותה מחדש, מכיוון שה-props הם חלק מכתובת ה-URL וממפתח המטמון של ה-island. השם שמור: כל קוד locale מופעל ב-prop בשם `locale` קובע את ה-locale של הרינדור, ולכן תנו שם אחר ל-prop שמשמעותו אחרת, כמו פורמט מספרים:
+
+```vue
+<!-- components/Greeting.server.vue -->
+<template><p>{{ $t('greeting') }}</p></template>
+<script setup lang="ts">
+defineProps<{ locale?: string }>()
+</script>
+```
+
+```vue
+<template>
+  <Greeting :locale="$getLocale()" />
+  <NuxtIsland name="Greeting" :props="{ locale: $getLocale() }" />
+</template>
+```
+
+ללא ה-prop היא מתרנדרת ב-locale של העוגייה, אחרת ב-locale ברירת המחדל, בלי קשר למה שכתוב ב-URL, והיא לא עוקבת אחרי החלפה. ה-`$t` שלה רואה את ה-chunk ‏`index`: קובצי השורש ובנוסף `locales/pages/index/`.
+
+## קשור {#related}
+
+<CardGroup cols={2}>
+
+<Card title="זיהוי locale" icon="book-open" href="/he/guide/locale-detection">
+
+</Card>
+
+<Card title="קובצי תרגום" icon="book-open" href="/he/guide/translations">
+
+</Card>
+
+<Card title="פריסה" icon="book-open" href="/he/guide/deployment">
+
+מאיפה השרת קורא תרגומים
+
+</Card>
+
+</CardGroup>

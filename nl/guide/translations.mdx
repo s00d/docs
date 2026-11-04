@@ -1,0 +1,132 @@
+---
+title: "Vertaalbestanden"
+description: "Waar vertaalsleutels staan, hoe root- en paginabestanden samen met fallbacks worden gecombineerd en hoe een pagina haar woordenboek laadt."
+---
+
+Vertalingen zijn gewone JSON-bestanden: één rootbestand per locale voor gedeelde sleutels, en één bestand per pagina en locale voor de sleutels van die pagina. Lees dit wanneer je pagina's toevoegt, sleutels tussen pagina's deelt of fallbacks instelt. Je leert in welk bestand een sleutel moet, wat een pagina kan zien en wanneer elk bestand wordt geladen.
+
+## Indeling {#layout}
+
+```text
+locales/
+├── en.json                 # root: menus, footer, buttons
+├── de.json
+└── pages/
+    ├── index/              # pages/index.vue
+    │   ├── en.json
+    │   └── de.json
+    ├── about/              # pages/about.vue
+    │   ├── en.json
+    │   └── de.json
+    └── products-id/        # pages/products/[id].vue
+        ├── en.json
+        └── de.json
+```
+
+- De map onder `locales/pages/` is de Nuxt-**routenaam** van de pagina: `pages/products/[id].vue` is `products-id`, `pages/blog/[slug]/comments.vue` is `blog-slug-comments`.
+- Sleutels kunnen tot elke diepte genest worden; `$t('auth.form.login')` leest `{ "auth": { "form": { "login": … } } }`.
+- `translationDir` verplaatst de map (standaard `'locales'`, relatief aan de projectroot, ook onder de `app/`-indeling van Nuxt 4).
+- Ontbrekende bestanden worden als `{}` aangemaakt wanneer Nuxt de pagina's resolveert, tenzij [`disableWatcher`](/nl/api/module-options#disablewatcher) is ingesteld.
+
+## Wat een pagina ziet {#what-a-page-sees}
+
+![Opzoekvolgorde voor een sleutel op /about in de: pages/about/de.json, de.json, pages/about/en.json, en.json. Ze worden samengevoegd tot één about/de/data.json die $t leest](/images/diagrams/page-dictionary.svg)
+
+Het woordenboek van een pagina is haar rootbestand, diep (op elk niveau) samengevoegd met haar paginabestand. Bij een conflict wint het paginabestand:
+
+```json
+// locales/en.json
+{ "title": "My shop", "nav": { "home": "Home", "cart": "Cart" } }
+```
+
+```json
+// locales/pages/about/en.json
+{ "title": "About us", "nav": { "cart": "Basket" } }
+```
+
+```ts
+// on /about
+t('title') // 'About us'
+t('nav.home') // 'Home'   (root)
+t('nav.cart') // 'Basket' (page wins)
+// on any other page
+t('title') // 'My shop'
+```
+
+Een pagina zonder eigen map krijgt alleen het rootwoordenboek. Sleutels van andere pagina's zijn niet zichtbaar.
+
+### Fallback-locales {#fallback-locales}
+
+Een sleutel die in de actieve locale ontbreekt, wordt uit haar fallback-locale gehaald voordat de sleutel zelf wordt getoond:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    locales: [
+      { code: 'en', iso: 'en-US' },
+      { code: 'de', iso: 'de-DE' },
+      { code: 'de-at', iso: 'de-AT', fallbackLocale: 'de' },
+    ],
+    defaultLocale: 'en',
+    fallbackLocale: 'en', // global, for every locale
+  },
+})
+```
+
+- De eigen `fallbackLocale` van een locale wordt tot het einde gevolgd: `de-at` → `de` → `en`.
+- De globale `fallbackLocale` is de zwakste laag, onder elke keten.
+- Elke locale in de keten voegt haar rootbestand en daarna haar paginabestand toe, van de zwakste fallback tot de actieve locale. Het rootbestand van de actieve locale wint dus van het paginabestand van een fallback-locale.
+
+Zonder fallback wordt een ontbrekende sleutel als de sleutel zelf gerenderd (`'nav.home'`) en wordt er in dev een waarschuwing in de browserconsole gelogd ([`missingWarn`](/nl/api/module-options#missingwarn)).
+
+## Delen en andere bronnen {#sharing-and-other-sources}
+
+| Behoefte | Optie |
+| --- | --- |
+| Alleen rootbestanden, geen `pages/`-mappen | [`disablePageLocales: true`](/nl/api/module-options#disablepagelocales) |
+| Twee pagina's lezen één paginamap | [`routesLocaleLinks`](/nl/api/module-options#routeslocalelinks): `{ 'about-us': 'about' }` |
+| Gedeelde rootbestanden in een andere map | [`additionalTranslationDirs`](/nl/api/module-options#additionaltranslationdirs): `['common']` (de hoofd-`translationDir` wint) |
+| Sleutels uit een Nuxt-layer | De bestanden van layers worden samengevoegd, de eigen bestanden van het project winnen. Zie [Layers](/nl/guide/layers) |
+| Sleutels die tijdens runtime worden toegevoegd | de hook [`i18n:register`](/nl/api/events), `$mergeTranslations`, `$setTranslation` |
+| Sleutels inline in een paginacomponent | `$defineI18nRoute({ locales: { en: { … } } })`, zie [Paginaconfiguratie](/nl/guide/per-component-translations) |
+
+## Hoe een pagina haar woordenboek laadt {#how-a-page-loads-its-dictionary}
+
+![Locale-JSON-bestanden worden gebouwd tot een payloadboom, opgeslagen in public/ op Node of in serverassets op Edge, gelezen door een serverloader, en vervolgens gebruikt door $t op de server en opgehaald voor $t in de browser](/images/diagrams/translation-pipeline.svg)
+
+De module bouwt één payload per pagina en locale: `/{apiBaseUrl}/{page}/{locale}/data.json` (standaard `/_locales/about/de/data.json`).
+
+1. **Serverrender.** Nitro detecteert de locale en de pagina laadt haar payload rechtstreeks uit de serverloader, zonder HTTP-verzoek. Het woordenboek wordt niet in de HTML-payload geschreven, dus pagina's blijven klein.
+2. **Hydratatie.** De browser haalt dezelfde payload op. De server heeft er al een `<link rel="preload">` voor gegenereerd, dus het ophalen begint samen met de HTML.
+3. **Navigatie.** De payload van de volgende pagina vervangt het woordenboek. De sleutels van de vertrekkende pagina worden nog opgelost totdat die weg is (einde van de paginatransitie, of `page:finish`), zodat een uitfadende pagina geen ruwe sleutels laat flitsen. Een chunk die niet laadt (netwerkfout, 4xx of 5xx, een body die geen object is) laat het huidige woordenboek staan, en de volgende navigatie laadt hem opnieuw. Een mislukte locale-wissel werkt hetzelfde: `$switchLocale` resolvet naar `false`, en opnieuw aanroepen, of opnieuw op de wisselaar klikken, probeert het nog eens. Onder de prefix-strategieën is de URL dan al veranderd, dus `lang` en `$getLocale()` noemen de locale van de URL terwijl de oude teksten op het scherm blijven.
+4. **Cache.** Geladen payloads worden op de server en in de browser gecachet; [Prestaties](/nl/guide/performance) beschrijft de instellingen voor grootte en TTL.
+
+`translationPayloads.mode` bepaalt hoe payloads worden gebouwd. `'premerged'` (standaard) schrijft elk bestand per pagina × locale tijdens de build. `'source'` behoudt de bronbestanden en voegt per verzoek samen, wat kleiner is voor grote catalogi op Edge-targets. Beide leveren dezelfde woordenboeken op. Waar de bestanden per deploymenttarget terechtkomen, staat op [Deployment](/nl/guide/deployment).
+
+## Bewerken tijdens ontwikkeling {#editing-in-development}
+
+`nuxt dev` leest de bestanden live. Het opslaan van een vertaalbestand ververst het woordenboek van de geopende pagina ter plekke: geen herlaadactie, verwijderde sleutels verdwijnen, en een wijziging in een rootbestand bereikt elke pagina. Een kapot JSON-bestand logt een waarschuwing met zijn pad en wordt als leeg behandeld. Stel [`hmr: false`](/nl/api/module-options#hmr) in om in plaats daarvan handmatig te verversen.
+
+## Gerelateerd {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Paginaconfiguratie" icon="book-open" href="/nl/guide/per-component-translations">
+
+Locales per pagina en inline vertalingen
+
+</Card>
+
+<Card title="Methoden" icon="brackets-curly" href="/nl/api/methods">
+
+`$t`, `$tc`, `$tn`, `$td`
+
+</Card>
+
+<Card title="Deployment" icon="book-open" href="/nl/guide/deployment">
+
+</Card>
+
+</CardGroup>

@@ -1,0 +1,120 @@
+---
+title: "Server route và API"
+description: "Dịch chuỗi và đọc locale của yêu cầu bên trong các server route và API handler của Nitro."
+---
+
+Các server handler trong `server/api/` và `server/routes/` có thể dịch chuỗi và đọc locale của yêu cầu bằng hai hàm hỗ trợ được auto-import. Hãy dùng chúng cho phản hồi API, email, feed hoặc bất cứ thứ gì được render bên ngoài một trang Vue. Chúng đọc cùng các tệp bản dịch như các trang của bạn và phát hiện locale từ yêu cầu.
+
+## Dịch trong một handler {#translate-in-a-handler}
+
+```ts
+// server/api/greeting.get.ts
+export default defineEventHandler(async (event) => {
+  const t = await useTranslationServerMiddleware(event)
+  return { message: t('greeting', { name: 'Ada' }) }
+})
+```
+
+```bash
+curl 'http://localhost:3000/api/greeting?locale=de'
+# {"message":"Hallo, Ada!"}
+```
+
+`useTranslationServerMiddleware(event, defaultLocale?, locale?)` là bất đồng bộ và trả về `t(key, params?, defaultValue?)`. `t` trả về chuỗi, nội suy các tham số `{name}`, và khi khóa bị thiếu thì trả về `defaultValue` nếu không rỗng, nếu không thì trả về chính khóa.
+
+`t` chỉ thấy chunk `index`: các tệp gốc (`locales/<locale>.json`) cùng `locales/pages/index/` khi thư mục này tồn tại (chỉ các tệp gốc khi dùng `disablePageLocales`). Các khóa của những trang khác không được tải. Đối với chúng, hãy tự tải chunk:
+
+```ts
+const { data } = await loadTranslationsFromServer('de', 'about') // Translations object of the about page
+```
+
+## Đọc locale của yêu cầu {#read-the-request-locale}
+
+```ts
+// server/api/locale.get.ts
+export default defineEventHandler((event) => {
+  const { current, isDefault, locale } = useLocaleServerMiddleware(event)
+  return { current, isDefault, dir: locale?.dir ?? 'ltr' }
+})
+```
+
+`useLocaleServerMiddleware(event, defaultLocale?, locale?)` là đồng bộ và trả về:
+
+```ts
+interface LocaleInfo {
+  current: string // detected locale code
+  default: string // defaultLocale, runtime overrides included (fixed at build under prefix_except_default / prefix_and_default)
+  fallback: string // fallbackLocale, else the default
+  available: string[] // enabled locale codes
+  locale: Locale | null // the config entry of `current`
+  isDefault: boolean
+  isFallback: boolean
+}
+```
+
+## Cách chọn locale {#how-the-locale-is-chosen}
+
+Cả hai hàm hỗ trợ đều dùng cùng một thứ tự trên mọi server route, dù có phải `/api` hay không:
+
+1. query `?locale=` (giá trị đầu tiên khi bị lặp lại);
+2. một route param `[locale]`, hoặc một tiền tố locale trong đường dẫn (`/de/...`);
+3. cookie locale, khi [`localeCookie`](/vi/api/module-options#localecookie) được đặt (`hash-locale` khi dùng `hashMode`);
+4. `Accept-Language`, khi `autoDetectLanguage` được bật (tôn trọng các giá trị q);
+5. `defaultLocale`.
+
+Các mã không hợp lệ và bị tắt sẽ bị bỏ qua ở mọi bước. Đây là thứ tự của API; việc render trang sẽ bỏ qua `?locale=` với các strategy có tiền tố. Cả hai thứ tự được so sánh ở [Phát hiện locale](/vi/guide/locale-detection).
+
+## Bắt buộc một locale {#force-a-locale}
+
+Truyền đối số thứ ba để bỏ qua việc phát hiện, ví dụ trong một tác vụ gửi email bằng ngôn ngữ của người dùng:
+
+```ts
+export default defineEventHandler(async (event) => {
+  const user = await getUser(event) // your code
+  const t = await useTranslationServerMiddleware(event, undefined, user.locale)
+  return sendMail(user.email, t('mail.welcome.subject'))
+})
+```
+
+Đối số thứ hai thay thế `defaultLocale` cho việc phát hiện trong lời gọi này, nên nó không có tác dụng khi một locale bị bắt buộc. Các từ điển được lưu đệm theo từng yêu cầu và từng locale, và giữa các yêu cầu trong bộ nhớ đệm bản dịch của server, nên việc gọi một hàm hỗ trợ nhiều lần có chi phí thấp.
+
+## Server component {#server-components}
+
+Một server component (`.server.vue`, `<NuxtIsland>`) render từ URL riêng của nó, `/__nuxt_island/...`, nên nó không thấy URL của trang, và Nuxt chỉ truyền cho nó các props. Hãy truyền locale dưới dạng prop `locale`. Khi đó nó render bằng locale đó, và một lần chuyển locale sẽ tải lại nó, vì các props là một phần của URL và khóa bộ nhớ đệm của island. Tên này được dành riêng: bất kỳ mã locale đang bật nào trong một prop tên `locale` đều đặt locale cho lần render, vì vậy hãy đặt tên khác cho prop mang ý nghĩa khác, chẳng hạn định dạng số:
+
+```vue
+<!-- components/Greeting.server.vue -->
+<template><p>{{ $t('greeting') }}</p></template>
+<script setup lang="ts">
+defineProps<{ locale?: string }>()
+</script>
+```
+
+```vue
+<template>
+  <Greeting :locale="$getLocale()" />
+  <NuxtIsland name="Greeting" :props="{ locale: $getLocale() }" />
+</template>
+```
+
+Nếu không có prop này, nó render bằng locale của cookie, nếu không thì locale mặc định, bất kể URL là gì, và nó không theo khi chuyển locale. `$t` của nó thấy chunk `index`: các tệp gốc cùng `locales/pages/index/`.
+
+## Liên quan {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Phát hiện locale" icon="book-open" href="/vi/guide/locale-detection">
+
+</Card>
+
+<Card title="Tệp bản dịch" icon="book-open" href="/vi/guide/translations">
+
+</Card>
+
+<Card title="Triển khai" icon="book-open" href="/vi/guide/deployment">
+
+Nơi server đọc bản dịch
+
+</Card>
+
+</CardGroup>

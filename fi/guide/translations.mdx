@@ -1,0 +1,132 @@
+---
+title: "Käännöstiedostot"
+description: "Missä käännösavaimet sijaitsevat, miten juuri- ja sivutiedostot yhdistyvät varakielten kanssa ja miten sivu lataa sanakirjansa."
+---
+
+Käännökset ovat tavallisia JSON-tiedostoja: yksi juuritiedosto kieltä kohden jaetuille avaimille ja yksi tiedosto sivua ja kieltä kohden kyseisen sivun avaimille. Lue tämä, kun lisäät sivuja, jaat avaimia niiden välillä tai määrität varakieliä. Opit, mihin tiedostoon avain kuuluu, mitä sivu näkee ja milloin kukin tiedosto ladataan.
+
+## Rakenne {#layout}
+
+```text
+locales/
+├── en.json                 # root: menus, footer, buttons
+├── de.json
+└── pages/
+    ├── index/              # pages/index.vue
+    │   ├── en.json
+    │   └── de.json
+    ├── about/              # pages/about.vue
+    │   ├── en.json
+    │   └── de.json
+    └── products-id/        # pages/products/[id].vue
+        ├── en.json
+        └── de.json
+```
+
+- `locales/pages/`-hakemiston alla oleva kansio on sivun Nuxt-**reitin nimi**: `pages/products/[id].vue` on `products-id`, `pages/blog/[slug]/comments.vue` on `blog-slug-comments`.
+- Avaimet voivat olla sisäkkäisiä mihin tahansa syvyyteen; `$t('auth.form.login')` lukee `{ "auth": { "form": { "login": … } } }`.
+- `translationDir` siirtää kansion (oletuksena `'locales'`, suhteessa projektin juureen, myös Nuxt 4:n `app/`-rakenteessa).
+- Puuttuvat tiedostot luodaan muodossa `{}`, kun Nuxt ratkaisee sivut, ellei [`disableWatcher`](/fi/api/module-options#disablewatcher) ole asetettu.
+
+## Mitä sivu näkee {#what-a-page-sees}
+
+![Avaimen hakujärjestys sivulla /about kielellä de: pages/about/de.json, de.json, pages/about/en.json, en.json. Ne yhdistetään yhdeksi about/de/data.json-tiedostoksi, jota $t lukee](/images/diagrams/page-dictionary.svg)
+
+Sivun sanakirja on sen juuritiedosto yhdistettynä sen sivutiedostoon syvästi (jokaisella tasolla). Ristiriidassa sivutiedosto voittaa:
+
+```json
+// locales/en.json
+{ "title": "My shop", "nav": { "home": "Home", "cart": "Cart" } }
+```
+
+```json
+// locales/pages/about/en.json
+{ "title": "About us", "nav": { "cart": "Basket" } }
+```
+
+```ts
+// on /about
+t('title') // 'About us'
+t('nav.home') // 'Home'   (root)
+t('nav.cart') // 'Basket' (page wins)
+// on any other page
+t('title') // 'My shop'
+```
+
+Sivu, jolla ei ole omaa kansiota, saa pelkän juurisanakirjan. Muiden sivujen avaimet eivät näy.
+
+### Varakielet {#fallback-locales}
+
+Aktiivisesta kielestä puuttuva avain otetaan sen varakielestä ennen kuin itse avain näytetään:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    locales: [
+      { code: 'en', iso: 'en-US' },
+      { code: 'de', iso: 'de-DE' },
+      { code: 'de-at', iso: 'de-AT', fallbackLocale: 'de' },
+    ],
+    defaultLocale: 'en',
+    fallbackLocale: 'en', // global, for every locale
+  },
+})
+```
+
+- Kielen oma `fallbackLocale` seurataan loppuun asti: `de-at` → `de` → `en`.
+- Globaali `fallbackLocale` on heikoin kerros, kaikkien ketjujen alla.
+- Jokainen ketjun kieli lisää juuritiedostonsa ja sitten sivutiedostonsa, heikoimmasta varakielestä aktiiviseen kieleen. Siksi aktiivisen kielen juuritiedosto voittaa varakielen sivutiedoston.
+
+Ilman varakieltä puuttuva avain renderöidään avaimena (`'nav.home'`) ja kirjaa kehitystilassa varoituksen selaimen konsoliin ([`missingWarn`](/fi/api/module-options#missingwarn)).
+
+## Jakaminen ja muut lähteet {#sharing-and-other-sources}
+
+| Tarve | Asetus |
+| --- | --- |
+| Vain juuritiedostot, ei `pages/`-kansioita | [`disablePageLocales: true`](/fi/api/module-options#disablepagelocales) |
+| Kaksi sivua lukee yhtä sivukansiota | [`routesLocaleLinks`](/fi/api/module-options#routeslocalelinks): `{ 'about-us': 'about' }` |
+| Jaetut juuritiedostot toisessa kansiossa | [`additionalTranslationDirs`](/fi/api/module-options#additionaltranslationdirs): `['common']` (pää-`translationDir` voittaa) |
+| Avaimet Nuxt-kerroksesta | Kerrosten tiedostot yhdistetään, projektin omat tiedostot voittavat. Katso [Kerrokset](/fi/guide/layers) |
+| Ajon aikana lisätyt avaimet | [`i18n:register`](/fi/api/events)-hook, `$mergeTranslations`, `$setTranslation` |
+| Avaimet suoraan sivukomponentissa | `$defineI18nRoute({ locales: { en: { … } } })`, katso [Sivun asetukset](/fi/guide/per-component-translations) |
+
+## Miten sivu lataa sanakirjansa {#how-a-page-loads-its-dictionary}
+
+![Kielten JSON-tiedostot rakennetaan payload-puuksi, joka tallennetaan public/-hakemistoon Nodessa tai palvelinassetteihin Edgessä, luetaan palvelinlataajalla ja käytetään $t:n kautta palvelimella sekä haetaan $t:lle selaimessa](/images/diagrams/translation-pipeline.svg)
+
+Moduuli rakentaa yhden payloadin sivua ja kieltä kohden: `/{apiBaseUrl}/{page}/{locale}/data.json` (oletuksena `/_locales/about/de/data.json`).
+
+1. **Palvelinrenderöinti.** Nitro tunnistaa kielen, ja sivu lataa payloadinsa suoraan palvelinlataajasta ilman HTTP-pyyntöä. Sanakirjaa ei kirjoiteta HTML-payloadiin, joten sivut pysyvät pieninä.
+2. **Hydraatio.** Selain hakee saman payloadin. Palvelin on jo tuottanut sille `<link rel="preload">`-linkin, joten haku alkaa HTML:n mukana.
+3. **Navigointi.** Seuraavan sivun payload korvaa sanakirjan. Poistuvan sivun avaimet ratkeavat edelleen, kunnes se on poissa (sivusiirtymän loppu tai `page:finish`), joten häivytettävä sivu ei välähdä raakoja avaimia. Pala, jonka lataus epäonnistuu (verkkovirhe, 4xx tai 5xx, runko, joka ei ole olio), jättää nykyisen sanakirjan paikalleen, ja seuraava navigointi lataa sen uudelleen. Epäonnistunut kielen vaihto toimii samoin: `$switchLocale` ratkeaa arvoon `false`, ja sen kutsuminen uudelleen tai kielenvaihtajan napsauttaminen uudelleen yrittää uudestaan. Etuliitestrategioissa URL on siihen mennessä jo vaihtunut, joten `lang` ja `$getLocale()` nimeävät URL:n kielen, vaikka vanhat tekstit pysyvät näytöllä.
+4. **Välimuisti.** Ladatut payloadit tallennetaan välimuistiin palvelimella ja selaimessa; [Suorituskyky](/fi/guide/performance)-sivulla on koko- ja TTL-säätimet.
+
+`translationPayloads.mode` määrää, miten payloadit rakennetaan. `'premerged'` (oletus) kirjoittaa jokaisen sivu × kieli -tiedoston build-vaiheessa. `'source'` säilyttää lähdetiedostot ja yhdistää ne pyyntökohtaisesti, mikä on pienempi suurille katalogeille Edge-kohteissa. Molemmat tuottavat samat sanakirjat. Mihin tiedostot päätyvät kussakin julkaisukohteessa, kerrotaan sivulla [Julkaisu](/fi/guide/deployment).
+
+## Muokkaaminen kehityksessä {#editing-in-development}
+
+`nuxt dev` lukee tiedostot reaaliajassa. Käännöstiedoston tallentaminen päivittää avoimen sivun sanakirjan paikallaan: ei uudelleenlatausta, poistetut avaimet katoavat, ja juuritiedoston muutos ulottuu jokaiselle sivulle. Rikkinäinen JSON-tiedosto kirjaa varoituksen polkuineen ja käsitellään tyhjänä. Aseta [`hmr: false`](/fi/api/module-options#hmr), jos haluat päivittää käsin.
+
+## Aiheeseen liittyvää {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Sivun asetukset" icon="book-open" href="/fi/guide/per-component-translations">
+
+Sivukohtaiset kielet ja suoraan kirjoitetut käännökset
+
+</Card>
+
+<Card title="Metodit" icon="brackets-curly" href="/fi/api/methods">
+
+`$t`, `$tc`, `$tn`, `$td`
+
+</Card>
+
+<Card title="Julkaisu" icon="book-open" href="/fi/guide/deployment">
+
+</Card>
+
+</CardGroup>

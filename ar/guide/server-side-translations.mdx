@@ -1,0 +1,120 @@
+---
+title: "مسارات الخادم والواجهة البرمجية"
+description: "ترجم النصوص واقرأ لغة الطلب داخل مسارات خادم Nitro ومعالجات الواجهة البرمجية."
+---
+
+يمكن لمعالجات الخادم في `server/api/` و`server/routes/` ترجمة النصوص وقراءة لغة الطلب باستخدام مساعدَين مستوردَين تلقائيًا. استخدمهما لاستجابات الواجهة البرمجية، أو رسائل البريد الإلكتروني، أو الخلاصات (feeds)، أو أي شيء يُصيَّر خارج صفحة Vue. يقرآن ملفات الترجمة نفسها التي تقرؤها صفحاتك ويكتشفان اللغة من الطلب.
+
+## الترجمة داخل معالج {#translate-in-a-handler}
+
+```ts
+// server/api/greeting.get.ts
+export default defineEventHandler(async (event) => {
+  const t = await useTranslationServerMiddleware(event)
+  return { message: t('greeting', { name: 'Ada' }) }
+})
+```
+
+```bash
+curl 'http://localhost:3000/api/greeting?locale=de'
+# {"message":"Hallo, Ada!"}
+```
+
+الدالة `useTranslationServerMiddleware(event, defaultLocale?, locale?)` غير متزامنة وتُعيد `t(key, params?, defaultValue?)`. تُعيد `t` النص، وتستبدل المعاملات `{name}`، وعند غياب المفتاح تُعيد `defaultValue` غير الفارغة، وإلا المفتاح نفسه.
+
+لا ترى `t` إلا الجزء `index`: الملفات الجذرية (`locales/<locale>.json`) إضافة إلى `locales/pages/index/` عند وجوده (الملفات الجذرية فقط مع `disablePageLocales`). لا تُحمَّل مفاتيح الصفحات الأخرى. لتلك المفاتيح، حمّل الجزء بنفسك:
+
+```ts
+const { data } = await loadTranslationsFromServer('de', 'about') // Translations object of the about page
+```
+
+## قراءة لغة الطلب {#read-the-request-locale}
+
+```ts
+// server/api/locale.get.ts
+export default defineEventHandler((event) => {
+  const { current, isDefault, locale } = useLocaleServerMiddleware(event)
+  return { current, isDefault, dir: locale?.dir ?? 'ltr' }
+})
+```
+
+الدالة `useLocaleServerMiddleware(event, defaultLocale?, locale?)` متزامنة وتُعيد:
+
+```ts
+interface LocaleInfo {
+  current: string // detected locale code
+  default: string // defaultLocale, runtime overrides included (fixed at build under prefix_except_default / prefix_and_default)
+  fallback: string // fallbackLocale, else the default
+  available: string[] // enabled locale codes
+  locale: Locale | null // the config entry of `current`
+  isDefault: boolean
+  isFallback: boolean
+}
+```
+
+## كيف تُختار اللغة {#how-the-locale-is-chosen}
+
+يستخدم المساعدان الترتيب نفسه على كل مسار خادم، سواء كان `/api` أم لا:
+
+1. معامل الاستعلام `?locale=` (القيمة الأولى عند التكرار)؛
+2. معامل المسار `[locale]`، أو بادئة لغة في المسار (`/de/...`)؛
+3. ملف تعريف الارتباط الخاص باللغة، عند ضبط [`localeCookie`](/ar/api/module-options#localecookie) (`hash-locale` تحت `hashMode`)؛
+4. `Accept-Language`، عند تفعيل `autoDetectLanguage` (مع احترام قيم q)؛
+5. `defaultLocale`.
+
+تُتخطّى الرموز غير الصالحة والمعطّلة في كل خطوة. هذا هو ترتيب الواجهة البرمجية؛ أما تصيير الصفحة فيتجاهل `?locale=` تحت استراتيجيات البادئة. يُقارن الترتيبان في [اكتشاف اللغة](/ar/guide/locale-detection).
+
+## فرض لغة {#force-a-locale}
+
+مرّر الوسيط الثالث لتخطي الاكتشاف، مثلًا في مهمة ترسل بريدًا بلغة المستخدم:
+
+```ts
+export default defineEventHandler(async (event) => {
+  const user = await getUser(event) // your code
+  const t = await useTranslationServerMiddleware(event, undefined, user.locale)
+  return sendMail(user.email, t('mail.welcome.subject'))
+})
+```
+
+يستبدل الوسيط الثاني `defaultLocale` في اكتشاف هذا الاستدعاء، لذا لا أثر له عند فرض لغة. تُخزَّن القواميس مؤقتًا لكل طلب ولكل لغة، وعبر الطلبات في ذاكرة الترجمة المؤقتة للخادم، لذا فإن استدعاء المساعد عدة مرات زهيد الكلفة.
+
+## مكوّنات الخادم {#server-components}
+
+يُصيَّر مكوّن الخادم (`.server.vue`، `<NuxtIsland>`) من عنوان URL الخاص به، `/__nuxt_island/...`، لذا لا يرى عنوان URL الخاص بالصفحة، ولا يمرّر Nuxt إليه إلا خصائصه (props). مرّر اللغة كخاصية `locale`. عندها يُصيَّر بتلك اللغة، ويُجلب مجددًا عند التبديل، لأن الخصائص جزء من عنوان URL الخاص بالجزيرة ومفتاح ذاكرتها المؤقتة. هذا الاسم محجوز: أي رمز لغة مفعّلة في خاصية اسمها `locale` يضبط لغة التصيير، لذا أعطِ الخاصية التي تعني شيئًا آخر، مثل تنسيق الأرقام، اسمًا آخر:
+
+```vue
+<!-- components/Greeting.server.vue -->
+<template><p>{{ $t('greeting') }}</p></template>
+<script setup lang="ts">
+defineProps<{ locale?: string }>()
+</script>
+```
+
+```vue
+<template>
+  <Greeting :locale="$getLocale()" />
+  <NuxtIsland name="Greeting" :props="{ locale: $getLocale() }" />
+</template>
+```
+
+بدون هذه الخاصية يُصيَّر بلغة ملف تعريف الارتباط، وإلا باللغة الافتراضية، بغض النظر عمّا يقوله عنوان URL، ولا يتبع التبديل. ترى `$t` الخاصة به الجزء `index`: الملفات الجذرية إضافة إلى `locales/pages/index/`.
+
+## ذو صلة {#related}
+
+<CardGroup cols={2}>
+
+<Card title="اكتشاف اللغة" icon="book-open" href="/ar/guide/locale-detection">
+
+</Card>
+
+<Card title="ملفات الترجمة" icon="book-open" href="/ar/guide/translations">
+
+</Card>
+
+<Card title="النشر" icon="book-open" href="/ar/guide/deployment">
+
+من أين يقرأ الخادم الترجمات
+
+</Card>
+
+</CardGroup>

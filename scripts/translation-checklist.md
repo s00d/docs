@@ -241,7 +241,7 @@ Source files (filesystem walk): 80. Target languages: 37. All target files missi
 - [x] group 4 / zh-CN
 - [x] group 4 / es
 - [x] group 4 / sv
-- [ ] group 4 / tr
+- [x] group 4 / tr
 - [x] group 4 / zh-Hant
 - [x] group 4 / zh-Hans
 - [x] group 4 / zh-TW
@@ -287,40 +287,40 @@ Source files (filesystem walk): 80. Target languages: 37. All target files missi
 - [x] group 5 / vi
 - [x] group 5 / jp
 - [x] group 5 / ja-jp
-- [ ] group 6 / ru
-- [ ] group 6 / ar
-- [ ] group 6 / pt-BR
-- [ ] group 6 / fr-CA
-- [ ] group 6 / ca
-- [ ] group 6 / cn
-- [ ] group 6 / zh
-- [ ] group 6 / da
-- [ ] group 6 / cs
-- [ ] group 6 / nl
-- [ ] group 6 / fi
-- [ ] group 6 / fr
-- [ ] group 6 / de
-- [ ] group 6 / he
-- [ ] group 6 / hi
-- [ ] group 6 / hu
-- [ ] group 6 / id
-- [ ] group 6 / it
-- [ ] group 6 / ja
-- [ ] group 6 / ko
-- [ ] group 6 / lv
-- [ ] group 6 / no
-- [ ] group 6 / pl
-- [ ] group 6 / pt
-- [ ] group 6 / ro
-- [ ] group 6 / zh-CN
-- [ ] group 6 / es
-- [ ] group 6 / sv
-- [ ] group 6 / tr
-- [ ] group 6 / zh-Hant
-- [ ] group 6 / zh-Hans
-- [ ] group 6 / zh-TW
-- [ ] group 6 / uk
-- [ ] group 6 / uz
-- [ ] group 6 / vi
-- [ ] group 6 / jp
-- [ ] group 6 / ja-jp
+- [x] group 6 / ru
+- [x] group 6 / ar
+- [x] group 6 / pt-BR
+- [x] group 6 / fr-CA
+- [x] group 6 / ca
+- [x] group 6 / cn
+- [x] group 6 / zh
+- [x] group 6 / da
+- [x] group 6 / cs
+- [x] group 6 / nl
+- [x] group 6 / fi
+- [x] group 6 / fr
+- [x] group 6 / de
+- [x] group 6 / he
+- [x] group 6 / hi
+- [x] group 6 / hu
+- [x] group 6 / id
+- [x] group 6 / it
+- [x] group 6 / ja
+- [x] group 6 / ko
+- [x] group 6 / lv
+- [x] group 6 / no
+- [x] group 6 / pl
+- [x] group 6 / pt
+- [x] group 6 / ro
+- [x] group 6 / zh-CN
+- [x] group 6 / es
+- [x] group 6 / sv
+- [x] group 6 / tr
+- [x] group 6 / zh-Hant
+- [x] group 6 / zh-Hans
+- [x] group 6 / zh-TW
+- [x] group 6 / uk
+- [x] group 6 / uz
+- [x] group 6 / vi
+- [x] group 6 / jp
+- [x] group 6 / ja-jp

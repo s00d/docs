@@ -1,0 +1,120 @@
+---
+title: "服务端路由与 API"
+description: "在 Nitro 服务端路由和 API 处理函数中翻译字符串并读取请求的语言环境。"
+---
+
+`server/api/` 和 `server/routes/` 中的服务端处理函数可以通过两个自动导入的辅助函数翻译字符串并读取请求的语言环境。可将它们用于 API 响应、邮件、订阅源，或任何在 Vue 页面之外渲染的内容。它们读取与页面相同的翻译文件，并从请求中检测语言环境。
+
+## 在处理函数中翻译 {#translate-in-a-handler}
+
+```ts
+// server/api/greeting.get.ts
+export default defineEventHandler(async (event) => {
+  const t = await useTranslationServerMiddleware(event)
+  return { message: t('greeting', { name: 'Ada' }) }
+})
+```
+
+```bash
+curl 'http://localhost:3000/api/greeting?locale=de'
+# {"message":"Hallo, Ada!"}
+```
+
+`useTranslationServerMiddleware(event, defaultLocale?, locale?)` 是异步的，返回 `t(key, params?, defaultValue?)`。`t` 返回字符串并插值 `{name}` 参数；当键不存在时，返回非空的 `defaultValue`，否则返回键本身。
+
+`t` 只能看到 `index` 块：根文件（`locales/<locale>.json`），以及存在时的 `locales/pages/index/`（使用 `disablePageLocales` 时只有根文件）。其他页面的键不会被加载。如需这些键，请自行加载对应的块：
+
+```ts
+const { data } = await loadTranslationsFromServer('de', 'about') // Translations object of the about page
+```
+
+## 读取请求的语言环境 {#read-the-request-locale}
+
+```ts
+// server/api/locale.get.ts
+export default defineEventHandler((event) => {
+  const { current, isDefault, locale } = useLocaleServerMiddleware(event)
+  return { current, isDefault, dir: locale?.dir ?? 'ltr' }
+})
+```
+
+`useLocaleServerMiddleware(event, defaultLocale?, locale?)` 是同步的，返回：
+
+```ts
+interface LocaleInfo {
+  current: string // detected locale code
+  default: string // defaultLocale, runtime overrides included (fixed at build under prefix_except_default / prefix_and_default)
+  fallback: string // fallbackLocale, else the default
+  available: string[] // enabled locale codes
+  locale: Locale | null // the config entry of `current`
+  isDefault: boolean
+  isFallback: boolean
+}
+```
+
+## 语言环境如何确定 {#how-the-locale-is-chosen}
+
+在每个服务端路由上（无论是否为 `/api`），两个辅助函数都使用相同的顺序：
+
+1. `?locale=` 查询参数（重复时取第一个值）；
+2. `[locale]` 路由参数，或路径中的语言环境前缀（`/de/...`）；
+3. 设置了 [`localeCookie`](/zh-CN/api/module-options#localecookie) 时的语言环境 cookie（在 `hashMode` 下为 `hash-locale`）；
+4. 启用 `autoDetectLanguage` 时的 `Accept-Language`（会考虑 q 值）；
+5. `defaultLocale`。
+
+每一步都会跳过无效和已禁用的代码。这是 API 的顺序；在前缀策略下，页面渲染会忽略 `?locale=`。两种顺序的对比请参见[语言环境检测](/zh-CN/guide/locale-detection)。
+
+## 强制指定语言环境 {#force-a-locale}
+
+传入第三个参数可跳过检测，例如在以用户语言发送邮件的任务中：
+
+```ts
+export default defineEventHandler(async (event) => {
+  const user = await getUser(event) // your code
+  const t = await useTranslationServerMiddleware(event, undefined, user.locale)
+  return sendMail(user.email, t('mail.welcome.subject'))
+})
+```
+
+第二个参数会在本次调用的检测中替换 `defaultLocale`，因此在强制指定语言环境时不起作用。字典会按请求和按语言环境缓存，并在服务器的翻译缓存中跨请求缓存，因此多次调用辅助函数的开销很小。
+
+## 服务端组件 {#server-components}
+
+服务端组件（`.server.vue`、`<NuxtIsland>`）从自己的 URL `/__nuxt_island/...` 渲染，因此它看不到页面的 URL，而且 Nuxt 只会将它的 props 传给它。请将语言环境作为 `locale` prop 传入。这样它就会以该语言环境渲染，并且切换语言环境时会重新获取，因为 props 是 island 的 URL 和缓存键的一部分。这个名称是保留的：名为 `locale` 的 prop 中的任何已启用语言环境代码都会设置渲染的语言环境，因此如果某个 prop 表示其他含义（例如数字格式），请给它起别的名字：
+
+```vue
+<!-- components/Greeting.server.vue -->
+<template><p>{{ $t('greeting') }}</p></template>
+<script setup lang="ts">
+defineProps<{ locale?: string }>()
+</script>
+```
+
+```vue
+<template>
+  <Greeting :locale="$getLocale()" />
+  <NuxtIsland name="Greeting" :props="{ locale: $getLocale() }" />
+</template>
+```
+
+如果没有该 prop，无论 URL 是什么，它都会以 cookie 中的语言环境渲染，否则使用默认语言环境，并且不会跟随语言切换。它的 `$t` 能看到 `index` 块：根文件以及 `locales/pages/index/`。
+
+## 相关内容 {#related}
+
+<CardGroup cols={2}>
+
+<Card title="语言环境检测" icon="book-open" href="/zh-CN/guide/locale-detection">
+
+</Card>
+
+<Card title="翻译文件" icon="book-open" href="/zh-CN/guide/translations">
+
+</Card>
+
+<Card title="部署" icon="book-open" href="/zh-CN/guide/deployment">
+
+服务器从哪里读取翻译
+
+</Card>
+
+</CardGroup>

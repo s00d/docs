@@ -1,0 +1,132 @@
+---
+title: "Файлы переводов"
+description: "Где хранятся ключи переводов, как корневые и страничные файлы объединяются с fallback-локалями и как страница загружает свой словарь."
+---
+
+Переводы — это обычные JSON-файлы: один корневой файл на локаль для общих ключей и по одному файлу на страницу и локаль для ключей этой страницы. Прочитайте этот раздел, когда добавляете страницы, делаете ключи общими для нескольких страниц или настраиваете fallback-локали. Вы узнаете, в какой файл должен попасть ключ, что видит страница и когда загружается каждый файл.
+
+## Структура {#layout}
+
+```text
+locales/
+├── en.json                 # root: menus, footer, buttons
+├── de.json
+└── pages/
+    ├── index/              # pages/index.vue
+    │   ├── en.json
+    │   └── de.json
+    ├── about/              # pages/about.vue
+    │   ├── en.json
+    │   └── de.json
+    └── products-id/        # pages/products/[id].vue
+        ├── en.json
+        └── de.json
+```
+
+- Папка внутри `locales/pages/` — это **имя маршрута** страницы в Nuxt: `pages/products/[id].vue` — это `products-id`, `pages/blog/[slug]/comments.vue` — это `blog-slug-comments`.
+- Ключи могут быть вложены на любую глубину; `$t('auth.form.login')` читает `{ "auth": { "form": { "login": … } } }`.
+- `translationDir` перемещает папку (по умолчанию `'locales'`, относительно корня проекта, в том числе при структуре `app/` из Nuxt 4).
+- Отсутствующие файлы создаются как `{}`, когда Nuxt разрешает страницы, если только не задан [`disableWatcher`](/ru/api/module-options#disablewatcher).
+
+## Что видит страница {#what-a-page-sees}
+
+![Порядок поиска ключа на /about в de: pages/about/de.json, de.json, pages/about/en.json, en.json. Они объединяются в один about/de/data.json, который читает $t](/images/diagrams/page-dictionary.svg)
+
+Словарь страницы — это её корневой файл, глубоко (на всех уровнях) объединённый с её страничным файлом. При конфликте побеждает страничный файл:
+
+```json
+// locales/en.json
+{ "title": "My shop", "nav": { "home": "Home", "cart": "Cart" } }
+```
+
+```json
+// locales/pages/about/en.json
+{ "title": "About us", "nav": { "cart": "Basket" } }
+```
+
+```ts
+// on /about
+t('title') // 'About us'
+t('nav.home') // 'Home'   (root)
+t('nav.cart') // 'Basket' (page wins)
+// on any other page
+t('title') // 'My shop'
+```
+
+Страница без собственной папки получает только корневой словарь. Ключи других страниц не видны.
+
+### Fallback-локали {#fallback-locales}
+
+Ключ, отсутствующий в активной локали, берётся из её fallback-локали, прежде чем будет показан сам ключ:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    locales: [
+      { code: 'en', iso: 'en-US' },
+      { code: 'de', iso: 'de-DE' },
+      { code: 'de-at', iso: 'de-AT', fallbackLocale: 'de' },
+    ],
+    defaultLocale: 'en',
+    fallbackLocale: 'en', // global, for every locale
+  },
+})
+```
+
+- Собственный `fallbackLocale` локали прослеживается до конца цепочки: `de-at` → `de` → `en`.
+- Глобальный `fallbackLocale` — самый слабый слой, под каждой цепочкой.
+- Каждая локаль в цепочке добавляет свой корневой файл, затем свой страничный файл, от самой слабой fallback-локали до активной. Поэтому корневой файл активной локали побеждает страничный файл fallback-локали.
+
+Без fallback отсутствующий ключ рендерится как сам ключ (`'nav.home'`), а в режиме разработки в консоли браузера выводится предупреждение ([`missingWarn`](/ru/api/module-options#missingwarn)).
+
+## Общие ключи и другие источники {#sharing-and-other-sources}
+
+| Задача | Опция |
+| --- | --- |
+| Только корневые файлы, без папок `pages/` | [`disablePageLocales: true`](/ru/api/module-options#disablepagelocales) |
+| Две страницы читают одну папку страницы | [`routesLocaleLinks`](/ru/api/module-options#routeslocalelinks): `{ 'about-us': 'about' }` |
+| Общие корневые файлы в другой папке | [`additionalTranslationDirs`](/ru/api/module-options#additionaltranslationdirs): `['common']` (побеждает основной `translationDir`) |
+| Ключи из слоя Nuxt | Файлы слоёв объединяются, собственные файлы проекта побеждают. См. [Слои](/ru/guide/layers) |
+| Ключи, добавляемые во время выполнения | хук [`i18n:register`](/ru/api/events), `$mergeTranslations`, `$setTranslation` |
+| Ключи прямо в компоненте страницы | `$defineI18nRoute({ locales: { en: { … } } })`, см. [Конфигурация страницы](/ru/guide/per-component-translations) |
+
+## Как страница загружает свой словарь {#how-a-page-loads-its-dictionary}
+
+![JSON-файлы локалей собираются в дерево payload, которое хранится в public/ на Node или в серверных ассетах на Edge, читается серверным загрузчиком, затем используется $t на сервере и загружается для $t в браузере](/images/diagrams/translation-pipeline.svg)
+
+Модуль собирает по одному payload на страницу и локаль: `/{apiBaseUrl}/{page}/{locale}/data.json` (по умолчанию `/_locales/about/de/data.json`).
+
+1. **Серверный рендеринг.** Nitro определяет локаль, и страница загружает свой payload напрямую из серверного загрузчика, без HTTP-запроса. Словарь не записывается в payload HTML, поэтому страницы остаются небольшими.
+2. **Гидратация.** Браузер загружает тот же payload. Сервер уже вывел для него `<link rel="preload">`, поэтому загрузка начинается вместе с HTML.
+3. **Навигация.** Payload следующей страницы заменяет словарь. Ключи покидаемой страницы продолжают разрешаться, пока она не исчезнет (конец перехода страницы или `page:finish`), поэтому затухающая страница не мелькает сырыми ключами. Чанк, который не удалось загрузить (сетевая ошибка, 4xx или 5xx, тело, не являющееся объектом), оставляет текущий словарь на месте, а следующая навигация загружает его снова. С неудачной сменой локали то же самое: `$switchLocale` возвращает `false`, а повторный вызов или повторный клик по переключателю повторяет попытку. В префиксных стратегиях URL к этому моменту уже изменился, поэтому `lang` и `$getLocale()` указывают локаль из URL, а старые тексты остаются на экране.
+4. **Кэш.** Загруженные payload кэшируются на сервере и в браузере; настройки размера и TTL описаны на странице [Производительность](/ru/guide/performance).
+
+`translationPayloads.mode` определяет, как собираются payload. `'premerged'` (по умолчанию) записывает каждый файл страница × локаль во время сборки. `'source'` сохраняет исходные файлы и объединяет их на каждый запрос, что компактнее для больших каталогов на Edge-платформах. Оба режима дают одинаковые словари. Куда попадают файлы для каждой целевой платформы, описано на странице [Развёртывание](/ru/guide/deployment).
+
+## Редактирование в режиме разработки {#editing-in-development}
+
+`nuxt dev` читает файлы в реальном времени. Сохранение файла перевода обновляет словарь открытой страницы на месте: без перезагрузки, удалённые ключи исчезают, а изменение корневого файла доходит до всех страниц. Повреждённый JSON-файл вызывает предупреждение с указанием пути и считается пустым. Задайте [`hmr: false`](/ru/api/module-options#hmr), чтобы обновлять вручную.
+
+## Связанные материалы {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Конфигурация страницы" icon="book-open" href="/ru/guide/per-component-translations">
+
+Локали и встроенные переводы для отдельных страниц
+
+</Card>
+
+<Card title="Методы" icon="brackets-curly" href="/ru/api/methods">
+
+`$t`, `$tc`, `$tn`, `$td`
+
+</Card>
+
+<Card title="Развёртывание" icon="book-open" href="/ru/guide/deployment">
+
+</Card>
+
+</CardGroup>

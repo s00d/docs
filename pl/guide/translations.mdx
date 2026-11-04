@@ -1,0 +1,132 @@
+---
+title: "Pliki tłumaczeń"
+description: "Gdzie znajdują się klucze tłumaczeń, jak pliki główne i pliki stron łączą się z fallbackami oraz jak strona ładuje swój słownik."
+---
+
+Tłumaczenia to zwykłe pliki JSON: jeden plik główny na lokalizację dla wspólnych kluczy oraz jeden plik na stronę i lokalizację dla kluczy tej strony. Przeczytaj to, gdy dodajesz strony, współdzielisz między nimi klucze lub konfigurujesz fallbacki. Dowiesz się, w którym pliku musi znaleźć się klucz, co widzi strona i kiedy ładowany jest każdy plik.
+
+## Układ {#layout}
+
+```text
+locales/
+├── en.json                 # root: menus, footer, buttons
+├── de.json
+└── pages/
+    ├── index/              # pages/index.vue
+    │   ├── en.json
+    │   └── de.json
+    ├── about/              # pages/about.vue
+    │   ├── en.json
+    │   └── de.json
+    └── products-id/        # pages/products/[id].vue
+        ├── en.json
+        └── de.json
+```
+
+- Folder w `locales/pages/` to **nazwa trasy** strony w Nuxt: `pages/products/[id].vue` to `products-id`, `pages/blog/[slug]/comments.vue` to `blog-slug-comments`.
+- Klucze mogą być zagnieżdżone na dowolną głębokość; `$t('auth.form.login')` odczytuje `{ "auth": { "form": { "login": … } } }`.
+- `translationDir` przenosi folder (domyślnie `'locales'`, względem katalogu głównego projektu, także w układzie `app/` z Nuxt 4).
+- Brakujące pliki są tworzone jako `{}`, gdy Nuxt rozwiązuje strony, chyba że ustawiono [`disableWatcher`](/pl/api/module-options#disablewatcher).
+
+## Co widzi strona {#what-a-page-sees}
+
+![Kolejność wyszukiwania klucza na /about w lokalizacji de: pages/about/de.json, de.json, pages/about/en.json, en.json. Są one scalane w jeden plik about/de/data.json, który odczytuje $t](/images/diagrams/page-dictionary.svg)
+
+Słownik strony to jej plik główny scalony głęboko (na każdym poziomie) z jej plikiem strony. W razie konfliktu wygrywa plik strony:
+
+```json
+// locales/en.json
+{ "title": "My shop", "nav": { "home": "Home", "cart": "Cart" } }
+```
+
+```json
+// locales/pages/about/en.json
+{ "title": "About us", "nav": { "cart": "Basket" } }
+```
+
+```ts
+// on /about
+t('title') // 'About us'
+t('nav.home') // 'Home'   (root)
+t('nav.cart') // 'Basket' (page wins)
+// on any other page
+t('title') // 'My shop'
+```
+
+Strona bez własnego folderu dostaje wyłącznie słownik główny. Klucze innych stron nie są widoczne.
+
+### Lokalizacje zapasowe {#fallback-locales}
+
+Klucz brakujący w aktywnej lokalizacji jest pobierany z jej lokalizacji zapasowej, zanim zostanie wyświetlony sam klucz:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    locales: [
+      { code: 'en', iso: 'en-US' },
+      { code: 'de', iso: 'de-DE' },
+      { code: 'de-at', iso: 'de-AT', fallbackLocale: 'de' },
+    ],
+    defaultLocale: 'en',
+    fallbackLocale: 'en', // global, for every locale
+  },
+})
+```
+
+- Własny `fallbackLocale` lokalizacji jest śledzony do końca łańcucha: `de-at` → `de` → `en`.
+- Globalny `fallbackLocale` to najsłabsza warstwa, pod każdym łańcuchem.
+- Każda lokalizacja w łańcuchu dodaje swój plik główny, a potem plik strony, od najsłabszego fallbacku aż do aktywnej lokalizacji. Zatem plik główny aktywnej lokalizacji wygrywa z plikiem strony lokalizacji zapasowej.
+
+Bez fallbacku brakujący klucz renderuje się jako sam klucz (`'nav.home'`), a w trybie dev w konsoli przeglądarki pojawia się ostrzeżenie ([`missingWarn`](/pl/api/module-options#missingwarn)).
+
+## Współdzielenie i inne źródła {#sharing-and-other-sources}
+
+| Potrzeba | Opcja |
+| --- | --- |
+| Tylko pliki główne, bez folderów `pages/` | [`disablePageLocales: true`](/pl/api/module-options#disablepagelocales) |
+| Dwie strony odczytują jeden folder strony | [`routesLocaleLinks`](/pl/api/module-options#routeslocalelinks): `{ 'about-us': 'about' }` |
+| Wspólne pliki główne w innym folderze | [`additionalTranslationDirs`](/pl/api/module-options#additionaltranslationdirs): `['common']` (główny `translationDir` wygrywa) |
+| Klucze z warstwy Nuxt | Pliki warstw są scalane, własne pliki projektu wygrywają. Zobacz [Warstwy](/pl/guide/layers) |
+| Klucze dodawane w czasie działania | hook [`i18n:register`](/pl/api/events), `$mergeTranslations`, `$setTranslation` |
+| Klucze inline w komponencie strony | `$defineI18nRoute({ locales: { en: { … } } })`, zobacz [Konfiguracja strony](/pl/guide/per-component-translations) |
+
+## Jak strona ładuje swój słownik {#how-a-page-loads-its-dictionary}
+
+![Pliki JSON lokalizacji są budowane w drzewo payloadów, przechowywane w public/ na Node lub w zasobach serwera na Edge, odczytywane przez loader serwera, a następnie używane przez $t na serwerze i pobierane dla $t w przeglądarce](/images/diagrams/translation-pipeline.svg)
+
+Moduł buduje jeden payload na stronę i lokalizację: `/{apiBaseUrl}/{page}/{locale}/data.json` (domyślnie `/_locales/about/de/data.json`).
+
+1. **Renderowanie na serwerze.** Nitro wykrywa lokalizację, a strona ładuje swój payload bezpośrednio z loadera serwera, bez żądania HTTP. Słownik nie jest zapisywany w payloadzie HTML, więc strony pozostają małe.
+2. **Hydratacja.** Przeglądarka pobiera ten sam payload. Serwer wyemitował już dla niego `<link rel="preload">`, więc pobieranie rusza razem z HTML.
+3. **Nawigacja.** Payload następnej strony zastępuje słownik. Klucze opuszczanej strony nadal się rozwiązują, dopóki ona nie zniknie (koniec przejścia strony lub `page:finish`), więc wygaszana strona nie pokazuje surowych kluczy. Chunk, którego nie udało się załadować (błąd sieci, 4xx lub 5xx, treść niebędąca obiektem), pozostawia bieżący słownik bez zmian, a następna nawigacja ładuje go ponownie. Tak samo jest z nieudaną zmianą lokalizacji: `$switchLocale` zwraca `false`, a ponowne wywołanie lub ponowne kliknięcie przełącznika ponawia próbę. W strategiach z prefiksem URL już się wtedy zmienił, więc `lang` i `$getLocale()` wskazują lokalizację z URL-a, podczas gdy na ekranie pozostają stare teksty.
+4. **Pamięć podręczna.** Załadowane payloady są buforowane na serwerze i w przeglądarce; ustawienia rozmiaru i TTL opisano w [Wydajności](/pl/guide/performance).
+
+`translationPayloads.mode` decyduje o sposobie budowania payloadów. `'premerged'` (domyślnie) zapisuje każdy plik strona × lokalizacja podczas budowania. `'source'` zachowuje pliki źródłowe i scala je przy każdym żądaniu, co daje mniejszy rozmiar dla dużych katalogów na platformach Edge. Oba tryby dają te same słowniki. Gdzie trafiają pliki dla każdego celu wdrożenia, opisano w [Wdrożeniu](/pl/guide/deployment).
+
+## Edycja podczas developmentu {#editing-in-development}
+
+`nuxt dev` odczytuje pliki na żywo. Zapisanie pliku tłumaczeń odświeża słownik otwartej strony w miejscu: bez przeładowania, usunięte klucze znikają, a zmiana w pliku głównym dociera do każdej strony. Uszkodzony plik JSON powoduje ostrzeżenie z jego ścieżką i jest traktowany jako pusty. Ustaw [`hmr: false`](/pl/api/module-options#hmr), aby zamiast tego odświeżać ręcznie.
+
+## Powiązane {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Konfiguracja strony" icon="book-open" href="/pl/guide/per-component-translations">
+
+Lokalizacje dla poszczególnych stron i tłumaczenia inline
+
+</Card>
+
+<Card title="Metody" icon="brackets-curly" href="/pl/api/methods">
+
+`$t`, `$tc`, `$tn`, `$td`
+
+</Card>
+
+<Card title="Wdrożenie" icon="book-open" href="/pl/guide/deployment">
+
+</Card>
+
+</CardGroup>

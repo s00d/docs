@@ -1,0 +1,132 @@
+---
+title: "翻訳ファイル"
+description: "翻訳キーの置き場所、ルートファイルとページファイルがフォールバックとどのように組み合わされるか、そしてページが辞書を読み込む仕組み。"
+---
+
+翻訳はプレーンな JSON ファイルです: 共通キー用のロケールごとのルートファイルが 1 つと、そのページのキー用のページ・ロケールごとのファイルが 1 つずつあります。ページを追加するとき、ページ間でキーを共有するとき、フォールバックを設定するときにお読みください。キーをどのファイルに置くべきか、ページから何が見えるか、各ファイルがいつ読み込まれるかがわかります。
+
+## 構成 {#layout}
+
+```text
+locales/
+├── en.json                 # root: menus, footer, buttons
+├── de.json
+└── pages/
+    ├── index/              # pages/index.vue
+    │   ├── en.json
+    │   └── de.json
+    ├── about/              # pages/about.vue
+    │   ├── en.json
+    │   └── de.json
+    └── products-id/        # pages/products/[id].vue
+        ├── en.json
+        └── de.json
+```
+
+- `locales/pages/` の下のフォルダー名は、ページの Nuxt **ルート名**です: `pages/products/[id].vue` は `products-id`、`pages/blog/[slug]/comments.vue` は `blog-slug-comments` です。
+- キーは任意の深さにネストできます。`$t('auth.form.login')` は `{ "auth": { "form": { "login": … } } }` を読み取ります。
+- `translationDir` でフォルダーを移動できます(デフォルトは `'locales'`。プロジェクトルートからの相対パスで、Nuxt 4 の `app/` 構成でも同様です)。
+- [`disableWatcher`](/ja-jp/api/module-options#disablewatcher) が設定されていない限り、Nuxt がページを解決する際に、存在しないファイルは `{}` として作成されます。
+
+## ページから見えるもの {#what-a-page-sees}
+
+![de の /about におけるキーの検索順序: pages/about/de.json、de.json、pages/about/en.json、en.json。これらは $t が読み取る 1 つの about/de/data.json にマージされます](/images/diagrams/page-dictionary.svg)
+
+ページの辞書は、ルートファイルとページファイルを深く(すべての階層で)マージしたものです。衝突した場合はページファイルが優先されます:
+
+```json
+// locales/en.json
+{ "title": "My shop", "nav": { "home": "Home", "cart": "Cart" } }
+```
+
+```json
+// locales/pages/about/en.json
+{ "title": "About us", "nav": { "cart": "Basket" } }
+```
+
+```ts
+// on /about
+t('title') // 'About us'
+t('nav.home') // 'Home'   (root)
+t('nav.cart') // 'Basket' (page wins)
+// on any other page
+t('title') // 'My shop'
+```
+
+独自のフォルダーを持たないページは、ルートの辞書のみを受け取ります。他のページのキーは参照できません。
+
+### フォールバックロケール {#fallback-locales}
+
+アクティブなロケールに存在しないキーは、キー自体が表示される前に、フォールバックロケールから取得されます:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    locales: [
+      { code: 'en', iso: 'en-US' },
+      { code: 'de', iso: 'de-DE' },
+      { code: 'de-at', iso: 'de-AT', fallbackLocale: 'de' },
+    ],
+    defaultLocale: 'en',
+    fallbackLocale: 'en', // global, for every locale
+  },
+})
+```
+
+- ロケール自身の `fallbackLocale` は最後までたどられます: `de-at` → `de` → `en`。
+- グローバルな `fallbackLocale` は最も弱いレイヤーで、すべてのチェーンの下に位置します。
+- チェーン内の各ロケールは、最も弱いフォールバックからアクティブなロケールに向かって、ルートファイル、次にページファイルを追加します。そのため、アクティブなロケールのルートファイルは、フォールバックロケールのページファイルよりも優先されます。
+
+フォールバックがない場合、存在しないキーはキー自体(`'nav.home'`)としてレンダリングされ、開発時にはブラウザーのコンソールに警告が出力されます([`missingWarn`](/ja-jp/api/module-options#missingwarn))。
+
+## 共有とその他のソース {#sharing-and-other-sources}
+
+| 必要なこと | オプション |
+| --- | --- |
+| ルートファイルのみ、`pages/` フォルダーなし | [`disablePageLocales: true`](/ja-jp/api/module-options#disablepagelocales) |
+| 2 つのページで 1 つのページフォルダーを読み込む | [`routesLocaleLinks`](/ja-jp/api/module-options#routeslocalelinks): `{ 'about-us': 'about' }` |
+| 別フォルダーにある共有ルートファイル | [`additionalTranslationDirs`](/ja-jp/api/module-options#additionaltranslationdirs): `['common']`(メインの `translationDir` が優先) |
+| Nuxt レイヤーからのキー | レイヤーのファイルはマージされ、プロジェクト自身のファイルが優先されます。[レイヤー](/ja-jp/guide/layers)を参照 |
+| ランタイムで追加されるキー | [`i18n:register`](/ja-jp/api/events) フック、`$mergeTranslations`、`$setTranslation` |
+| ページコンポーネント内にインラインで書くキー | `$defineI18nRoute({ locales: { en: { … } } })`。[ページ設定](/ja-jp/guide/per-component-translations)を参照 |
+
+## ページが辞書を読み込む仕組み {#how-a-page-loads-its-dictionary}
+
+![ロケールの JSON ファイルはペイロードツリーにビルドされ、Node では public/ に、Edge ではサーバーアセットに保存されます。サーバーローダーがそれを読み込み、サーバーでは $t が使用し、ブラウザーでは $t のために取得されます](/images/diagrams/translation-pipeline.svg)
+
+モジュールは、ページとロケールごとに 1 つのペイロードをビルドします: `/{apiBaseUrl}/{page}/{locale}/data.json`(デフォルトでは `/_locales/about/de/data.json`)。
+
+1. **サーバーレンダリング。** Nitro がロケールを検出し、ページは HTTP リクエストなしでサーバーローダーから直接ペイロードを読み込みます。辞書は HTML ペイロードに書き込まれないため、ページは小さいままです。
+2. **ハイドレーション。** ブラウザーが同じペイロードを取得します。サーバーがすでにそのための `<link rel="preload">` を出力しているため、取得は HTML と同時に始まります。
+3. **ナビゲーション。** 次のページのペイロードが辞書を置き換えます。離れるページのキーは、そのページが消えるまで(ページトランジションの終了、または `page:finish`)解決され続けるため、フェードアウト中のページに生のキーが一瞬表示されることはありません。読み込みに失敗したチャンク(ネットワークエラー、4xx や 5xx、オブジェクトでないレスポンス本文)は現在の辞書をそのまま残し、次のナビゲーションで再度読み込まれます。ロケール切り替えの失敗も同様です: `$switchLocale` は `false` で解決され、再度呼び出すか、スイッチャーをもう一度クリックすると再試行されます。プレフィックス系のストラテジーではその時点で URL はすでに移動しているため、古いテキストが画面に残る一方で、`lang` と `$getLocale()` は URL のロケールを示します。
+4. **キャッシュ。** 読み込まれたペイロードはサーバーとブラウザーでキャッシュされます。サイズと TTL の設定は[パフォーマンス](/ja-jp/guide/performance)にあります。
+
+`translationPayloads.mode` はペイロードのビルド方法を決めます。`'premerged'`(デフォルト)は、ビルド時にページ × ロケールのすべてのファイルを書き出します。`'source'` はソースファイルを保持してリクエストごとにマージするため、Edge ターゲットで大規模なカタログを扱う場合にサイズが小さくなります。どちらも同じ辞書を生成します。デプロイ先ごとにファイルがどこに配置されるかは[デプロイ](/ja-jp/guide/deployment)にあります。
+
+## 開発中の編集 {#editing-in-development}
+
+`nuxt dev` はファイルをライブで読み込みます。翻訳ファイルを保存すると、開いているページの辞書がその場で更新されます: リロードは不要で、削除したキーは消え、ルートファイルの変更はすべてのページに反映されます。壊れた JSON ファイルはそのパスとともに警告が出力され、空として扱われます。代わりに手動で更新したい場合は [`hmr: false`](/ja-jp/api/module-options#hmr) を設定してください。
+
+## 関連項目 {#related}
+
+<CardGroup cols={2}>
+
+<Card title="ページ設定" icon="book-open" href="/ja-jp/guide/per-component-translations">
+
+ページごとのロケールとインライン翻訳
+
+</Card>
+
+<Card title="メソッド" icon="brackets-curly" href="/ja-jp/api/methods">
+
+`$t`、`$tc`、`$tn`、`$td`
+
+</Card>
+
+<Card title="デプロイ" icon="book-open" href="/ja-jp/guide/deployment">
+
+</Card>
+
+</CardGroup>

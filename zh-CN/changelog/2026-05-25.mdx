@@ -1,0 +1,95 @@
+---
+title: "v3.19.0 — Utils 与 HMR 包、Source 载荷模式"
+description: "发布说明：v3.19.0 — Utils 与 HMR 包、Source 载荷模式"
+---
+
+**日期**：2026-05-25
+
+**版本**：`v3.19.0`
+
+![v3.19.0 release](/images/3.19.0.png)
+
+本次发布的重点是**将内部工具模块化**、新增**紧凑的 serverless 载荷模式**，以及在 Nuxt、Node、Astro 和 DevTools 之间**复用共享逻辑**——对于典型应用，公共模块 API 保持不变。
+
+## 有哪些新内容？ {#what’s-new}
+
+### `@i18n-micro/utils` — 与框架无关的工具 {#@i18n-micro/utils-—-framework-agnostic-utilities}
+
+之前分散在 `src/runtime/utils/` 和 `src/module.ts` 中的共享逻辑，现在集中在一个专门的工作区包中，并支持**细粒度的子路径导入**（没有臃肿的 barrel 文件，便于 tree-shaking）：
+
+- **构建** — `preMergeLocales`、`buildTranslationSourceLayers`（`@i18n-micro/utils/build`）
+- **载荷** — `translationPayloads` 解析、URL 构建、获取辅助函数、统计（`payload-config`、`payload-url`、`payload-fetch`、`payload-stats`）
+- **Source 模式** — 回退链、源文件路径、运行时合并（`merge-source`、`source-loader`）
+- **运行时辅助函数** — 语言环境解析、cookie、Accept-Language 解析、路由/meta 辅助函数（`resolve-locale`、`accept-language`、`cookie`、`route`、`route-pattern`、`runtime-config`）
+- **共享文件系统路径** — 翻译文件分类、嵌套页面路径（`parse-path`）
+
+Nuxt 模块在 `src/runtime/` 中只保留很薄的胶水代码，并且只导入所需的子路径。
+
+### `@i18n-micro/hmr` — 开发环境翻译热重载 {#@i18n-micro/hmr-—-dev-translation-hot-reload}
+
+开发环境 HMR 被提取到 `@i18n-micro/hmr` 中：
+
+- **`watcher`** — 开发环境中的文件变更处理、缓存失效、source/premerged 合并
+- **`generate-plugin`** — 客户端 HMR 插件生成
+- **`cache-keys`** — 用于服务器/存储缓存的共享 `Symbol.for` 键
+
+同时支持 `translationPayloads.mode: 'premerged'` 和 `'source'`。
+
+### `translationPayloads.mode: 'source'` — 紧凑的 Serverless 部署 {#translationpayloads-mode-‘source’-—-compact-serverless-deployments}
+
+面向 serverless 平台（Cloudflare Workers 等）上大型语言环境矩阵的新载荷模式：
+
+```typescript
+export default defineNuxtConfig({
+  i18n: {
+    translationPayloads: {
+      mode: 'source',
+    },
+  },
+})
+```
+
+- 将**紧凑的源文件**打包进 Nitro 资源，而不是完整的预合并矩阵
+- 通过内置的 `/_locales/:page/:locale/data.json` 路由**在运行时**合并根级、页面级以及回退语言环境链
+- `publicAssets` 和 `prerenderRoutes` 默认为 `false`——非常适合依赖 Nitro/边缘运行时而非纯静态托管的场景
+
+参见[部署 — serverless 与 Edge](/zh-CN/guide/deployment#serverless-and-edge) 和[缓存与存储架构](https://s00d.github.io/nuxt-i18n-micro/v3/api/i18n-cache-api)。
+
+### 集成包之间的共享工具 {#shared-utilities-across-integration-packages}
+
+- **`@i18n-micro/node`** 和 **`@i18n-micro/astro`** — 通过 `@i18n-micro/utils/parse-path` 统一翻译路径解析和深度合并
+- **`@i18n-micro/astro`** — 使用来自 `@i18n-micro/utils/accept-language` 的 `detectLocaleFromAcceptLanguage`（移除了重复的解析器）
+- **`@i18n-micro/devtools-ui`** — 通过 `merge-source` + `parse-path` 辅助函数处理虚拟文件路径
+- **服务端语言环境检测** — Accept-Language 处理与共享工具保持一致
+
+### HMR 与 DevTools 修复 {#hmr-&-devtools-fixes}
+
+- 客户端 HMR 插件现在调用 **`$loadPageTranslations`**（正确的 API），而不是已移除的 `$loadTranslations`
+- 为 **premerged** 和 **source** 模式下的翻译 watcher 增加了 Playwright 测试覆盖
+
+### 文档与贡献者指南 {#documentation-&-contributor-guide}
+
+- [缓存与存储架构](https://s00d.github.io/nuxt-i18n-micro/v3/api/i18n-cache-api) — 记录了两种载荷模式和包边界
+- [服务端翻译](/zh-CN/guide/server-side-translations)、[快速开始](/zh-CN/guide/getting-started)、[目录结构](https://s00d.github.io/nuxt-i18n-micro/v3/guide/folder-structure) — `premerged` 与 `source` 的注意事项
+- [贡献指南](https://s00d.github.io/nuxt-i18n-micro/v3/guide/contribution) — Node 18+、pnpm 9+、Oxlint/Oxfmt，以及包含 `packages/utils` 和 `packages/hmr` 的 monorepo 结构
+
+## 破坏性变更（高级/内部） {#breaking-changes-advanced-/-internal}
+
+这些变更只影响导入了**内部**模块路径（不属于公共 API）的项目：
+
+- 从 `src/runtime/utils/` 中移除：`route-utils.ts`、`runtime-i18n-config.ts` 以及其他迁移到 `@i18n-micro/utils/*` 的工具
+- 从 `src/runtime/server/plugins/` 中移除：内联的 HMR watcher/生成器——如果你 fork 了开发工具，请使用 `@i18n-micro/hmr/*`
+- **`nuxt-i18n-micro`** 现在依赖 `@i18n-micro/utils` 和 `@i18n-micro/hmr` 工作区包（随模块自动安装）
+
+典型的 `nuxt.config` + composable 用法保持不变。
+
+## 为什么这很重要 {#why-it-matters}
+
+- **更小的 serverless 包** — `source` 模式避免为每个语言环境 × 页面发布一个预合并文件
+- **单一事实来源** — 路径解析、合并、语言环境检测和载荷配置只有一套实现
+- **更易维护** — 与框架无关的代码在 `@i18n-micro/utils` 中测试（50+ 个单元测试），并在各处复用
+- **更好的开发体验** — HMR 逻辑相互隔离、可测试，并且在各种载荷模式下表现一致
+
+完整的提交列表请参见 [changelog](https://github.com/s00d/nuxt-i18n-micro/blob/main/CHANGELOG.md)。
+
+---

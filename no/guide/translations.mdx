@@ -1,0 +1,132 @@
+---
+title: "Oversettelsesfiler"
+description: "Hvor oversettelsesnøkler ligger, hvordan rot- og sidefiler kombineres med reserve-locales, og hvordan en side laster ordboken sin."
+---
+
+Oversettelser er vanlige JSON-filer: én rotfil per locale for delte nøkler, og én fil per side og locale for nøklene til den siden. Les dette når du legger til sider, deler nøkler mellom dem eller setter opp reserve-locales (fallbacks). Du lærer hvilken fil en nøkkel må ligge i, hva en side kan se, og når hver fil lastes.
+
+## Oppsett {#layout}
+
+```text
+locales/
+├── en.json                 # root: menus, footer, buttons
+├── de.json
+└── pages/
+    ├── index/              # pages/index.vue
+    │   ├── en.json
+    │   └── de.json
+    ├── about/              # pages/about.vue
+    │   ├── en.json
+    │   └── de.json
+    └── products-id/        # pages/products/[id].vue
+        ├── en.json
+        └── de.json
+```
+
+- Mappen under `locales/pages/` er sidens Nuxt-**rutenavn**: `pages/products/[id].vue` er `products-id`, `pages/blog/[slug]/comments.vue` er `blog-slug-comments`.
+- Nøkler kan nestes i vilkårlig dybde; `$t('auth.form.login')` leser `{ "auth": { "form": { "login": … } } }`.
+- `translationDir` flytter mappen (`'locales'` som standard, relativt til prosjektroten, også under Nuxt 4-oppsettet med `app/`).
+- Manglende filer opprettes som `{}` når Nuxt løser opp sidene, med mindre [`disableWatcher`](/no/api/module-options#disablewatcher) er satt.
+
+## Hva en side ser {#what-a-page-sees}
+
+![Lookup order for a key on /about in de: pages/about/de.json, de.json, pages/about/en.json, en.json. They merge into one about/de/data.json that $t reads](/images/diagrams/page-dictionary.svg)
+
+En sides ordbok er rotfilen slått sammen med sidefilen, dypt (på alle nivåer). Sidefilen vinner ved konflikt:
+
+```json
+// locales/en.json
+{ "title": "My shop", "nav": { "home": "Home", "cart": "Cart" } }
+```
+
+```json
+// locales/pages/about/en.json
+{ "title": "About us", "nav": { "cart": "Basket" } }
+```
+
+```ts
+// on /about
+t('title') // 'About us'
+t('nav.home') // 'Home'   (root)
+t('nav.cart') // 'Basket' (page wins)
+// on any other page
+t('title') // 'My shop'
+```
+
+En side uten egen mappe får bare rotordboken. Nøkler fra andre sider er ikke synlige.
+
+### Reserve-locales {#fallback-locales}
+
+En nøkkel som mangler i aktiv locale, hentes fra reserve-locale-en før selve nøkkelen vises:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    locales: [
+      { code: 'en', iso: 'en-US' },
+      { code: 'de', iso: 'de-DE' },
+      { code: 'de-at', iso: 'de-AT', fallbackLocale: 'de' },
+    ],
+    defaultLocale: 'en',
+    fallbackLocale: 'en', // global, for every locale
+  },
+})
+```
+
+- En locales egen `fallbackLocale` følges helt til enden: `de-at` → `de` → `en`.
+- Den globale `fallbackLocale` er det svakeste laget, under alle kjeder.
+- Hver locale i kjeden legger til rotfilen sin, deretter sidefilen sin, fra den svakeste reserven opp til aktiv locale. Dermed slår aktiv locales rotfil en reserve-locales sidefil.
+
+Uten en reserve rendres en manglende nøkkel som nøkkelen (`'nav.home'`), og det logges en advarsel i nettleserkonsollen i utviklingsmodus ([`missingWarn`](/no/api/module-options#missingwarn)).
+
+## Deling og andre kilder {#sharing-and-other-sources}
+
+| Behov | Alternativ |
+| --- | --- |
+| Bare rotfiler, ingen `pages/`-mapper | [`disablePageLocales: true`](/no/api/module-options#disablepagelocales) |
+| To sider leser én sidemappe | [`routesLocaleLinks`](/no/api/module-options#routeslocalelinks): `{ 'about-us': 'about' }` |
+| Delte rotfiler i en annen mappe | [`additionalTranslationDirs`](/no/api/module-options#additionaltranslationdirs): `['common']` (hoved-`translationDir` vinner) |
+| Nøkler fra et Nuxt-lag | Lagenes filer slås sammen, prosjektets egne filer vinner. Se [Lag](/no/guide/layers) |
+| Nøkler lagt til under kjøring | hooken [`i18n:register`](/no/api/events), `$mergeTranslations`, `$setTranslation` |
+| Nøkler inline i en sidekomponent | `$defineI18nRoute({ locales: { en: { … } } })`, se [Sidekonfigurasjon](/no/guide/per-component-translations) |
+
+## Hvordan en side laster ordboken sin {#how-a-page-loads-its-dictionary}
+
+![Locale JSON files are built into a payload tree, stored in public/ on Node or in server assets on Edge, read by a server loader, then used by $t on the server and fetched for $t in the browser](/images/diagrams/translation-pipeline.svg)
+
+Modulen bygger én payload per side og locale: `/{apiBaseUrl}/{page}/{locale}/data.json` (`/_locales/about/de/data.json` som standard).
+
+1. **Serverrendring.** Nitro oppdager locale, og siden laster payloaden sin direkte fra serverlasteren, uten HTTP-forespørsel. Ordboken skrives ikke inn i HTML-payloaden, så sidene forblir små.
+2. **Hydrering.** Nettleseren henter den samme payloaden. Serveren har allerede sendt ut en `<link rel="preload">` for den, så hentingen starter sammen med HTML-en.
+3. **Navigasjon.** Payloaden for neste side erstatter ordboken. Nøklene til siden som forlates løses fortsatt opp til den er borte (slutten av sideovergangen, eller `page:finish`), så en side som tones ut ikke blinker med rå nøkler. En del (chunk) som ikke lar seg laste (nettverksfeil, 4xx eller 5xx, en body som ikke er et objekt) lar gjeldende ordbok stå, og neste navigasjon laster den på nytt. Et mislykket locale-bytte er det samme: `$switchLocale` resolver til `false`, og et nytt kall, eller et nytt klikk på språkvelgeren, prøver igjen. Under prefiksstrategiene har URL-en allerede flyttet seg da, så `lang` og `$getLocale()` angir URL-ens locale mens de gamle tekstene blir stående på skjermen.
+4. **Cache.** Lastede payloads mellomlagres på serveren og i nettleseren; [Ytelse](/no/guide/performance) har innstillingene for størrelse og TTL.
+
+`translationPayloads.mode` bestemmer hvordan payloads bygges. `'premerged'` (standard) skriver hver side × locale-fil ved byggetid. `'source'` beholder kildefilene og slår sammen per forespørsel, noe som er mindre for store kataloger på Edge-mål. Begge gir de samme ordbøkene. Hvor filene havner for hvert utrullingsmål, står på [Utrulling](/no/guide/deployment).
+
+## Redigering under utvikling {#editing-in-development}
+
+`nuxt dev` leser filene direkte. Når du lagrer en oversettelsesfil, oppdateres ordboken for den åpne siden på stedet: ingen omlasting, fjernede nøkler forsvinner, og en endring i en rotfil når alle sider. En ødelagt JSON-fil logger en advarsel med stien sin og behandles som tom. Sett [`hmr: false`](/no/api/module-options#hmr) for å oppdatere manuelt i stedet.
+
+## Relatert {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Sidekonfigurasjon" icon="book-open" href="/no/guide/per-component-translations">
+
+Locales per side og inline-oversettelser
+
+</Card>
+
+<Card title="Metoder" icon="brackets-curly" href="/no/api/methods">
+
+`$t`, `$tc`, `$tn`, `$td`
+
+</Card>
+
+<Card title="Utrulling" icon="book-open" href="/no/guide/deployment">
+
+</Card>
+
+</CardGroup>

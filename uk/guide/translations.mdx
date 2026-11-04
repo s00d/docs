@@ -1,0 +1,132 @@
+---
+title: "Файли перекладів"
+description: "Де зберігаються ключі перекладів, як кореневі та сторінкові файли поєднуються з fallback-локалями і як сторінка завантажує свій словник."
+---
+
+Переклади — це звичайні JSON-файли: один кореневий файл на локаль для спільних ключів і один файл на кожну сторінку та локаль для ключів цієї сторінки. Прочитайте це, коли додаєте сторінки, спільно використовуєте ключі між ними або налаштовуєте fallback-локалі. Ви дізнаєтеся, в який файл має потрапити ключ, що бачить сторінка і коли завантажується кожен файл.
+
+## Структура {#layout}
+
+```text
+locales/
+├── en.json                 # root: menus, footer, buttons
+├── de.json
+└── pages/
+    ├── index/              # pages/index.vue
+    │   ├── en.json
+    │   └── de.json
+    ├── about/              # pages/about.vue
+    │   ├── en.json
+    │   └── de.json
+    └── products-id/        # pages/products/[id].vue
+        ├── en.json
+        └── de.json
+```
+
+- Папка в `locales/pages/` — це **ім'я маршруту** сторінки в Nuxt: `pages/products/[id].vue` — це `products-id`, `pages/blog/[slug]/comments.vue` — це `blog-slug-comments`.
+- Ключі можуть бути вкладені на будь-яку глибину; `$t('auth.form.login')` читає `{ "auth": { "form": { "login": … } } }`.
+- `translationDir` переміщує папку (`'locales'` за замовчуванням, відносно кореня проєкту, також у структурі `app/` Nuxt 4).
+- Відсутні файли створюються як `{}`, коли Nuxt розв'язує сторінки, якщо не задано [`disableWatcher`](/uk/api/module-options#disablewatcher).
+
+## Що бачить сторінка {#what-a-page-sees}
+
+![Порядок пошуку ключа на /about у de: pages/about/de.json, de.json, pages/about/en.json, en.json. Вони зливаються в один about/de/data.json, який читає $t](/images/diagrams/page-dictionary.svg)
+
+Словник сторінки — це її кореневий файл, глибоко (на кожному рівні) злитий з її сторінковим файлом. У разі конфлікту перемагає сторінковий файл:
+
+```json
+// locales/en.json
+{ "title": "My shop", "nav": { "home": "Home", "cart": "Cart" } }
+```
+
+```json
+// locales/pages/about/en.json
+{ "title": "About us", "nav": { "cart": "Basket" } }
+```
+
+```ts
+// on /about
+t('title') // 'About us'
+t('nav.home') // 'Home'   (root)
+t('nav.cart') // 'Basket' (page wins)
+// on any other page
+t('title') // 'My shop'
+```
+
+Сторінка без власної папки отримує лише кореневий словник. Ключі інших сторінок не видно.
+
+### Fallback-локалі {#fallback-locales}
+
+Ключ, відсутній в активній локалі, береться з її fallback-локалі, перш ніж буде показано сам ключ:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    locales: [
+      { code: 'en', iso: 'en-US' },
+      { code: 'de', iso: 'de-DE' },
+      { code: 'de-at', iso: 'de-AT', fallbackLocale: 'de' },
+    ],
+    defaultLocale: 'en',
+    fallbackLocale: 'en', // global, for every locale
+  },
+})
+```
+
+- Власний `fallbackLocale` локалі простежується до кінця: `de-at` → `de` → `en`.
+- Глобальний `fallbackLocale` — найслабший шар, під кожним ланцюжком.
+- Кожна локаль у ланцюжку додає свій кореневий файл, потім свій сторінковий файл, від найслабшої fallback-локалі до активної локалі. Тож кореневий файл активної локалі перемагає сторінковий файл fallback-локалі.
+
+Без fallback відсутній ключ рендериться як сам ключ (`'nav.home'`) і в режимі розробки записує попередження в консоль браузера ([`missingWarn`](/uk/api/module-options#missingwarn)).
+
+## Спільне використання та інші джерела {#sharing-and-other-sources}
+
+| Потреба | Опція |
+| --- | --- |
+| Лише кореневі файли, без папок `pages/` | [`disablePageLocales: true`](/uk/api/module-options#disablepagelocales) |
+| Дві сторінки читають одну сторінкову папку | [`routesLocaleLinks`](/uk/api/module-options#routeslocalelinks): `{ 'about-us': 'about' }` |
+| Спільні кореневі файли в іншій папці | [`additionalTranslationDirs`](/uk/api/module-options#additionaltranslationdirs): `['common']` (основний `translationDir` перемагає) |
+| Ключі з шару Nuxt | Файли шарів зливаються, власні файли проєкту перемагають. Див. [Шари](/uk/guide/layers) |
+| Ключі, додані в runtime | хук [`i18n:register`](/uk/api/events), `$mergeTranslations`, `$setTranslation` |
+| Ключі безпосередньо в компоненті сторінки | `$defineI18nRoute({ locales: { en: { … } } })`, див. [Конфігурація сторінки](/uk/guide/per-component-translations) |
+
+## Як сторінка завантажує свій словник {#how-a-page-loads-its-dictionary}
+
+![JSON-файли локалей збираються в дерево payload, зберігаються в public/ на Node або в серверних ассетах на Edge, читаються серверним завантажувачем, а потім використовуються $t на сервері та завантажуються для $t у браузері](/images/diagrams/translation-pipeline.svg)
+
+Модуль збирає один payload на кожну сторінку та локаль: `/{apiBaseUrl}/{page}/{locale}/data.json` (за замовчуванням `/_locales/about/de/data.json`).
+
+1. **Серверний рендеринг.** Nitro визначає локаль, і сторінка завантажує свій payload безпосередньо із серверного завантажувача, без HTTP-запиту. Словник не записується в payload HTML, тож сторінки залишаються невеликими.
+2. **Гідратація.** Браузер завантажує той самий payload. Сервер уже згенерував для нього `<link rel="preload">`, тож завантаження починається разом з HTML.
+3. **Навігація.** Payload наступної сторінки замінює словник. Ключі сторінки, яку покидають, продовжують розв'язуватися, доки вона не зникне (кінець переходу сторінки або `page:finish`), тож сторінка, що зникає, не показує сирі ключі. Чанк, який не вдалося завантажити (мережева помилка, 4xx чи 5xx, тіло, що не є об'єктом), залишає поточний словник на місці, і наступна навігація завантажує його знову. Невдале перемикання локалі працює так само: `$switchLocale` повертає `false`, а повторний виклик чи повторне натискання перемикача робить нову спробу. За префіксних стратегій URL на той момент уже змінився, тож `lang` і `$getLocale()` вказують локаль URL, тоді як старі тексти залишаються на екрані.
+4. **Кеш.** Завантажені payload кешуються на сервері та в браузері; налаштування розміру й TTL описано на сторінці [Продуктивність](/uk/guide/performance).
+
+`translationPayloads.mode` визначає, як збираються payload. `'premerged'` (за замовчуванням) записує кожен файл сторінка × локаль під час збірки. `'source'` зберігає вихідні файли та зливає їх для кожного запиту, що компактніше для великих каталогів на Edge-платформах. Обидва дають однакові словники. Куди потрапляють файли для кожної цілі розгортання, описано на сторінці [Розгортання](/uk/guide/deployment).
+
+## Редагування під час розробки {#editing-in-development}
+
+`nuxt dev` читає файли наживо. Збереження файлу перекладів оновлює словник відкритої сторінки на місці: без перезавантаження, видалені ключі зникають, а зміна кореневого файлу доходить до кожної сторінки. Пошкоджений JSON-файл записує попередження з його шляхом і вважається порожнім. Встановіть [`hmr: false`](/uk/api/module-options#hmr), щоб натомість оновлювати вручну.
+
+## Пов'язане {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Конфігурація сторінки" icon="book-open" href="/uk/guide/per-component-translations">
+
+Локалі для окремих сторінок і вбудовані переклади
+
+</Card>
+
+<Card title="Методи" icon="brackets-curly" href="/uk/api/methods">
+
+`$t`, `$tc`, `$tn`, `$td`
+
+</Card>
+
+<Card title="Розгортання" icon="book-open" href="/uk/guide/deployment">
+
+</Card>
+
+</CardGroup>

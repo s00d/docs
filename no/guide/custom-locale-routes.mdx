@@ -1,0 +1,162 @@
+---
+title: "Lokaliserte stier"
+description: "Gi en side en egen URL per locale med localeRoutes eller globalLocaleRoutes, inkludert dynamiske parametere og slugs per locale."
+---
+
+Som standard serverer hver locale en side på samme sti: `/en/about`, `/de/about`. Lokaliserte stier lar hver locale bruke sine egne ord, som `/de/ueber-uns`, mens sidefilen forblir den samme. Du angir dem i siden med `$defineI18nRoute`, eller for mange sider samtidig i `nuxt.config.ts`.
+
+## I siden {#in-the-page}
+
+```vue
+<!-- pages/about.vue -->
+<script setup lang="ts">
+const { $defineI18nRoute } = useNuxtApp()
+
+$defineI18nRoute({
+  localeRoutes: {
+    de: '/ueber-uns',
+    fr: '/a-propos',
+  },
+})
+</script>
+```
+
+Med `prefix_except_default` og `defaultLocale: 'en'` svarer siden på `/about`, `/de/ueber-uns` og `/fr/a-propos`. En locale uten oppføring beholder standardstien. Skriv stier uten locale-koden: prefikset legges til av [strategien](/no/guide/strategy), og en sti som starter med locale-koden logger en advarsel. Hva annet kallet godtar, står på [Sidekonfigurasjon](/no/guide/per-component-translations).
+
+## I nuxt.config {#in-nuxt-config}
+
+[`globalLocaleRoutes`](/no/api/module-options#globallocaleroutes) gjør det samme for hvilken som helst side, med sidens sti som nøkkel (eller rutenavnet, når det skrives uten innledende skråstrek):
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    locales: [
+      { code: 'en', iso: 'en-US' },
+      { code: 'de', iso: 'de-DE' },
+    ],
+    defaultLocale: 'en',
+    globalLocaleRoutes: {
+      '/about': { de: '/ueber-uns' },
+      '/about/team': { de: '/ueber-uns/team' },
+      '/admin': false, // not localized: one /admin route, no locale prefix
+    },
+  },
+})
+```
+
+Når en side setter `localeRoutes` og `globalLocaleRoutes` har samme nøkkel, vinner oppføringen i konfigurasjonen.
+
+## Dynamiske parametere {#dynamic-params}
+
+Skriv parametere i hvilken som helst Nuxt-form: `[id]`, `[[page]]`, `[...slug]` eller `:id()`. Parameternavnene må samsvare med sidefilen.
+
+```ts
+// pages/products/[...slug].vue
+$defineI18nRoute({
+  localeRoutes: {
+    en: '/our-products/[...slug]',
+    de: '/unsere-produkte/[...slug]',
+  },
+})
+```
+
+Nestede sider tar en absolutt barnesti (`/ueber-uns/team`) eller en sti relativ til forelderens lokaliserte sti (`team`).
+
+## Lenke til lokaliserte sider {#linking-to-localized-pages}
+
+Lenker løses til den lokaliserte stien for mål-locale, enten du sender inn et rutenavn eller en vanlig sti:
+
+```vue
+<template>
+  <i18n-link :to="{ name: 'about' }">About</i18n-link>
+  <i18n-link to="/about">About</i18n-link>
+  <!-- de: both render /de/ueber-uns -->
+  <NuxtLink :to="$localePath('/about', 'de')">Deutsch</NuxtLink>
+</template>
+```
+
+Rutenavn kommer fra filstien (`pages/about/team.vue` er `about-team`) med mindre du setter ett med `definePageMeta({ name })`.
+
+## Slugs per locale {#per-locale-slugs}
+
+Når selve sluggen er forskjellig per locale (`/our-products/red-shoe` vs `/de/unsere-produkte/roter-schuh`), forteller du språkvelgeren hvilke parametere den skal bruke med `$setI18nRouteParams` når dataene er lastet:
+
+```vue
+<script setup lang="ts">
+const { $setI18nRouteParams } = useNuxtApp()
+const route = useRoute()
+
+const { data: product } = await useFetch(`/api/products/${route.params.slug}`)
+
+if (product.value) {
+  $setI18nRouteParams({
+    en: { slug: product.value.slugEn },
+    de: { slug: product.value.slugDe },
+  })
+}
+</script>
+```
+
+`$switchLocalePath('de')` og `<i18n-switcher>` lenker da til `/de/unsere-produkte/roter-schuh`. Nøklene er locale-koder, verdiene er parametere etter navn (som i sidefilen).
+
+En språkvelger i layouten rendres før sidens asynkrone setup kommer hit, så når rendringen er ferdig, skriver modulen om lenkene i `<i18n-switcher>`, både i `app.vue` og i siden. Server-HTML-en, en besøkende uten JavaScript og den første rendringen på klienten blir da enige. Sett parameterne under SSR for at dette skal fungere: med `lazy` eller `server: false` endres lenkene først etter hydrering. Nuxts SSR-strømming sender HTML-en før parameterne er kjent, så med den beholder lenkene i den første HTML-en URL-ens egne parametere.
+
+Bare språkvelgerens egne lenker skrives om. En håndskrevet `$switchLocalePath`-lenke må rendres etter at parameterne er satt, så legg den i siden som setter dem, også etter en `await`. I en layout rendres den først: server-HTML-en beholder URL-ens parametere, og hydreringen advarer om et avvik. Bruk `<i18n-switcher>` der, med slotene og `custom*Style`-propsene for utseendet.
+
+Parameterne tilhører siden som satte dem:
+
+- De forkastes når en navigasjon til en annen sti fullføres, så hver side setter sine egne. En avbrutt navigasjon lar dem stå.
+- Hent `$setI18nRouteParams` fra `useNuxtApp()` eller `useI18n()` i `setup`, også når du kaller den senere i en `useAsyncData`-handler. Hentet der vet funksjonen hvilken side den tilhører: hvis den besøkende har forlatt siden, gjør et sent kall ingenting.
+- Med `keepalive` får en side tilbake parameterne den satte når den besøkende kommer tilbake. `useI18nHead` gjør det samme.
+
+## Ruter lagt til i pages:extend {#routes-added-in-pagesextend}
+
+Ruter du legger til i `pages:extend`-hooken har ingen sidefil å lese `$defineI18nRoute` fra, og flere av dem deler ofte én innpakningskomponent. En rute som legges til uten `name`, får navnet Nuxt ville gitt stien (`/a/:id()` blir `a-id`), slik at språklenker når den, med mindre en annen rute allerede har det navnet; gi den i så fall et eksplisitt `name`. Hold én liste og del den opp i sider og `globalLocaleRoutes` med rutenavn som nøkkel ved hjelp av `splitLocaleRoutes` fra `@i18n-micro/utils/split-locale-routes` (legg pakken til i avhengighetene dine):
+
+```ts
+// nuxt.config.ts
+import { splitLocaleRoutes } from '@i18n-micro/utils/split-locale-routes'
+
+const dynamic = splitLocaleRoutes([
+  { name: 'products-tag', path: '/products/:tag', file: '~/pages/_dynamic.vue', paths: { de: '/produkte/:tag' } },
+  { name: 'internal', path: '/internal', file: '~/pages/_dynamic.vue', paths: false }, // not localized
+])
+
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  hooks: {
+    'pages:extend'(pages) {
+      pages.push(...dynamic.pages)
+    },
+  },
+  i18n: {
+    globalLocaleRoutes: dynamic.globalLocaleRoutes,
+  },
+})
+```
+
+Ikke legg lokaliserte stier i `route.meta`: de ville da blitt sendt med i rutetabellen på klienten.
+
+## Relatert {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Sidekonfigurasjon" icon="book-open" href="/no/guide/per-component-translations">
+
+</Card>
+
+<Card title="Rutingstrategier" icon="book-open" href="/no/guide/strategy">
+
+</Card>
+
+<Card title="$localePath og $switchLocalePath" icon="brackets-curly" href="/no/api/methods">
+
+</Card>
+
+<Card title="SEO" icon="book-open" href="/no/guide/seo">
+
+</Card>
+
+</CardGroup>

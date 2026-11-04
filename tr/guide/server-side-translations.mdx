@@ -1,0 +1,120 @@
+---
+title: "Sunucu rotaları ve API"
+description: "Nitro sunucu rotaları ve API işleyicileri içinde metinleri çevirin ve isteğin locale'ini okuyun."
+---
+
+`server/api/` ve `server/routes/` içindeki sunucu işleyicileri, otomatik içe aktarılan iki yardımcıyla metinleri çevirebilir ve isteğin locale'ini okuyabilir. Bunları API yanıtları, e-postalar, beslemeler veya bir Vue sayfasının dışında render edilen her şey için kullanın. Sayfalarınızla aynı çeviri dosyalarını okurlar ve locale'i istekten algılarlar.
+
+## Bir işleyicide çeviri yapın {#translate-in-a-handler}
+
+```ts
+// server/api/greeting.get.ts
+export default defineEventHandler(async (event) => {
+  const t = await useTranslationServerMiddleware(event)
+  return { message: t('greeting', { name: 'Ada' }) }
+})
+```
+
+```bash
+curl 'http://localhost:3000/api/greeting?locale=de'
+# {"message":"Hallo, Ada!"}
+```
+
+`useTranslationServerMiddleware(event, defaultLocale?, locale?)` asenkrondur ve `t(key, params?, defaultValue?)` döndürür. `t` metni döndürür, `{name}` parametrelerini yerleştirir ve anahtar eksik olduğunda boş olmayan `defaultValue` değerini, aksi hâlde anahtarın kendisini döndürür.
+
+`t` yalnızca `index` parçasını görür: kök dosyalar (`locales/<locale>.json`) ve varsa `locales/pages/index/` (`disablePageLocales` ile yalnızca kök dosyalar). Diğer sayfaların anahtarları yüklenmez. Bunlar için parçayı kendiniz yükleyin:
+
+```ts
+const { data } = await loadTranslationsFromServer('de', 'about') // Translations object of the about page
+```
+
+## İsteğin locale'ini okuyun {#read-the-request-locale}
+
+```ts
+// server/api/locale.get.ts
+export default defineEventHandler((event) => {
+  const { current, isDefault, locale } = useLocaleServerMiddleware(event)
+  return { current, isDefault, dir: locale?.dir ?? 'ltr' }
+})
+```
+
+`useLocaleServerMiddleware(event, defaultLocale?, locale?)` senkrondur ve şunu döndürür:
+
+```ts
+interface LocaleInfo {
+  current: string // detected locale code
+  default: string // defaultLocale, runtime overrides included (fixed at build under prefix_except_default / prefix_and_default)
+  fallback: string // fallbackLocale, else the default
+  available: string[] // enabled locale codes
+  locale: Locale | null // the config entry of `current`
+  isDefault: boolean
+  isFallback: boolean
+}
+```
+
+## Locale nasıl seçilir {#how-the-locale-is-chosen}
+
+Her iki yardımcı da `/api` olsun ya da olmasın her sunucu rotasında aynı sırayı kullanır:
+
+1. `?locale=` sorgusu (tekrarlandığında ilk değer);
+2. bir `[locale]` rota parametresi veya yoldaki bir locale öneki (`/de/...`);
+3. [`localeCookie`](/tr/api/module-options#localecookie) ayarlandığında locale çerezi (`hashMode` altında `hash-locale`);
+4. `autoDetectLanguage` açık olduğunda `Accept-Language` (q değerleri dikkate alınır);
+5. `defaultLocale`.
+
+Geçersiz ve devre dışı kodlar her adımda atlanır. Bu API sırasıdır; bir sayfa render'ı önek stratejileri altında `?locale=` değerini yok sayar. İki sıra [Locale algılama](/tr/guide/locale-detection) sayfasında karşılaştırılır.
+
+## Bir locale'i zorlayın {#force-a-locale}
+
+Algılamayı atlamak için üçüncü argümanı verin; örneğin kullanıcının dilinde e-posta gönderen bir işte:
+
+```ts
+export default defineEventHandler(async (event) => {
+  const user = await getUser(event) // your code
+  const t = await useTranslationServerMiddleware(event, undefined, user.locale)
+  return sendMail(user.email, t('mail.welcome.subject'))
+})
+```
+
+İkinci argüman bu çağrının algılaması için `defaultLocale` değerinin yerini alır, bu nedenle bir locale zorlandığında etkisi yoktur. Sözlükler istek başına ve locale başına, istekler arasında ise sunucunun çeviri önbelleğinde önbelleğe alınır; bu nedenle bir yardımcıyı birkaç kez çağırmak ucuzdur.
+
+## Sunucu bileşenleri {#server-components}
+
+Bir sunucu bileşeni (`.server.vue`, `<NuxtIsland>`) kendi URL'sinden, `/__nuxt_island/...`, render edilir; bu nedenle sayfanın URL'sini görmez ve Nuxt ona yalnızca prop'larını iletir. Locale'i bir `locale` prop'u olarak verin. Böylece o locale'de render edilir ve bir dil değişimi onu yeniden getirir, çünkü prop'lar island'ın URL'sinin ve önbellek anahtarının bir parçasıdır. Bu ad ayrılmıştır: `locale` adlı bir prop'taki herhangi bir etkin locale kodu render'ın locale'ini belirler; bu yüzden sayı biçimi gibi başka bir anlama gelen bir prop'a başka bir ad verin:
+
+```vue
+<!-- components/Greeting.server.vue -->
+<template><p>{{ $t('greeting') }}</p></template>
+<script setup lang="ts">
+defineProps<{ locale?: string }>()
+</script>
+```
+
+```vue
+<template>
+  <Greeting :locale="$getLocale()" />
+  <NuxtIsland name="Greeting" :props="{ locale: $getLocale() }" />
+</template>
+```
+
+Prop olmadan, URL ne derse desin çerezdeki locale'de, yoksa varsayılan locale'de render edilir ve dil değişimini takip etmez. `$t` fonksiyonu `index` parçasını görür: kök dosyalar ve `locales/pages/index/`.
+
+## İlgili {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Locale algılama" icon="book-open" href="/tr/guide/locale-detection">
+
+</Card>
+
+<Card title="Çeviri dosyaları" icon="book-open" href="/tr/guide/translations">
+
+</Card>
+
+<Card title="Dağıtım" icon="book-open" href="/tr/guide/deployment">
+
+Sunucunun çevirileri nereden okuduğu
+
+</Card>
+
+</CardGroup>

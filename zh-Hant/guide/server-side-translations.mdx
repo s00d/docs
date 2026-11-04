@@ -1,0 +1,120 @@
+---
+title: "伺服器路由與 API"
+description: "在 Nitro 伺服器路由與 API 處理函式中翻譯字串並讀取請求的 locale。"
+---
+
+`server/api/` 與 `server/routes/` 中的伺服器處理函式，可以透過兩個自動匯入的輔助函式翻譯字串並讀取請求的 locale。請將它們用於 API 回應、電子郵件、資訊提供（feed），或任何在 Vue 頁面之外算繪的內容。它們讀取的翻譯檔案與您的頁面相同，並會從請求中偵測 locale。
+
+## 在處理函式中翻譯 {#translate-in-a-handler}
+
+```ts
+// server/api/greeting.get.ts
+export default defineEventHandler(async (event) => {
+  const t = await useTranslationServerMiddleware(event)
+  return { message: t('greeting', { name: 'Ada' }) }
+})
+```
+
+```bash
+curl 'http://localhost:3000/api/greeting?locale=de'
+# {"message":"Hallo, Ada!"}
+```
+
+`useTranslationServerMiddleware(event, defaultLocale?, locale?)` 是非同步函式，會回傳 `t(key, params?, defaultValue?)`。`t` 會回傳字串並插入 `{name}` 參數；當鍵不存在時，會回傳非空的 `defaultValue`，否則回傳鍵本身。
+
+`t` 只會看到 `index` 區塊：根層級檔案（`locales/<locale>.json`），以及存在時的 `locales/pages/index/`（使用 `disablePageLocales` 時只有根層級檔案）。其他頁面的鍵不會被載入。若需要這些鍵，請自行載入該區塊：
+
+```ts
+const { data } = await loadTranslationsFromServer('de', 'about') // Translations object of the about page
+```
+
+## 讀取請求的 locale {#read-the-request-locale}
+
+```ts
+// server/api/locale.get.ts
+export default defineEventHandler((event) => {
+  const { current, isDefault, locale } = useLocaleServerMiddleware(event)
+  return { current, isDefault, dir: locale?.dir ?? 'ltr' }
+})
+```
+
+`useLocaleServerMiddleware(event, defaultLocale?, locale?)` 是同步函式，回傳：
+
+```ts
+interface LocaleInfo {
+  current: string // detected locale code
+  default: string // defaultLocale, runtime overrides included (fixed at build under prefix_except_default / prefix_and_default)
+  fallback: string // fallbackLocale, else the default
+  available: string[] // enabled locale codes
+  locale: Locale | null // the config entry of `current`
+  isDefault: boolean
+  isFallback: boolean
+}
+```
+
+## Locale 的選擇方式 {#how-the-locale-is-chosen}
+
+兩個輔助函式在每個伺服器路由上（無論是否為 `/api`）都使用相同的順序：
+
+1. `?locale=` 查詢參數（重複時取第一個值）；
+2. `[locale]` 路由參數，或路徑中的 locale 前綴（`/de/...`）；
+3. 設定了 [`localeCookie`](/zh-Hant/api/module-options#localecookie) 時的 locale cookie（在 `hashMode` 下為 `hash-locale`）；
+4. 啟用 `autoDetectLanguage` 時的 `Accept-Language`（會遵循 q 值）；
+5. `defaultLocale`。
+
+每個步驟都會略過無效與已停用的代碼。這是 API 的順序；在前綴策略下，頁面算繪會忽略 `?locale=`。兩種順序的比較請參閱 [Locale 偵測](/zh-Hant/guide/locale-detection)。
+
+## 強制指定 locale {#force-a-locale}
+
+傳入第三個引數即可略過偵測，例如在以使用者語言寄送郵件的工作中：
+
+```ts
+export default defineEventHandler(async (event) => {
+  const user = await getUser(event) // your code
+  const t = await useTranslationServerMiddleware(event, undefined, user.locale)
+  return sendMail(user.email, t('mail.welcome.subject'))
+})
+```
+
+第二個引數會在此次呼叫的偵測中取代 `defaultLocale`，因此在強制指定 locale 時沒有作用。字典會依請求與 locale 快取，並在伺服器的翻譯快取中跨請求快取，因此多次呼叫輔助函式的成本很低。
+
+## 伺服器元件 {#server-components}
+
+伺服器元件（`.server.vue`、`<NuxtIsland>`）是從它自己的 URL `/__nuxt_island/...` 算繪，因此看不到頁面的 URL，而 Nuxt 只會傳入它的 props。請將 locale 作為 `locale` prop 傳入。它就會以該 locale 算繪，切換時也會重新取得，因為 props 是 island 的 URL 與快取鍵的一部分。這個名稱是保留的：名為 `locale` 的 prop 中只要是任何已啟用的 locale 代碼，都會設定算繪的 locale，因此代表其他意義（例如數字格式）的 prop 請使用其他名稱：
+
+```vue
+<!-- components/Greeting.server.vue -->
+<template><p>{{ $t('greeting') }}</p></template>
+<script setup lang="ts">
+defineProps<{ locale?: string }>()
+</script>
+```
+
+```vue
+<template>
+  <Greeting :locale="$getLocale()" />
+  <NuxtIsland name="Greeting" :props="{ locale: $getLocale() }" />
+</template>
+```
+
+若沒有這個 prop，它會以 cookie 中的 locale 算繪，否則使用預設 locale，與 URL 無關，且不會跟隨切換。它的 `$t` 會看到 `index` 區塊：根層級檔案加上 `locales/pages/index/`。
+
+## 相關內容 {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Locale 偵測" icon="book-open" href="/zh-Hant/guide/locale-detection">
+
+</Card>
+
+<Card title="翻譯檔案" icon="book-open" href="/zh-Hant/guide/translations">
+
+</Card>
+
+<Card title="部署" icon="book-open" href="/zh-Hant/guide/deployment">
+
+伺服器從何處讀取翻譯
+
+</Card>
+
+</CardGroup>

@@ -1,0 +1,132 @@
+---
+title: "File terjemahan"
+description: "Tempat kunci terjemahan disimpan, cara file root dan file halaman digabungkan dengan fallback, dan cara halaman memuat kamusnya."
+---
+
+Terjemahan adalah file JSON biasa: satu file root per locale untuk kunci bersama, dan satu file per halaman dan locale untuk kunci halaman tersebut. Baca ini saat Anda menambahkan halaman, berbagi kunci antarhalaman, atau menyiapkan fallback. Anda akan mempelajari di file mana sebuah kunci harus diletakkan, apa yang dapat dilihat sebuah halaman, dan kapan setiap file dimuat.
+
+## Tata letak {#layout}
+
+```text
+locales/
+├── en.json                 # root: menus, footer, buttons
+├── de.json
+└── pages/
+    ├── index/              # pages/index.vue
+    │   ├── en.json
+    │   └── de.json
+    ├── about/              # pages/about.vue
+    │   ├── en.json
+    │   └── de.json
+    └── products-id/        # pages/products/[id].vue
+        ├── en.json
+        └── de.json
+```
+
+- Folder di bawah `locales/pages/` adalah **nama route** Nuxt dari halaman: `pages/products/[id].vue` menjadi `products-id`, `pages/blog/[slug]/comments.vue` menjadi `blog-slug-comments`.
+- Kunci dapat bersarang hingga kedalaman berapa pun; `$t('auth.form.login')` membaca `{ "auth": { "form": { "login": … } } }`.
+- `translationDir` memindahkan folder (`'locales'` secara default, relatif terhadap root proyek, juga di bawah tata letak `app/` Nuxt 4).
+- File yang tidak ada dibuat sebagai `{}` saat Nuxt me-resolve halaman, kecuali [`disableWatcher`](/id/api/module-options#disablewatcher) ditetapkan.
+
+## Apa yang dilihat halaman {#what-a-page-sees}
+
+![Urutan pencarian kunci di /about dalam de: pages/about/de.json, de.json, pages/about/en.json, en.json. Semuanya digabung menjadi satu about/de/data.json yang dibaca $t](/images/diagrams/page-dictionary.svg)
+
+Kamus sebuah halaman adalah file root-nya yang digabungkan dengan file halamannya, secara mendalam (di setiap level). File halaman menang jika terjadi bentrok:
+
+```json
+// locales/en.json
+{ "title": "My shop", "nav": { "home": "Home", "cart": "Cart" } }
+```
+
+```json
+// locales/pages/about/en.json
+{ "title": "About us", "nav": { "cart": "Basket" } }
+```
+
+```ts
+// on /about
+t('title') // 'About us'
+t('nav.home') // 'Home'   (root)
+t('nav.cart') // 'Basket' (page wins)
+// on any other page
+t('title') // 'My shop'
+```
+
+Halaman tanpa folder sendiri hanya mendapatkan kamus root. Kunci dari halaman lain tidak terlihat.
+
+### Locale fallback {#fallback-locales}
+
+Kunci yang tidak ada di locale aktif diambil dari locale fallback-nya sebelum kunci itu sendiri ditampilkan:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    locales: [
+      { code: 'en', iso: 'en-US' },
+      { code: 'de', iso: 'de-DE' },
+      { code: 'de-at', iso: 'de-AT', fallbackLocale: 'de' },
+    ],
+    defaultLocale: 'en',
+    fallbackLocale: 'en', // global, for every locale
+  },
+})
+```
+
+- `fallbackLocale` milik sebuah locale diikuti hingga ujungnya: `de-at` → `de` → `en`.
+- `fallbackLocale` global adalah lapisan terlemah, di bawah setiap rantai.
+- Setiap locale dalam rantai menambahkan file root-nya, lalu file halamannya, dari fallback terlemah hingga locale aktif. Jadi file root locale aktif mengalahkan file halaman locale fallback.
+
+Tanpa fallback, kunci yang hilang dirender sebagai kuncinya (`'nav.home'`) dan mencatat peringatan di konsol browser saat dev ([`missingWarn`](/id/api/module-options#missingwarn)).
+
+## Berbagi dan sumber lain {#sharing-and-other-sources}
+
+| Kebutuhan | Opsi |
+| --- | --- |
+| Hanya file root, tanpa folder `pages/` | [`disablePageLocales: true`](/id/api/module-options#disablepagelocales) |
+| Dua halaman membaca satu folder halaman | [`routesLocaleLinks`](/id/api/module-options#routeslocalelinks): `{ 'about-us': 'about' }` |
+| File root bersama di folder lain | [`additionalTranslationDirs`](/id/api/module-options#additionaltranslationdirs): `['common']` (`translationDir` utama yang menang) |
+| Kunci dari layer Nuxt | File layer digabungkan, file milik proyek sendiri yang menang. Lihat [Layer](/id/guide/layers) |
+| Kunci yang ditambahkan saat runtime | hook [`i18n:register`](/id/api/events), `$mergeTranslations`, `$setTranslation` |
+| Kunci inline di komponen halaman | `$defineI18nRoute({ locales: { en: { … } } })`, lihat [Konfigurasi halaman](/id/guide/per-component-translations) |
+
+## Cara halaman memuat kamusnya {#how-a-page-loads-its-dictionary}
+
+![File JSON locale dibangun menjadi pohon payload, disimpan di public/ pada Node atau di aset server pada Edge, dibaca oleh loader server, lalu digunakan oleh $t di server dan diambil untuk $t di browser](/images/diagrams/translation-pipeline.svg)
+
+Modul membangun satu payload per halaman dan locale: `/{apiBaseUrl}/{page}/{locale}/data.json` (`/_locales/about/de/data.json` secara default).
+
+1. **Render server.** Nitro mendeteksi locale dan halaman memuat payload-nya langsung dari loader server, tanpa permintaan HTTP. Kamus tidak ditulis ke payload HTML, sehingga halaman tetap kecil.
+2. **Hidrasi.** Browser mengambil payload yang sama. Server sudah menghasilkan `<link rel="preload">` untuknya, sehingga pengambilan dimulai bersama HTML.
+3. **Navigasi.** Payload halaman berikutnya menggantikan kamus. Kunci halaman yang ditinggalkan masih ter-resolve hingga halaman itu hilang (akhir transisi halaman, atau `page:finish`), sehingga halaman yang memudar tidak menampilkan kunci mentah sekilas. Chunk yang gagal dimuat (error jaringan, 4xx atau 5xx, body yang bukan objek) membiarkan kamus saat ini tetap ada, dan navigasi berikutnya memuatnya lagi. Pergantian locale yang gagal juga sama: `$switchLocale` me-resolve `false`, dan memanggilnya lagi, atau mengklik pengalih lagi, akan mencoba ulang. Di bawah strategi prefiks URL sudah berpindah saat itu, sehingga `lang` dan `$getLocale()` menyebut locale dari URL sementara teks lama tetap di layar.
+4. **Cache.** Payload yang dimuat di-cache di server dan di browser; [Performa](/id/guide/performance) memuat pengaturan ukuran dan TTL.
+
+`translationPayloads.mode` menentukan cara payload dibangun. `'premerged'` (default) menulis setiap file halaman × locale saat build. `'source'` mempertahankan file sumber dan menggabungkannya per permintaan, yang lebih kecil untuk katalog besar pada target Edge. Keduanya menghasilkan kamus yang sama. Lokasi file untuk setiap target deploy ada di [Deployment](/id/guide/deployment).
+
+## Mengedit saat pengembangan {#editing-in-development}
+
+`nuxt dev` membaca file secara langsung. Menyimpan file terjemahan menyegarkan kamus halaman yang terbuka di tempat: tanpa reload, kunci yang dihapus menghilang, dan perubahan pada file root menjangkau setiap halaman. File JSON yang rusak mencatat peringatan dengan path-nya dan diperlakukan sebagai kosong. Tetapkan [`hmr: false`](/id/api/module-options#hmr) untuk menyegarkan secara manual.
+
+## Terkait {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Konfigurasi halaman" icon="book-open" href="/id/guide/per-component-translations">
+
+Locale per halaman dan terjemahan inline
+
+</Card>
+
+<Card title="Method" icon="brackets-curly" href="/id/api/methods">
+
+`$t`, `$tc`, `$tn`, `$td`
+
+</Card>
+
+<Card title="Deployment" icon="book-open" href="/id/guide/deployment">
+
+</Card>
+
+</CardGroup>

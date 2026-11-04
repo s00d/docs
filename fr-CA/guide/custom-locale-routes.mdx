@@ -1,0 +1,162 @@
+---
+title: "Chemins localisés"
+description: "Donnez à une page une URL différente par locale avec localeRoutes ou globalLocaleRoutes, y compris les paramètres dynamiques et les slugs par locale."
+---
+
+Par défaut, chaque locale sert une page au même chemin : `/en/about`, `/de/about`. Les chemins localisés permettent à chaque locale d'utiliser ses propres mots, comme `/de/ueber-uns`, tandis que le fichier de la page reste le même. Vous les définissez dans la page avec `$defineI18nRoute`, ou pour plusieurs pages à la fois dans `nuxt.config.ts`.
+
+## Dans la page {#in-the-page}
+
+```vue
+<!-- pages/about.vue -->
+<script setup lang="ts">
+const { $defineI18nRoute } = useNuxtApp()
+
+$defineI18nRoute({
+  localeRoutes: {
+    de: '/ueber-uns',
+    fr: '/a-propos',
+  },
+})
+</script>
+```
+
+Avec `prefix_except_default` et `defaultLocale: 'en'`, la page répond à `/about`, `/de/ueber-uns` et `/fr/a-propos`. Une locale sans entrée conserve le chemin par défaut. Écrivez les chemins sans le code de locale : le préfixe est ajouté par la [stratégie](/fr-CA/guide/strategy), et un chemin qui commence par le code de locale journalise un avertissement. Ce que l'appel accepte d'autre est décrit dans [Configuration de page](/fr-CA/guide/per-component-translations).
+
+## Dans nuxt.config {#in-nuxt-config}
+
+[`globalLocaleRoutes`](/fr-CA/api/module-options#globallocaleroutes) fait la même chose pour n'importe quelle page, indexée par son chemin (ou par son nom de route, lorsqu'elle est écrite sans barre oblique initiale) :
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    locales: [
+      { code: 'en', iso: 'en-US' },
+      { code: 'de', iso: 'de-DE' },
+    ],
+    defaultLocale: 'en',
+    globalLocaleRoutes: {
+      '/about': { de: '/ueber-uns' },
+      '/about/team': { de: '/ueber-uns/team' },
+      '/admin': false, // not localized: one /admin route, no locale prefix
+    },
+  },
+})
+```
+
+Lorsqu'une page définit `localeRoutes` et que `globalLocaleRoutes` contient la même clé, l'entrée de la configuration l'emporte.
+
+## Paramètres dynamiques {#dynamic-params}
+
+Écrivez les paramètres sous n'importe quelle forme Nuxt : `[id]`, `[[page]]`, `[...slug]` ou `:id()`. Les noms des paramètres doivent correspondre au fichier de la page.
+
+```ts
+// pages/products/[...slug].vue
+$defineI18nRoute({
+  localeRoutes: {
+    en: '/our-products/[...slug]',
+    de: '/unsere-produkte/[...slug]',
+  },
+})
+```
+
+Les pages imbriquées prennent un chemin enfant absolu (`/ueber-uns/team`) ou un chemin relatif au chemin localisé du parent (`team`).
+
+## Créer des liens vers des pages localisées {#linking-to-localized-pages}
+
+Les liens sont résolus vers le chemin localisé de la locale cible, que vous passiez un nom de route ou un simple chemin :
+
+```vue
+<template>
+  <i18n-link :to="{ name: 'about' }">About</i18n-link>
+  <i18n-link to="/about">About</i18n-link>
+  <!-- de: both render /de/ueber-uns -->
+  <NuxtLink :to="$localePath('/about', 'de')">Deutsch</NuxtLink>
+</template>
+```
+
+Les noms de route proviennent du chemin du fichier (`pages/about/team.vue` devient `about-team`), sauf si vous en définissez un avec `definePageMeta({ name })`.
+
+## Slugs par locale {#per-locale-slugs}
+
+Lorsque le slug lui-même diffère selon la locale (`/our-products/red-shoe` vs `/de/unsere-produkte/roter-schuh`), indiquez au sélecteur de langue quels paramètres utiliser avec `$setI18nRouteParams` une fois les données chargées :
+
+```vue
+<script setup lang="ts">
+const { $setI18nRouteParams } = useNuxtApp()
+const route = useRoute()
+
+const { data: product } = await useFetch(`/api/products/${route.params.slug}`)
+
+if (product.value) {
+  $setI18nRouteParams({
+    en: { slug: product.value.slugEn },
+    de: { slug: product.value.slugDe },
+  })
+}
+</script>
+```
+
+`$switchLocalePath('de')` et `<i18n-switcher>` pointent alors vers `/de/unsere-produkte/roter-schuh`. Les clés sont des codes de locale, les valeurs sont des paramètres par nom (comme dans le fichier de la page).
+
+Un sélecteur placé dans le layout est rendu avant que le setup asynchrone de la page n'arrive à cette étape; à la fin du rendu, le module réécrit donc les liens de `<i18n-switcher>`, aussi bien dans `app.vue` que dans la page. Le HTML du serveur, un visiteur sans JavaScript et le premier rendu client concordent alors. Pour cela, définissez les paramètres pendant le SSR : avec `lazy` ou `server: false`, les liens ne changent qu'après l'hydratation. Le streaming SSR de Nuxt envoie le HTML avant que les paramètres soient connus; dans ce cas, les liens du premier HTML conservent les paramètres de l'URL elle-même.
+
+Seuls les liens propres au sélecteur sont réécrits. Un lien `$switchLocalePath` écrit à la main doit être rendu après la définition des paramètres; placez-le donc dans la page qui les définit, aussi après un `await`. Dans un layout, il est rendu en premier : son HTML serveur conserve les paramètres de l'URL, et l'hydratation signale une incohérence. Utilisez plutôt `<i18n-switcher>` à cet endroit, avec ses slots et ses props `custom*Style` pour l'apparence.
+
+Les paramètres appartiennent à la page qui les a définis :
+
+- Ils sont supprimés lorsqu'une navigation vers un autre chemin est validée; chaque page définit donc les siens. Une navigation annulée les laisse en place.
+- Obtenez `$setI18nRouteParams` à partir de `useNuxtApp()` ou de `useI18n()` dans `setup`, même lorsque vous l'appelez plus tard dans un gestionnaire `useAsyncData`. Obtenue à cet endroit, la fonction connaît sa page : si le visiteur est parti, un appel tardif ne fait rien.
+- Avec `keepalive`, une page retrouve les paramètres qu'elle a définis lorsque le visiteur revient. `useI18nHead` fait de même.
+
+## Routes ajoutées dans pages:extend {#routes-added-in-pagesextend}
+
+Les routes que vous ajoutez dans le hook `pages:extend` n'ont pas de fichier de page où lire `$defineI18nRoute`, et plusieurs d'entre elles partagent souvent un même composant enveloppe. Une route ajoutée sans `name` reçoit le nom que Nuxt donnerait à son chemin (`/a/:id()` devient `a-id`), de sorte que les liens de langue l'atteignent, à moins qu'une autre route porte déjà ce nom; donnez-lui alors un `name` explicite. Conservez une seule liste et divisez-la en pages et en `globalLocaleRoutes` indexées par nom de route avec `splitLocaleRoutes` de `@i18n-micro/utils/split-locale-routes` (ajoutez le paquet à vos dépendances) :
+
+```ts
+// nuxt.config.ts
+import { splitLocaleRoutes } from '@i18n-micro/utils/split-locale-routes'
+
+const dynamic = splitLocaleRoutes([
+  { name: 'products-tag', path: '/products/:tag', file: '~/pages/_dynamic.vue', paths: { de: '/produkte/:tag' } },
+  { name: 'internal', path: '/internal', file: '~/pages/_dynamic.vue', paths: false }, // not localized
+])
+
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  hooks: {
+    'pages:extend'(pages) {
+      pages.push(...dynamic.pages)
+    },
+  },
+  i18n: {
+    globalLocaleRoutes: dynamic.globalLocaleRoutes,
+  },
+})
+```
+
+Ne placez pas les chemins localisés dans `route.meta` : ils seraient livrés dans la table des routes du client.
+
+## Voir aussi {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Configuration de page" icon="book-open" href="/fr-CA/guide/per-component-translations">
+
+</Card>
+
+<Card title="Stratégies de routage" icon="book-open" href="/fr-CA/guide/strategy">
+
+</Card>
+
+<Card title="$localePath et $switchLocalePath" icon="brackets-curly" href="/fr-CA/api/methods">
+
+</Card>
+
+<Card title="SEO" icon="book-open" href="/fr-CA/guide/seo">
+
+</Card>
+
+</CardGroup>

@@ -1,0 +1,120 @@
+---
+title: "Szerver route-ok és API"
+description: "Szövegek fordítása és a kérés locale-jának kiolvasása Nitro szerver route-okban és API handlerekben."
+---
+
+A `server/api/` és `server/routes/` alatti szerver handlerek két automatikusan importált segédfüggvénnyel fordíthatnak szövegeket és olvashatják ki a kérés locale-ját. Használd őket API-válaszokhoz, e-mailekhez, feedekhez vagy bármihez, ami egy Vue oldalon kívül renderelődik. Ugyanazokat a fordítási fájlokat olvassák, mint az oldalaid, és a kérésből ismerik fel a locale-t.
+
+## Fordítás egy handlerben {#translate-in-a-handler}
+
+```ts
+// server/api/greeting.get.ts
+export default defineEventHandler(async (event) => {
+  const t = await useTranslationServerMiddleware(event)
+  return { message: t('greeting', { name: 'Ada' }) }
+})
+```
+
+```bash
+curl 'http://localhost:3000/api/greeting?locale=de'
+# {"message":"Hallo, Ada!"}
+```
+
+A `useTranslationServerMiddleware(event, defaultLocale?, locale?)` aszinkron, és a `t(key, params?, defaultValue?)` függvényt adja vissza. A `t` visszaadja a szöveget, behelyettesíti a `{name}` paramétereket, és ha a kulcs hiányzik, egy nem üres `defaultValue` értéket, ennek hiányában magát a kulcsot adja vissza.
+
+A `t` csak az `index` chunkot látja: a gyökérfájlokat (`locales/<locale>.json`), valamint a `locales/pages/index/` mappát, ha létezik (`disablePageLocales` esetén csak a gyökérfájlokat). Más oldalak kulcsai nem töltődnek be. Ezekhez töltsd be magad a chunkot:
+
+```ts
+const { data } = await loadTranslationsFromServer('de', 'about') // Translations object of the about page
+```
+
+## A kérés locale-jának kiolvasása {#read-the-request-locale}
+
+```ts
+// server/api/locale.get.ts
+export default defineEventHandler((event) => {
+  const { current, isDefault, locale } = useLocaleServerMiddleware(event)
+  return { current, isDefault, dir: locale?.dir ?? 'ltr' }
+})
+```
+
+A `useLocaleServerMiddleware(event, defaultLocale?, locale?)` szinkron, és a következőt adja vissza:
+
+```ts
+interface LocaleInfo {
+  current: string // detected locale code
+  default: string // defaultLocale, runtime overrides included (fixed at build under prefix_except_default / prefix_and_default)
+  fallback: string // fallbackLocale, else the default
+  available: string[] // enabled locale codes
+  locale: Locale | null // the config entry of `current`
+  isDefault: boolean
+  isFallback: boolean
+}
+```
+
+## Hogyan választódik ki a locale {#how-the-locale-is-chosen}
+
+Mindkét segédfüggvény ugyanazt a sorrendet használja minden szerver route-on, akár `/api` alatt van, akár nem:
+
+1. `?locale=` query (ismétlődés esetén az első érték);
+2. egy `[locale]` route paraméter, vagy egy locale-előtag az útvonalban (`/de/...`);
+3. a locale-cookie, ha a [`localeCookie`](/hu/api/module-options#localecookie) be van állítva (`hashMode` esetén `hash-locale`);
+4. `Accept-Language`, ha az `autoDetectLanguage` be van kapcsolva (a q-értékeket figyelembe veszi);
+5. `defaultLocale`.
+
+Az érvénytelen és letiltott kódok minden lépésnél kimaradnak. Ez az API sorrendje; egy oldal renderelése az előtagos stratégiáknál figyelmen kívül hagyja a `?locale=` paramétert. A két sorrend összehasonlítása a [Locale-felismerés](/hu/guide/locale-detection) oldalon található.
+
+## Locale kényszerítése {#force-a-locale}
+
+Add meg a harmadik argumentumot a felismerés kihagyásához, például egy olyan feladatban, amely a felhasználó nyelvén küld levelet:
+
+```ts
+export default defineEventHandler(async (event) => {
+  const user = await getUser(event) // your code
+  const t = await useTranslationServerMiddleware(event, undefined, user.locale)
+  return sendMail(user.email, t('mail.welcome.subject'))
+})
+```
+
+A második argumentum az adott hívás felismeréséhez lecseréli a `defaultLocale` értéket, így nincs hatása, ha egy locale kényszerítve van. A szótárak kérésenként és locale-onként, a kérések között pedig a szerver fordítási gyorsítótárában gyorsítótárazódnak, így egy segédfüggvény többszöri hívása olcsó.
+
+## Szerverkomponensek {#server-components}
+
+Egy szerverkomponens (`.server.vue`, `<NuxtIsland>`) a saját URL-jéről renderelődik (`/__nuxt_island/...`), így nem látja az oldal URL-jét, és a Nuxt csak a propjait adja át neki. A locale-t `locale` propként add át. Ekkor azon a locale-on renderelődik, és váltáskor újra lekéri, mivel a propok az island URL-jének és gyorsítótárkulcsának részei. A név foglalt: bármely engedélyezett locale-kód egy `locale` nevű propban beállítja a renderelés locale-ját, ezért egy olyan propnak, amely mást jelent, például egy számformátumot, adj más nevet:
+
+```vue
+<!-- components/Greeting.server.vue -->
+<template><p>{{ $t('greeting') }}</p></template>
+<script setup lang="ts">
+defineProps<{ locale?: string }>()
+</script>
+```
+
+```vue
+<template>
+  <Greeting :locale="$getLocale()" />
+  <NuxtIsland name="Greeting" :props="{ locale: $getLocale() }" />
+</template>
+```
+
+A prop nélkül a cookie locale-ján, ennek hiányában az alapértelmezett locale-on renderelődik, bármit mondjon is az URL, és nem követi a váltást. A `$t` függvénye az `index` chunkot látja: a gyökérfájlokat és a `locales/pages/index/` mappát.
+
+## Kapcsolódó {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Locale-felismerés" icon="book-open" href="/hu/guide/locale-detection">
+
+</Card>
+
+<Card title="Fordítási fájlok" icon="book-open" href="/hu/guide/translations">
+
+</Card>
+
+<Card title="Telepítés" icon="book-open" href="/hu/guide/deployment">
+
+Honnan olvassa a szerver a fordításokat
+
+</Card>
+
+</CardGroup>

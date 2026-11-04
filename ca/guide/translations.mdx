@@ -1,0 +1,132 @@
+---
+title: "Fitxers de traducció"
+description: "On viuen les claus de traducció, com es combinen els fitxers arrel i de pàgina amb les alternatives, i com carrega una pàgina el seu diccionari."
+---
+
+Les traduccions són fitxers JSON simples: un fitxer arrel per locale per a les claus compartides, i un fitxer per pàgina i locale per a les claus d'aquella pàgina. Llegiu això quan afegiu pàgines, compartiu claus entre elles o configureu alternatives (fallbacks). Aprendreu a quin fitxer ha d'anar una clau, què pot veure una pàgina i quan es carrega cada fitxer.
+
+## Estructura {#layout}
+
+```text
+locales/
+├── en.json                 # root: menus, footer, buttons
+├── de.json
+└── pages/
+    ├── index/              # pages/index.vue
+    │   ├── en.json
+    │   └── de.json
+    ├── about/              # pages/about.vue
+    │   ├── en.json
+    │   └── de.json
+    └── products-id/        # pages/products/[id].vue
+        ├── en.json
+        └── de.json
+```
+
+- La carpeta dins de `locales/pages/` és el **nom de ruta** de Nuxt de la pàgina: `pages/products/[id].vue` és `products-id`, `pages/blog/[slug]/comments.vue` és `blog-slug-comments`.
+- Les claus es poden niar a qualsevol profunditat; `$t('auth.form.login')` llegeix `{ "auth": { "form": { "login": … } } }`.
+- `translationDir` canvia la ubicació de la carpeta (`'locales'` per defecte, relativa a l'arrel del projecte, també amb l'estructura `app/` de Nuxt 4).
+- Els fitxers que falten es creen com a `{}` quan Nuxt resol les pàgines, tret que s'estableixi [`disableWatcher`](/ca/api/module-options#disablewatcher).
+
+## Què veu una pàgina {#what-a-page-sees}
+
+![Ordre de cerca d'una clau a /about en de: pages/about/de.json, de.json, pages/about/en.json, en.json. Es fusionen en un sol about/de/data.json que llegeix $t](/images/diagrams/page-dictionary.svg)
+
+El diccionari d'una pàgina és el seu fitxer arrel fusionat amb el seu fitxer de pàgina, en profunditat (a tots els nivells). En cas de conflicte guanya el fitxer de pàgina:
+
+```json
+// locales/en.json
+{ "title": "My shop", "nav": { "home": "Home", "cart": "Cart" } }
+```
+
+```json
+// locales/pages/about/en.json
+{ "title": "About us", "nav": { "cart": "Basket" } }
+```
+
+```ts
+// on /about
+t('title') // 'About us'
+t('nav.home') // 'Home'   (root)
+t('nav.cart') // 'Basket' (page wins)
+// on any other page
+t('title') // 'My shop'
+```
+
+Una pàgina sense carpeta pròpia només rep el diccionari arrel. Les claus d'altres pàgines no són visibles.
+
+### Locales alternatius {#fallback-locales}
+
+Una clau que falta al locale actiu es pren del seu locale alternatiu abans de mostrar la clau mateixa:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    locales: [
+      { code: 'en', iso: 'en-US' },
+      { code: 'de', iso: 'de-DE' },
+      { code: 'de-at', iso: 'de-AT', fallbackLocale: 'de' },
+    ],
+    defaultLocale: 'en',
+    fallbackLocale: 'en', // global, for every locale
+  },
+})
+```
+
+- El `fallbackLocale` propi d'un locale se segueix fins al final: `de-at` → `de` → `en`.
+- El `fallbackLocale` global és la capa més feble, per sota de totes les cadenes.
+- Cada locale de la cadena afegeix el seu fitxer arrel i després el seu fitxer de pàgina, des de l'alternativa més feble fins al locale actiu. Per tant, el fitxer arrel del locale actiu s'imposa al fitxer de pàgina d'un locale alternatiu.
+
+Sense alternativa, una clau que falta es renderitza com la clau (`'nav.home'`) i registra un avís a la consola del navegador en desenvolupament ([`missingWarn`](/ca/api/module-options#missingwarn)).
+
+## Compartir i altres fonts {#sharing-and-other-sources}
+
+| Necessitat | Opció |
+| --- | --- |
+| Només fitxers arrel, sense carpetes `pages/` | [`disablePageLocales: true`](/ca/api/module-options#disablepagelocales) |
+| Dues pàgines llegeixen una mateixa carpeta de pàgina | [`routesLocaleLinks`](/ca/api/module-options#routeslocalelinks): `{ 'about-us': 'about' }` |
+| Fitxers arrel compartits en una altra carpeta | [`additionalTranslationDirs`](/ca/api/module-options#additionaltranslationdirs): `['common']` (guanya el `translationDir` principal) |
+| Claus d'una capa de Nuxt | Els fitxers de les capes es fusionen i guanyen els fitxers del mateix projecte. Vegeu [Capes](/ca/guide/layers) |
+| Claus afegides en temps d'execució | el hook [`i18n:register`](/ca/api/events), `$mergeTranslations`, `$setTranslation` |
+| Claus en línia en un component de pàgina | `$defineI18nRoute({ locales: { en: { … } } })`, vegeu [Configuració de la pàgina](/ca/guide/per-component-translations) |
+
+## Com carrega una pàgina el seu diccionari {#how-a-page-loads-its-dictionary}
+
+![Els fitxers JSON de locale es compilen en un arbre de payloads, que es desa a public/ a Node o als assets del servidor a Edge, el llegeix un carregador del servidor i després el fa servir $t al servidor i s'obté per a $t al navegador](/images/diagrams/translation-pipeline.svg)
+
+El mòdul construeix un payload per pàgina i locale: `/{apiBaseUrl}/{page}/{locale}/data.json` (`/_locales/about/de/data.json` per defecte).
+
+1. **Renderització al servidor.** Nitro detecta el locale i la pàgina carrega el seu payload directament des del carregador del servidor, sense cap petició HTTP. El diccionari no s'escriu al payload HTML, de manera que les pàgines continuen sent petites.
+2. **Hidratació.** El navegador obté el mateix payload. El servidor ja ha emès un `<link rel="preload">` per a aquest payload, de manera que la petició comença amb l'HTML.
+3. **Navegació.** El payload de la pàgina següent substitueix el diccionari. Les claus de la pàgina que es deixa es continuen resolent fins que desapareix (final de la transició de pàgina, o `page:finish`), de manera que una pàgina que s'esvaeix no mostra claus en cru. Un fragment que no es pot carregar (error de xarxa, 4xx o 5xx, un cos que no és un objecte) deixa el diccionari actual al seu lloc, i la navegació següent el torna a carregar. Un canvi de locale fallit funciona igual: `$switchLocale` es resol amb `false`, i tornar-lo a cridar, o tornar a fer clic al selector, ho reintenta. Amb les estratègies de prefix la URL ja ha canviat en aquell moment, de manera que `lang` i `$getLocale()` indiquen el locale de la URL mentre els textos antics continuen a la pantalla.
+4. **Memòria cau.** Els payloads carregats es desen a la memòria cau al servidor i al navegador; a [Rendiment](/ca/guide/performance) hi trobareu les opcions de mida i TTL.
+
+`translationPayloads.mode` decideix com es construeixen els payloads. `'premerged'` (per defecte) escriu tots els fitxers pàgina × locale en temps de compilació. `'source'` conserva els fitxers font i els fusiona per petició, cosa que ocupa menys per a catàlegs grans en destinacions Edge. Tots dos donen els mateixos diccionaris. On van a parar els fitxers per a cada destinació de desplegament s'explica a [Desplegament](/ca/guide/deployment).
+
+## Edició en desenvolupament {#editing-in-development}
+
+`nuxt dev` llegeix els fitxers en directe. Desar un fitxer de traducció actualitza el diccionari de la pàgina oberta al moment: sense recàrrega, les claus eliminades desapareixen i un canvi en un fitxer arrel arriba a totes les pàgines. Un fitxer JSON trencat registra un avís amb la seva ruta i es tracta com a buit. Establiu [`hmr: false`](/ca/api/module-options#hmr) per actualitzar manualment.
+
+## Relacionat {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Configuració de la pàgina" icon="book-open" href="/ca/guide/per-component-translations">
+
+Locales per pàgina i traduccions en línia
+
+</Card>
+
+<Card title="Mètodes" icon="brackets-curly" href="/ca/api/methods">
+
+`$t`, `$tc`, `$tn`, `$td`
+
+</Card>
+
+<Card title="Desplegament" icon="book-open" href="/ca/guide/deployment">
+
+</Card>
+
+</CardGroup>
