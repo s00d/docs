@@ -1,0 +1,139 @@
+---
+title: "Detekce lokalizace"
+description: "Jak se volí lokalizace pro stránku nebo požadavek na API: URL, query, stav, cookie, Accept-Language a výchozí hodnota, a kdy je návštěvník přesměrován."
+---
+
+Každý požadavek dostane jednu lokalizaci, vybranou ze stejného seznamu zdrojů ve stejném pořadí na serveru i v prohlížeči. Přečtěte si to, když rozhodujete, v jakém jazyce přistanou návštěvníci poprvé, zda se jejich volba zapamatuje a co vidí vaše serverové API. Dozvíte se pořadí priorit, přesměrování, která jednotlivé strategie provádějí, a možnosti, jimiž jednotlivé zdroje zapnete nebo vypnete.
+
+<Tip>
+
+**Předpoklady** — [Strategie routování](/cs/guide/strategy)
+
+</Tip>
+
+## Pořadí priorit {#the-precedence}
+
+Vyhrává první zdroj, který uvádí **povolenou** lokalizaci. Neplatná nebo poškozená hodnota (neznámý kód, rozbitá cookie) se přeskočí a počítá se další zdroj.
+
+| # | Zdroj | Počítá se, když |
+| --- | --- | --- |
+| 1 | Prefix v URL (`/de/about`) | prefixové strategie. Při `prefix_except_default` a `prefix_and_default` je URL bez prefixu výchozí lokalizace |
+| 2 | `?locale=de` | stránky: jen `no_prefix`. Serverové pomocné funkce API: vždy, a to před URL |
+| 3 | Stav lokalizace nastavený aplikací (`useI18nLocale().setLocale()`) | URL neobsahuje lokalizaci |
+| 4 | Cookie | je nastavena [`localeCookie`](/cs/api/module-options#localecookie) (při `no_prefix` automaticky `'user-locale'`) |
+| 5 | Hlavička `Accept-Language` | [`autoDetectLanguage`](/cs/api/module-options#autodetectlanguage) je `true` (výchozí) |
+| 6 | [`defaultLocale`](/cs/api/module-options#defaultlocale) | vždy |
+
+Při prefixové strategii tedy o tom, co stránka zobrazí, rozhoduje URL; zdroje preferencí (3–5) rozhodují jen o tom, kam je návštěvník **přesměrován**, a to jen na cestách, které povoluje `autoDetectPath`. Při `no_prefix` není kam přesměrovávat a o tom, co stránka zobrazí, rozhodují zdroje preferencí.
+
+![Rozhodovací diagram: prefix lokalizace v URL vykreslí danou lokalizaci. Bez něj no_prefix vykresluje podle zdrojů preferencí, prefix_and_default vykreslí výchozí lokalizaci a prefix nebo prefix_except_default přesměrují podle preference, pokud autoDetectPath cestu povoluje](/images/diagrams/locale-detection.svg)
+
+## Přesměrování podle strategie {#redirects-per-strategy}
+
+Přesměrování jsou typu `302`, provádějí se na serveru před vykreslením stránky a u klientských navigací middlewarem trasy. Query i hash se zachovají. S [`redirects: false`](/cs/api/module-options#redirects) k žádnému nedochází; nesprávné prefixy jsou stále 404.
+
+Návštěvník preferuje `de` (cookie nebo hlavička), `defaultLocale: 'en'`, výchozí `autoDetectPath: '/'`:
+
+| Požadavek | `prefix_except_default` | `prefix` | `prefix_and_default` | `no_prefix` |
+| --- | --- | --- | --- | --- |
+| `/` | → `/de` | → `/de` | `/` v `en` | `/` v `de` |
+| `/about` | `/about` v `en` | → `/de/about` | `/about` v `en` | `/about` v `de` |
+| `/fr/about` | `/fr/about` | `/fr/about` | `/fr/about` | — |
+| `/en/about` | 404 | `/en/about` | `/en/about` | — |
+
+`prefix_and_default` nikdy nepřesměrovává: URL bez prefixu patří výchozí lokalizaci a ostatní lokalizace žijí pod svým prefixem. Návštěvník, který preferuje `en`, není při `prefix_except_default` z `/` přesměrován. Cíle nemají koncové lomítko (`/de`, ne `/de/`) a respektují vlastní cesty (`/about` → `/de/ueber-uns`).
+
+Všude, kde rozhoduje cookie nebo hlavička (přesměrování z `/`, každá stránka při `no_prefix`), nese odpověď `Vary: Cookie, Accept-Language`, takže CDN odpovědi drží odděleně.
+
+### `autoDetectPath` {#autodetectpath}
+
+Kam mohou zdroje preferencí návštěvníka přesunout:
+
+| Hodnota | Preference se počítá na |
+| --- | --- |
+| `'/'` (výchozí) | jen `/`. Přímé odkazy zůstávají v jazyce URL |
+| `'no_prefix'` | každé cestě bez prefixu lokalizace (`/about` → `/de/about`) |
+| `'/welcome'` | přesně této cestě (koncové lomítko se ignoruje) |
+| `'*'` | každé cestě, i těch s prefixem: `/about` i `/fr/about` → `/de/about`, když návštěvník preferuje `de` |
+
+- Na cestách, které nepovoluje, se URL bez prefixu považuje za výchozí lokalizaci.
+- Výjimkou je `prefix`: nemá stránky bez prefixu, takže `/about` vždy vede do lokalizace návštěvníka (`/de/about` s cookie `de`, `/en/about` bez preference).
+- S `'*'` server ignoruje stav aplikace a URL s prefixem už neukládá svou vlastní lokalizaci do cookie; cookie se změní, když návštěvník přepne pomocí `$switchLocale`.
+
+<Warning>
+
+S `'*'` se sdílené odkazy otevírají v jazyce čtenáře, což může překvapit. Pokud to není přesně to, co chcete, dejte přednost `'/'` nebo `'no_prefix'`.
+
+</Warning>
+
+## Accept-Language {#accept-language}
+
+Hlavička se čte tak, jak ji definuje RFC 9110, a porovnává se s **kódy** lokalizací ve vaší konfiguraci:
+
+- Položky se zkoušejí podle hodnoty `q`, od nejvyšší (`fr;q=0.1, de;q=0.9` → `de`). `q=0` znamená „tento jazyk ne"; položka s poškozeným `q` se ignoruje. `*` neodpovídá ničemu.
+- `_` se čte jako `-` (`en_US` = `en-US`).
+- Pro každou položku: přesný kód, pak kratší tvary (`de-AT` → `de`), pak regionální lokalizace stejného jazyka (`en` → `en-US`). Přesné a kratší tvary nezávisí na pořadí `locales`; mezi několika regionálními shodami vyhrává první v `locales`.
+- Písma se nikdy nekříží: `zh-TW` a `zh-HK` znamenají tradiční, `zh-CN` zjednodušené, takže `zh-CN` nikdy neodpovídá lokalizaci `zh-Hant`.
+- Zakázané lokalizace nikdy neodpovídají.
+
+```ts
+// locales: [{ code: 'en' }, { code: 'de' }, { code: 'zh-Hant' }]
+// 'de-CH,de;q=0.9,en;q=0.8'  → 'de'
+// 'en-GB'                    → 'en'
+// 'zh-TW'                    → 'zh-Hant'
+// 'zh-CN'                    → no match, next source
+```
+
+Detekci z hlavičky vypnete pomocí `autoDetectLanguage: false`; cookie a stav se stále počítají.
+
+## Cookie {#the-cookie}
+
+- **Ve výchozím stavu vypnutá** pro prefixové strategie (`localeCookie: null`). Přesměrování pak fungují jen podle hlavičky a volba se mezi návštěvami nepamatuje. Chcete-li ji pamatovat, nastavte `localeCookie: 'user-locale'`.
+- Při `no_prefix` je to `'user-locale'`, pokud nenastavíte jiný název. `localeCookie: null` ji vypne i tam.
+- Zapisuje se, když návštěvník přepne (`$switchLocale`, `<i18n-switcher>`, `useI18nLocale().setLocale()`), a při serverovém vykreslení stránky pod prefixem (`/fr/about` uloží `fr`; neplatí při `autoDetectPath: '*'` se zapnutými přesměrováními, kde se URL ještě může změnit). Klientská navigace na stránku uloží lokalizaci této stránky také, a to i na stránce výchozí lokalizace bez prefixu; první načtení této URL to nedělá. Při `no_prefix` a v režimu hash ukládá navigace jen změnu. Stránka 404 neukládá nic, pokud na ni nevede `$switchLocale`.
+- Platí jeden rok (`path=/`, `SameSite=Lax`).
+- Při `hashMode` je preference místo toho uložena v cookie `hash-locale`; server i klient čtou tutéž. Server vykreslí tuto lokalizaci a mimo `prefix` nikdy nepřesměrovává; lokalizace v hashi (`/#/de`) má přednost a uplatní se hned po hydrataci. Při `prefix` na `/` žádná stránka není, takže se `/` vykreslí v prohlížeči, který přejde na `/#/de` podle cookie, pak podle jazyka prohlížeče (`autoDetectLanguage`); jakýkoli jiný dokument (`/about`, `/de`) přesměruje do hashe.
+
+Preferenci čtěte a nastavujte pomocí [`useI18nLocale`](/cs/composables/useI18nLocale), ne přímo pomocí `useCookie` nebo `useState`.
+
+## Vlastní detekce {#your-own-detection}
+
+Chcete-li lokalizaci vybírat sami (uživatelské nastavení, subdoména), zavolejte `useI18nLocale().setLocale(code)` v pluginu, který běží před pluginem modulu. Stane se zdrojem 3, stavem aplikace. [Vlastní detekce lokalizace](/cs/guide/custom-auto-detect) obsahuje kompletní postup, včetně vypnutí vestavěné detekce.
+
+## Serverové API trasy {#server-api-routes}
+
+[`useLocaleServerMiddleware`](/cs/guide/server-side-translations) a `useTranslationServerMiddleware` používají vlastní pořadí, protože URL API je lokalizovaná jen zřídka:
+
+1. `?locale=`
+2. parametr trasy `[locale]` nebo prefix lokalizace v cestě
+3. cookie (když je nastavena `localeCookie`)
+4. `Accept-Language` (když je zapnuto `autoDetectLanguage`)
+5. `defaultLocale`
+
+`localeCookie: null` a `autoDetectLanguage: false` vypínají zdroje 3 a 4 i zde.
+
+## Přepsání za běhu {#runtime-overrides}
+
+[Přepsání za běhu](/cs/guide/runtime-overrides) mění seznam, se kterým se zdroje porovnávají:
+
+- Runtime `disabledLocales` se odstraní z každého kroku: cookie nebo hlavička, která některou z nich uvádí, se přeskočí.
+- Runtime `defaultLocale` je krokem 6 při `prefix` a `no_prefix`.
+- Při `prefix_except_default` a `prefix_and_default` je výchozí lokalizace pevně daná při buildu (její stránky jsou trasy bez prefixu). Runtime `defaultLocale` nebo zakázání výchozí lokalizace z buildu se ignoruje s varováním.
+
+## Související {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Vlastní detekce lokalizace" icon="book-open" href="/cs/guide/custom-auto-detect">
+
+</Card>
+
+<Card title="Serverové trasy a API" icon="book-open" href="/cs/guide/server-side-translations">
+
+</Card>
+
+<Card title="useI18nLocale" icon="brackets-curly" href="/cs/composables/useI18nLocale">
+
+</Card>
+
+</CardGroup>

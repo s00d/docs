@@ -1,0 +1,451 @@
+---
+title: "Oppgradering"
+description: "Hva du gjør når du oppgraderer nuxt-i18n-micro: hovedversjonen etter 3.30.3, og v2 til v3."
+---
+
+Denne siden lister opp hva som endres for appen din når du oppgraderer nuxt-i18n-micro og `@i18n-micro/*`-pakkene. Les avsnittet for versjonen du kommer fra, før du oppdaterer avhengigheten. De fleste apper trenger få kodeendringer.
+
+<Tip>
+
+**Kommer du fra `@nuxtjs/i18n`?** — Se [Migrering fra @nuxtjs/i18n](/no/guide/migration).
+
+</Tip>
+
+## Etter 3.30.3: hovedversjonen {#after-3-30-3-the-major-release}
+
+Modulalternativer, `$t`, `$localePath`, `$switchLocale` og de andre hjelpefunksjonene, komponentene, composables og de dokumenterte serververktøyene beholder navnene sine. Det som er endret, er oppførsel, for det meste rettede feil. Adapterpakkene og rutingpakkene har reelle API-brudd: se [Rammeverkspakker](#framework-packages) og [Andre pakker](#other-packages).
+
+### Gjør dette først {#do-this-first}
+
+1. **Sjekk versjonene dine.** Modulen krever Nuxt 3.18 eller nyere og Node 20 eller nyere. Nuxt har sitt eget Node-minimum: Nuxt 4.5 deklarerer `^22.19.0 || ^24.11.0 || >=26.0.0`. `nuxt generate` på selve Nuxt 3.18.0 feiler også i ren Nuxt (`[unstorage] Invalid key: "/"`); 3.21.11 fungerer. `@i18n-micro/react` krever React 18 eller nyere.
+2. **Rett opp de installerte pakkene.**
+   - Fjern `@i18n-micro/hmr`. HMR for oversettelser er innebygd i modulen.
+   - Hvis testene dine importerer `@i18n-micro/test-utils`, legg den til: `npm install -D @i18n-micro/test-utils`. Den installeres ikke lenger sammen med modulen.
+   - Erstatt `nuxt-i18n-micro-cli` med `@i18n-micro/cli`. 28 kommandoer ble til 16, `check` erstatter tre av dem, og avslutningskodene endres: se [CLI-veiledningen](/no/guide/cli#moving-from-nuxt-i18n-micro-cli).
+3. **Søk i koden din** etter oppføringene i tabellen nedenfor.
+4. **Sjekk hva som står foran appen.** Med `baseUrl` på locales bak en proxy, se [Bak en proxy eller et CDN](/no/guide/deployment#behind-a-proxy-or-cdn). Med et CDN, sjekk cache-nøkkelen mot `Vary`-headeren: se [Mellomlagring av HTML](/no/guide/deployment#caching-html). Med `apiBaseClientHost` eller en streng CSP, tillat den nye `preload`-lenken: se [SEO og head-tagger](#seo-and-head-tags).
+5. **Oppdater snapshots.** Head-snapshots får `preload`-lenken, markupen for språkvelgeren er endret ([`<i18n-switcher>` og `<i18n-link>`](#&lt;i18n-switcher>-and-&lt;i18n-link>)), og query-strenger i utdata fra `$localeRoute` kodes annerledes.
+6. **Åpne sidene dine på hvert locale og se etter rå nøkler.** Layouter som brukte nøkler fra forrige sides fil, viser dem nå rått: flytt disse nøklene til rotfilen.
+
+<Warning>
+
+**`switchLocaleRoute` i `@i18n-micro/path-strategy` har mistet sitt første argument** — `switchLocaleRoute(fromLocale, toLocale, route, options)` er nå `switchLocaleRoute(toLocale, route, options)`. **Et gammelt JavaScript-kall feiler ikke: det returnerer et feil resultat,** fordi `fromLocale` leses som målet og `toLocale` som ruten. Bare TypeScript sier fra. Nuxts `$switchLocaleRoute` påvirkes ikke.
+
+</Warning>
+
+| Søk etter | Gjør dette |
+| --- | --- |
+| `switchLocaleRoute(` fra `@i18n-micro/path-strategy` | Fjern det første argumentet, se ovenfor |
+| `i18n-plugin-hooks` eller `i18n-plugin-define` i en `dependsOn` | Bruk `i18n-plugin-loader`. De gamle navnene venter ikke lenger på noe, uten noen feilmelding |
+| `localized-…`-navn i `router.push({ name })` | Send sidens eget navn til `$localeRoute` eller `<i18n-link>` |
+| `.name` eller `.params` på et resultat fra `$localeRoute` eller `$switchLocaleRoute` | Håndter at de mangler, se [Lenker](#links-and-route-objects) |
+| `$localeRoute(x, 'fr')` i `<NuxtLink :to>` eller `router.push`, med `baseUrl` på locales | Bruk `$localePath`, se [Locale-domener](#locale-domains) |
+| `$getI18nConfig().globalLocaleRoutes`, eller `isSSG`, `hmr`, `hooks`, `noPrefixRedirect`, `routeLocales`, `routeDisableMeta` derfra | De er fjernet fra runtime-konfigurasjonen. Bare byggingen leste dem, og selve alternativene er uendret. `ModuleOptionsExtend.isSSG` blir værende som en valgfri, utdatert egenskap som ingenting setter |
+| Server-autoimporter utenom `useLocaleServerMiddleware`, `useTranslationServerMiddleware`, `loadTranslationsFromServer`, `detectCurrentLocale` | Fjern dem. `getI18nServerConfig`, `detectRequestLocale`, `getRequestLocale`, `loadLiveDevTranslations`, `getOrCreateServerTranslationCache`, `DEFAULT_SERVER_CACHE_SIZE` og watcher-hjelperne autoimporteres ikke lenger |
+| `resolveTranslationPayloadMode`, `resolveTranslationPayloadOptions`, `resolveTranslationPayloadPublicDir`, `resolveTranslationPayloadPublicRel`, `shouldCopyTranslationPayloadsToPublic`, `shouldRegisterNitroServerAssets` fra `nuxt-i18n-micro` | Fjern dem. Typen `TranslationPayloadMode` blir værende |
+| `html` på `<i18n-t>` med markup i `params` | Flytt markupen inn i oversettelsen, se [`<i18n-t>`](#&lt;i18n-t>) |
+| `ref` på `<i18n-t>` | Det er en funksjonell komponent, så en `ref` gir ingen instans |
+| `useI18n().$t = stub` og lignende skrivinger | `useI18n()` er ett objekt per app, så en skriving når alle som kaller den. Stub selve `useI18n` |
+| Typen `ModuleHooks` | Omdøpt til `ModuleRuntimeHooks` |
+| `resolveServerLocale`, `resolvePreferredLocale` fra `@i18n-micro/utils/resolve-locale` | Kall `resolveLocale` med `url`, `query`, `state`, `cookie` og `acceptLanguage` |
+
+`detectCurrentLocale` er utdatert. Den fungerer fortsatt og er fortsatt en server-autoimport; bruk [`useLocaleServerMiddleware(event).current`](/no/guide/server-side-translations), som bruker de samme reglene.
+
+17 sider i denne dokumentasjonen er flyttet. De gamle URL-ene omdirigerer, så lenker til dem fortsetter å fungere.
+
+### URL-er og omdirigeringer {#urls-and-redirects}
+
+- **`/en` og `/en/...` gir 404 under `prefix_except_default`** (når `en` er standard), som dokumentert.
+- **Et locale-prefiks med annen store/små bokstaver eller stavemåte gir 404.** `/DE/about` pleide å rendre den tyske ruten på standard-localet, eller omdirigere til `/en/DE/about`. En egen side på den URL-en forblir en side. En catch-all- eller `[slug]`-side er ikke det: `/DE/x` under `[...slug]` og `/DE` ved siden av `[slug]` gir også 404, så en CMS-slug som er lik en locale-kode med andre store/små bokstaver, mister siden sin. Med `ssr: false` svarer ingen server, så `/DE/about` viser den tyske siden.
+- **En sidesti med andre store/små bokstaver omdirigerer til sin egen stavemåte.** `/T/BASIC` var en 200 og er nå en `302` til `/t/basic`.
+- **En ukjent URL forblir en 404.** Med `autoDetectPath: '*'` eller `'no_prefix'` omdirigerer `/nope` ikke lenger først til `/de/nope`. `prefix` beholder omdirigeringen (ingenting serveres uten prefiks der), det samme gjør `/` overalt.
+- **Et annet locales egendefinerte sti, uten prefiks, finner siden sin under `prefix_except_default`.** `/a-propos` var en 404 og er nå en `302` til standard-localets URL (`/about`). Under `prefix` når den samme omdirigeringen nå en levende side (`/en/about`; det var `/en/a-propos`, en 404). `prefix_and_default` forblir en 404.
+- **`prefix` med `redirects: false` svarer 404 på en URL uten prefiks** (`/about` var en `302`), inkludert den opprinnelige URL-en til en side med en egendefinert standardsti. `$localePath('/about')` finner fortsatt den siden.
+- **Under `prefix_except_default` omdirigerer den opprinnelige URL-en til en side med egendefinert standardsti dit,** dynamiske sider inkludert. `/dir/one` var en 404 og er nå en `302` til `/dir-one/one`.
+- **`autoDetectPath: '*'` bruker nå informasjonskapselen og `Accept-Language` også på stier uten prefiks** (`/about` → `/de/about`).
+- **Under `prefix` beholder en URL uten prefiks den besøkendes locale.** Med informasjonskapsel `de` går `/about` og en vanlig `<NuxtLink to="/about">` til `/de/about`, på hver sti, uansett hva `autoDetectPath` sier.
+- **Under `prefix_and_default` er en URL uten prefiks standard-localet.** `/contact` med `Accept-Language: de` pleide å rendre tysk og deretter hydrere engelsk. Den rendrer nå standard-localet; besøkende når tysk via `/de/...`.
+- **Under `no_prefix` rendrer en egendefinert sti sitt eget locale** (`/ueber-uns` er tysk uansett preferanse), og en begrenset side rendres på et locale den betjener. En sti som flere locales deler, rendrer preferansen når den er ett av dem, og under `baseUrl` er den en side på hvert av domenene deres. Disse locales deler én oppføring, `localized-<page>-<first locale>`.
+- **`noPrefixRedirect` går etter den besøkendes locale.** Med informasjonskapsel `de` går `/about` til `/ueber-uns`, og rendrer tysk, ikke til standard-localets `/about-us`. Et locale uten egen egendefinert sti blir på `/about`.
+- **En `routeRules`-omdirigering uten side lokaliseres ikke.** `/de/old` var en tom 200, nå er den en 404: legg til en regel for stien med prefiks om du trenger en. En lenke fra et annet locale til en slik regel beholder stien slik den er skrevet og lander på regelens mål.
+- **Ruteregler når egendefinerte stier.** `/blog/**` gjelder også for `/de/artikel/:slug` når `blog/[slug]` har den stien, og regler kopieres også under `no_prefix`. Et statisk søsken som `/de/artikel/news` matcher også det mønsteret. En regel som allerede er skrevet under et locale-prefiks, forblir slik den er skrevet.
+- **Et locale med `disabled: true` svarer 404 på prefikset sitt** med en gang, og lenker til det blir på siden. Et locale som er deaktivert ved kjøretid, gjør det samme: det pleide å rendres på reserve-localet.
+- **Modulens 404 viser `Page Not Found`** på prefikset til et deaktivert locale og på en verts eget prefiks, der Nuxt sa `Page not found: /de/about`. Statusen er den samme.
+- **`customRegexMatcher` gir ikke lenger 404 på en ekte side** der første segment ser ut som et locale.
+- **Lokaliserte rutenavn er konsistente.** Et barn under en delt locale-oppføring beholder sidens navn, `no_prefix` respekterer `localizedRouteNamePrefix`, og en forelder med et index-barn forblir uten navn.
+- **Sider en modul legger til uten `name`** (`extendPages`) lokaliseres og får et navn, med locale-varianter og `hreflang`. De pleide å forbli ulokaliserte.
+- **En oppføring i `nuxt.config` slår `$defineI18nRoute`,** uansett nøkkelform (`about/team`, `/about/team`, `about-team`). Hvilken som vant, pleide å avhenge av stavemåten.
+- **Nye byggeadvarsler:** en `localeRoutes`-verdi som starter med sin egen locale-kode (`fr: '/fr/article'`), og et barns egendefinerte sti utenfor forelderen.
+- **Hash-modus fungerer under `prefix`.** Dokumentet er `/`, og `/en` eller `/about` omdirigerer inn i hashen.
+- **`/#/de/x` rendrer tysk** under `prefix_except_default` og `prefix_and_default`. Den rendret engelsk med en hydreringsfeil.
+
+### Lenker og ruteobjekter {#links-and-route-objects}
+
+- **Et locale som ikke betjener en side, lenker til sin startside.** `$localeRoute`, `$switchLocalePath` og språkvelgeren returnerer ikke lenger et annet locales side.
+- **En ukjent locale-kode går til standard-localet.** `$localePath(path, 'xx')` og `$localeRoute` pleide å gi `/xx`.
+- **`$localePath` returnerer en streng med et `http(s):`-, `mailto:`- eller `tel:`-skjema som den er, og `path` og `fullPath` i `$localeRoute` bærer den uendret**, så ikke send en ukontrollert verdi (en `?next=`-parameter) til dem som lenkemål. `//host` og nakne navn som `x.com` forblir stier, på denne origin på hvert locale, og ingen lenke de blir til, forlater den: `/de//x.com` til standard-localet er `/x.com`. Omvendte skråstreker teller som skråstreker.
+- **`$localePath` koder en sti:** `/a b` gir `/a%20b`.
+- **`$localeRoute` og `$switchLocaleRoute` returnerer rene objekter,** trygge i `ref`, `reactive`, `useState`, JSON og spredninger. Når en parameter må escapes, er objektet `{ path, fullPath, query, hash }` (`$localeRoute` legger til `href`), uten `name` eller `params`, og URL-en er den samme før og etter en ny innlasting. En vanlig URL har begge. `name` er nytt: de gamle objektene hadde det aldri. Kode som leser `.name` eller `.params`, må håndtere at de mangler, og hvilken form du får, avhenger av verdien.
+- **Under `trailingSlash` returnerer `$switchLocaleRoute` alltid den stiformen,** også vanlige slugs, og serveromdirigeringer følger `trailingSlash`. Resultater og `Location`-headere kan endres under det alternativet.
+- **Query-verdier i utdata fra `$localeRoute` bruker vue-routers koding:** `/` forblir bokstavelig og et mellomrom er `+` (`?redirect=/v2`, det var `%2Fv2`). Den dekodede verdien er den samme, men et snapshot av en slik `href` endres.
+- **En lenke uten sti blir på gjeldende side.** `$localePath('#top')`, `'?p=2'`, `''` og `{ query }` beholder siden de er på; `'#top'` pleide å lese fra nettstedets rot. En naken `'about'` betyr fortsatt `/about`.
+- **Spredninger.** `{ ...route, query }` og `{ ...route, hash }` beholder endringen, også gjennom `$switchRoute`. En ny `path` vinner i `$localeRoute`, `$localePath` og `$switchRoute`. `{ ...route, params }` fungerer på en navngitt rute; på en rute i stiform vinner stien og parameterne ignoreres, med vue-routers utviklingsadvarsel. Bruk `$localeRoute({ name, params })`.
+- **`$switchRoute` blir i appen.** Et locales egen `baseUrl`, `mailto:` og `tel:` forlater den; enhver annen streng er en sti.
+- **`excludePatterns`** matcher hele segmenter (`'/admin'` matcher ikke lenger `/administrator`), og globs er forankret (`/docs/*` matcher ikke lenger `/en/docs/x`). `RegExp`-mønstre når nå kjøretiden; de pleide å gå tapt der. En side de matcher, er ulokalisert: ingen `hreflang`, og standard-localet under `prefix_except_default`. Sjekk mønstrene dine mot [Ekskludere stier](/no/guide/excluding-static-files).
+
+En `%` eller `?` i en parameter overlever ikke en serverrendret ny innlasting på Nuxt 4.5.2, i noen app: det er oppstrøms, ikke modulen.
+
+### Locale-domener {#locale-domains}
+
+- **`locales[].baseUrl` ruter nå forespørsler.** Én bygging betjener alle domener: se [Lag og domener](/no/guide/layers#multiple-domains). Med `baseUrl` satt er et locale for et annet domene en 404 på denne verten (`/en/about` på `example.de`), og lenker til et locale på samme vert er relative. Forespørsler på enhver annen vert, `localhost` inkludert, oppfører seg som før, bortsett fra at canonical og `hreflang` bruker `metaBaseUrl` hvis den er satt, ellers standard-localets `baseUrl`, og ikke forespørselens origin.
+- **Bak en proxy som skriver om `Host`,** faller hver forespørsel tilbake på byggekonfigurasjonen til du setter [`trustForwardedHost`](/no/api/module-options#trustforwardedhost). Den er som standard `false`, i motsetning til `metaTrustForwardedHost`. Se [Bak en proxy eller et CDN](/no/guide/deployment#behind-a-proxy-or-cdn).
+- **`nuxi generate` med `baseUrl` krever `NUXT_I18N_DOMAIN`, én gang per domene.** Uten den advarer byggingen, og disse locales blir lenker uten sider. Se [Statisk nettsted](/no/guide/deployment#static-site-(nuxi-generate)).
+- **En lenke til et locale med `baseUrl` går gjennom `$localePath` eller `<i18n-link>`.** `<NuxtLink :to="$localePath(x, 'fr')">` og `<i18n-link :to="$localeRoute(x, 'fr')">` er den absolutte URL-en, og et klikk går dit. Routeren tar ikke imot noe absolutt objekt: `<NuxtLink :to="$localeRoute(x, 'fr')">` og `router.push($localeRoute(x, 'fr'))` forblir `/https://fr.example.com/...`, en sti i denne appen. På `localhost` eller en forhåndsvisningsvert er hvert locale med `baseUrl` en slik lenke, også det gjeldende. I kode bruker du `navigateTo($localePath(x, 'fr'), { external: true })`.
+- **Startsiden til et domene skrives uten avsluttende skråstrek overalt** (`https://example.de`), i lenker, canonical og `hreflang`.
+- **Under `prefix` beholder en lenke til et annet domene locale-prefikset, med eller uten `baseDefault`.** `https://example.de/de/about`, ikke `https://example.de/about`, som bare omdirigerer.
+- **Under `prefix_except_default` med `baseDefault` på et annet locale enn byggets standard beholder rutene alle prefikser** slik at andre domener kan lenke til dem. `/en` er fortsatt en 404. Bare kode som leser `router.getRoutes()`, ser forskjellen.
+- **Under `prefix_except_default` er en verts eget prefiks en 404 på dens `baseDefault`-vert.** `/de/x` på `de`-verten var en 200.
+- **`$getI18nConfig().locales` inneholder bare det verten betjener.** `linkLocales` inneholder alle, og `$getLocales()` forblir komplett.
+
+### Navigasjon og `$switchLocale` {#navigation-and-$switchlocale}
+
+- **En navigasjon gjelder når den fullføres.** Ordboken, localet, parameterne og head endres i `router.afterEach`, så en avbrutt eller blokkert navigasjon endrer ingenting, og den gamle sidens lenker forblir gyldige mens neste chunk lastes. En `beforeResolve`, en `beforeRouteEnter` eller en senere global guard ser nå den gamle ordboken og det gamle localet. Rutemiddleware påvirkes ikke.
+- **En mislykket chunk beholder gjeldende ordbok.** En 5xx, en nettverksfeil eller en ugyldig body på rotfilen pleide å vise rå nøkler. Den nye siden rendres nå med de gamle strengene, og neste navigasjon prøver på nytt. En 404, eller en statisk verts SPA-skall i filens sted, gir rotordboken frem til neste innlasting.
+- **`$switchLocale` løses til `true` eller `false`** (den løste til ingenting), `false` når localets ordbok ikke ble tatt i bruk. Den er typet `Promise<boolean>`, og `$switchRoute` `Promise<void>`.
+- **`$switchLocale` er et eksplisitt valg.** Ved ankomst lagrer den localet, også på en 404. Hvis navigasjonen blokkeres, avbrytes eller kaster en feil, forblir den lagrede preferansen og state som de var, og feilen kastes videre. En flytting til en annen vert lagrer den først. Under `no_prefix` og i hash-modus står byttet uansett hva navigasjonen gjør. På en side med én URL for alle locales (`excludePatterns`) angres ikke valget, og neste sides URL avgjør: under `prefix_except_default` går en lenke uten prefiks tilbake til standard-localet.
+- **Under `no_prefix` beholder `$switchLocale` siden sin når to sider deler en egendefinert sti,** også med escapede parametere. En ny innlasting av en slik URL, og en `$localeRoute` med en escapet parameter, lander på den første oppføringen.
+- **En klientomdirigering beholder modusen til navigasjonen sin.** En vanlig `<NuxtLink to="/about">` under `prefix` legger til en historikkoppføring i stedet for å overskrive den gjeldende; `router.replace` erstatter fortsatt.
+- **`$setI18nRouteParams` og `useI18nHead` fra serveren overlever hydrering.** Etter å ha landet på `/news/2` lenker språkvelgeren til den oversatte slugen (`/de/news/2-zwei`), ikke `/de/news/2`, også i server-HTML-en, uansett hvor språkvelgeren står, når siden setter parameterne under SSR. De fjernes når en navigasjon til en annen sti fullføres, inkludert `/news/1` til `/news/4`: sett dem på nytt på den nye siden.
+- **`$setI18nRouteParams` lest i setup er bundet til den siden.** Et sent kall fra en side som allerede er forlatt, gjør ingenting. `useNuxtApp().$setI18nRouteParams` er nå en accessor, og to lesinger gir to funksjoner. Den har ingen setter: `useI18n().$setI18nRouteParams = fn`, slik en test-stub kan gjøre, kaster en feil i strict mode, så stub selve `useI18n`. I en layout eller `app.vue` er det den vanlige funksjonen, siden ingenting der blir forlatt.
+- **Serveren skriver om lenkene til `<i18n-switcher>` når renderingen avsluttes**, på sider med parametere, fordi en språkvelger i layouten rendres før sidens asynkrone setup. En håndskrevet `$switchLocalePath`-lenke skrives ikke om: se [egendefinerte locale-ruter](/no/guide/custom-locale-routes). Under Nuxts SSR-strømming beholder den første HTML-en URL-ens parametere.
+- **En prop kalt `locale` på en serverkomponent setter renderings-localet**, så `<Greeting :locale="$getLocale()" />` følger URL-en og et bytte. `$getLocale()`, `$localePath` og `$getLocaleName` inne i den følger også propen. Se [oversettelser på serversiden](/no/guide/server-side-translations). Uten propen bruker den fortsatt informasjonskapselen eller standarden.
+- **`keepalive`-sider får parameterne og head tilbake** når man vender tilbake.
+- **En nestet side satt til `false` under `prefix_except_default` har ingen locale-URL.** `/de/parent/kid` med `globalLocaleRoutes: { 'parent-kid': false }` ble servert og er nå en 404: siden blir på `/parent/kid`.
+
+### Locale-deteksjon og informasjonskapselen {#locale-detection-and-the-cookie}
+
+Én prioriteringsrekkefølge overalt, beskrevet i [Locale-deteksjon](/no/guide/locale-detection).
+
+- **`?locale=` gjelder på sider bare under `no_prefix`.** Under prefiksstrategiene avgjør URL-en; `/about?locale=de` rendrer ikke lenger tysk under `lang="en"`. `?locale=de&locale=fr` leser den første verdien, det var `"de,fr"`.
+- **`Accept-Language` respekterer `q`-verdier** (`fr;q=0.1, de;q=0.9` → `de`; `q=0` utelukker et språk). Regional matching avhenger ikke lenger av rekkefølgen i `locales`, og krysser aldri kinesiske skriftsystemer.
+- **En klientnavigasjon til en side lagrer sidens locale i informasjonskapselen, også på en side uten prefiks for standard-localet.** Med `localeCookie` satt har en besøkende som klikker på en lenke til `/about`, nå `user-locale=en`, og en senere endring av nettleserspråket omdirigerer ikke lenger `/`. En første lasting av den URL-en lagrer ingenting. Under `no_prefix` og i hash-modus lagrer en navigasjon bare en endring.
+- **En 404 skriver ingen informasjonskapsel:** verken svaret eller en vanlig klientnavigasjon til den, i noen modus. Under `no_prefix` skriver heller ikke en URL som ser ut til å ha prefiks, noen.
+- **Under `no_prefix` respekteres en eksplisitt `localeCookie: null`.** Den pleide å bli `user-locale`. Sett den i `i18n`-blokken i `nuxt.config`: en `null` i `modules: [[name, opts]]` eller i et lag går fortsatt tapt.
+- **Hash-modus leser bare informasjonskapselen `hash-locale`.** En enslig `user-locale=de` gjelder ikke lenger.
+- **En feilformatert locale-informasjonskapsel ignoreres og forblir som den er,** i stedet for å få hver SSR-side til å feile med 500. Den slettes ikke lenger ved hver forespørsel, noe som også hindret en side med prefiks i å lagre localet sitt.
+- **URL-ens locale går først.** En plugins `setLocale('de')` på `/en/...` laster ikke lenger `de`-ordboken, og en ukjent kode i state ignoreres.
+- **Hjelpefunksjoner for server-API** (`useLocaleServerMiddleware`, `useTranslationServerMiddleware`) bruker én rekkefølge på hver rute: `?locale` → `[locale]`-parameter eller prefiks → informasjonskapsel → header → standard. De respekterer nå `localeCookie: null` og `autoDetectLanguage: false`, og mellomlagrer én ordbok per locale.
+- **Runtime-overstyringer når rutingen.** `NUXT_I18N_DEFAULT_LOCALE` og runtime-`disabledLocales` endrer nå den genererte strategien (et deaktivert locale slutter å rute), og runtime-`disabledLocales` legges til byggets. Under `prefix_except_default` og `prefix_and_default` ignoreres et runtime-`defaultLocale` med en advarsel, fordi rutene uten prefiks for det localet genereres ved bygging. Et runtime-`fallbackLocale` må være et aktivert locale: ellers forkastes det med en advarsel, og byggets verdi gjelder hvis den er aktivert. Se [Runtime-overstyringer](/no/guide/runtime-overrides).
+
+### SEO og head-tagger {#seo-and-head-tags}
+
+- **`dir="auto"` er ikke lenger standard.** Et locale uten `dir` pleide å få `dir="auto"`, noe som gjør parsing av store sider tregere. Nå får et kjent RTL-språk `dir="rtl"`, og alle andre locales får ingen attributt. Dette gjelder Nuxt, `@i18n-micro/vue`, `astro` og `vitepress`. Hvis du setter `dir: 'auto'` på et locale for å beholde det gamle resultatet, koster det omtrent 1 s parsing ved 20 000 elementer: se [Tekstretning](/no/guide/seo#text-direction).
+- **Hver SSR-side har en ny tagg:** `<link rel="preload" as="fetch" crossorigin="anonymous" href="/_locales/...">`, også 404-sider. Med `apiBaseClientHost` ligger `href` på den verten, noe som krever CORS. En streng CSP må tillate den.
+- **`hreflang` lister bare de locales som betjener siden**; `x-default` genereres bare når standard-localet betjener den.
+- **En ulokalisert side har ingen `hreflang` eller `og:locale:alternate`.**
+- **Canonical og `hreflang` inkluderer `app.baseURL`** når origin kommer fra forespørselen. `metaBaseUrl` og `site.url` forblir slik de er skrevet.
+- **404-sider har `<html lang dir>`**, på URL-ens locale. De har ingen canonical, `hreflang`, `og:url`, `og:locale` eller alternativer, også når modulen selv svarer med 404 på en matchet oppføring (`/en/...`). Tagger du sender gjennom `useI18nHead` `replace`, blir værende, så hopp over dem på feilsider.
+- **Canonical, `og:url` og `hreflang` beholder en hvitelistet query** (`/about?page=2`), også på serveren: den ble fjernet under SSR. `page`, `sort`, `filter`, `search`, `q`, `query` og `tag` er hvitelistet som standard; se [`canonicalQueryWhitelist`](/no/api/module-options#canonicalquerywhitelist).
+- **En `X-Forwarded-Host` som ikke kan parses, ignoreres** i stedet for å gi 500 på hver side. Uten brukbar vert, og uten `metaBaseUrl` eller `site.url`, er canonical- og `hreflang`-URL-er i det svaret relative. En `Host` som ikke kan parses, forblir en 500, som i en vanlig Nuxt-app.
+- **`disableMeta` fungerer nå,** både i `$defineI18nRoute` og `routeDisableMeta`, også når det er satt i `nuxt.config`: siden har ingen `hreflang`, canonical eller `og:locale`. `lang` og `dir` blir værende.
+- `useLocaleHead()` returnerer også `build()`, en getter for `useHead(() => build())`.
+- På en vanlig bygging uten `metaBaseUrl` velger `X-Forwarded-Host` fortsatt verten i disse taggene, som før. Lås `metaBaseUrl` hvis origin kan nås direkte: se [Bak en proxy eller et CDN](/no/guide/deployment#behind-a-proxy-or-cdn).
+
+### Oversettelser {#translations}
+
+- **Flettinger er dype på alle nivåer.** Rot-, side- og reservefiler brukte en fletting på 2 nivåer, så `a.b.c` fra en reserve eller roten gikk tapt i kildemodus og i utvikling. Alle moduser gir nå samme ordbok.
+- **Reservekjeder følges til enden** (`fr` → `de` → `en`) i alle moduser.
+- **Fletting går etter locale, ikke etter filtype.** Det aktive localets rotfil slår nå et reserve-locales sidefil. Se [Reserve-locales](/no/guide/translations#fallback-locales).
+- **Et prosjekts `locales`-oppføring slår et lags** for samme `code`; et lag fyller bare hullene.
+- **En side uten egen `pages/<name>/`-mappe leser rotordboken,** også barnesider. Den pleide å få `{}` og vise rå nøkler. Utdataene får en fil per slik side, og `__root/<locale>/data.json` per locale: `/_locales/<any name>/en/data.json` er en 200 med rotnøklene, det var `{}`. Det har betydning for overvåking, for tillatelseslister på statiske verter og for verktøy som leser treet.
+- **`disablePageLocales: true` leser bare rotfilene;** `pages/index` flettes ikke lenger inn.
+- **Nøklene til siden som forlates, slutter å bli slått opp når elementet forlater dokumentet.** Hvis en layout brukte nøkler som bare den forrige sidens fil hadde, flytt dem til rotfilen. En forelders nøkler blir værende mens barnet vises, inkludert en forelder med et `index`-barn, frem til neste navigasjon. Mellom to barn av samme forelder trenger forelderens egne nøkler barnets ordbok eller rotordboken.
+- **`$clearCache()` laster gjeldende sides ordbok på nytt** og beholder den gamle på skjermen til den nye kommer. En mislykket ny innlasting beholder den gamle ordboken, et svar som ble forespurt før tømmingen, forkastes, og en side i overgangen ut forblir oversatt.
+- **`$has(key, route)` respekterer ruten.**
+- **`$loadPageTranslations` på en side som ikke er besøkt ennå, hindrer ikke lenger filen i å lastes.** Filen lastes ved første besøk, og nøklene dine blir liggende oppå den. Siden pleide å vise rå nøkler frem til en ny innlasting.
+- **HMR for oversettelser tar i bruk endringer på stedet**, uten ny innlasting av siden; fjernede nøkler forsvinner, og endringer i roten når hver side.
+- **En ødelagt locale-fil advarer én gang med stien sin, i alle moduser.** Utvikling pleide å kaste en feil og premerged hoppet stille over den, så en app som var avhengig av at utvikling feilet hardt, ser ikke lenger det.
+
+### Flertallsformer og formatering {#plurals-and-formatting}
+
+- `$tc` med et negativt, desimalt eller enormt antall tar den siste formen med det faktiske antallet; `{ count: null }` kaster ikke lenger en feil; en manglende flertallsnøkkel når missing-handleren.
+- `$tdr` gir ekte fremtidige datoer (`in 3 days`, eller `tomorrow` med `numeric: 'auto'`) og `Invalid Date` for ugyldig input. Under ett sekund i fortiden er `0 seconds ago`.
+- **`$tn`, `$td` og `$tdr` går etter `iso`**, slik flertallsformer gjør: `{ code: 'en', iso: 'en-GB' }` formaterer nå datoer som `31/10/2026`. I en locale-kode leses `_` som `-`, så `en_US` kaster ikke lenger en feil, og en kode `Intl` ikke kjenner, formateres som `en` i stedet for å følge maskinens locale. Navngitte formater slås fortsatt opp etter `code`.
+- En `{param}`-plassholder leser bare parameterne du sender (`{constructor}` forblir slik den er skrevet).
+- `{placeholder}`-navn kan inneholde alle tegn unntatt klammeparenteser og mellomrom: `{firstName}`, `{first-name}` og `{user.name}` leses fra `params`. Uten en slik parameter forblir de slik de er skrevet, som før.
+- En `defaultValue` interpoleres, i `$t` og `$tc`: `$t('missing', { n: 1 }, 'Got {n}')` gir `Got 1`, det pleide å gi `Got {n}`. En standardverdi som ikke er en streng, returneres som den er.
+- `$tc` på en tom oversettelse svarer `''`, slik `$t` gjør. Den pleide å svare med standardverdien eller nøkkelen.
+- **Flertallsmaler beholder betydningen sin, med ett unntak.** Tabellen lister alle former. For å få `Intl.PluralRules`-kategorier sier du det med den nye [`=0 `-markøren](/no/api/methods#$tc): `=0 no apples | one apple | {count} apples`.
+
+  | Form | Eksempel (på `uk`) | Før | Nå |
+  | --- | --- | --- | --- |
+  | Enhver mal i et locale med én eller to heltallskategorier (`en`, `de`, `fr`, `es`, `ja`...) | `none \| one \| {count} many` | etter indeks | **uendret** |
+  | Én form per kategori | `one \| few \| many` | etter indeks: 21 → `many` | **uendret**. Legg til markøren for 21 → `one` |
+  | Nullform først, tre former | `none \| one \| many` | etter indeks | **uendret** |
+  | Andre plassholdere | `no items \| {n} item \| {n} items` | etter indeks | **uendret** |
+  | `{count}` i hver form | `{count} many \| {count} one \| {count} few` | etter indeks | **uendret** |
+  | Færre eller flere former enn nedenfor | `a \| b`, `none \| one \| two \| {count} many` | etter indeks | **uendret** |
+  | På `lv`, `prg`, `blo`, `cv`, `ksh`, `lag` | `none \| one \| {count} many` | etter indeks | **uendret** |
+  | Markert med `=0 ` | `=0 none \| one \| many` | markøren ble vist som tekst | nullform, deretter kategorier |
+  | **En nullform uten plassholder, deretter én form per kategori, med `{count}` i hver form som flere antall deler** | `none \| {count} one \| {count} few \| {count} many` | etter indeks: 3 → `3 many`, 21 → `21 many` | **etter kategori**: 3 → `3 few`, 21 → `21 one`. 0, 1, 2 og hvert antall som forblir i `many`, gir samme resultat |
+
+  Den siste formen krever tre eller flere kategorier (`ru`, `uk`, `pl`, `cs`, `sk`, `hr`, `sr`, `lt`, `ro`, `sl`, `he`, `ar`, `cy`...). På `ar` er `one` og `two` enkeltantall, så de to formene trenger ikke noe tall.
+- **En locale-kode `Intl` ikke kjenner, får indeksregelen**, med eller uten markørens kategorier: `ua` følger ikke lenger maskinens locale. Sett `iso`: `{ code: 'ua', iso: 'uk-UA' }` bøyer flertall som ukrainsk, i modulen og i `@i18n-micro/vue`.
+- **En egendefinert `plural`-regel beholder signaturen sin** og får fortsatt locale-koden. Den leser råverdien, så en markert mal når den med `=0 ` på plass, og den får antallet som et `Number`: `1.5` der den pleide å få `1`. Å returnere `null` faller tilbake på den innebygde regelen, som respekterer markøren.
+- **Alternativet `timeZone`.** Sett det (`Europe/Berlin`) for å rendre én kalenderdato på serveren og i alle nettlesere. Det har ingen effekt på `relativeDate`, som avhenger av klokken.
+
+### `<i18n-t>` {#&lt;i18n-t>}
+
+Dette avsnittet dekker `<i18n-t>` i modulen og `I18nT` i `@i18n-micro/vue`. For de andre rammeverkene, se [Rammeverkspakker](#framework-packages).
+
+- **`html` escaper `params`, i alle tilfeller, og ignorerer alle slots.** Bare oversettelsen er pålitelig markup. En parameter som med vilje inneholdt markup, vises nå som tekst: legg markupen i oversettelsen og send dataene som parametere, eller bruk slots uten `html`.
+- **Slots fungerer med `plural`, `number`, `date` og `relativeDate`,** og en `default`-slot mottar `{ translation }` også i de tilfellene. Hver `{name}` fylles, ikke bare den første.
+- **En slot slår en parameter med samme navn.** En parameterverdi som ser ut som en plassholder, forblir tekst. Med en `customPluralRule` eller en egendefinert `plural` returnerer regelen en ferdig streng, så en parameter den interpolerte, kan der bli oppfattet som en plassholder.
+- **`null` betyr ikke satt** for `plural`, `number`, `date` og `relativeDate`. `:plural="null"` pleide å få renderingen til å feile, `:date="null"` rendret 1970.
+- `plural` teller som `$tc`, med `Number`: `1.5` forblir `1.5` og tar den siste formen, den pleide å bli kuttet til `1`; `"2 items"` er `NaN`, det pleide å være `2`; `""` er `0`. En `customPluralRule` ser også `1.5`. Den øvrige kontrakten er uendret: samme argumenter, svaret brukes som det er, `null` rendres tomt.
+- `hideIfEmpty` gjelder for `plural`, `number`, `date` og `relativeDate`. En skjult verdi rendrer en kommentar, ikke en tom tekstnode, så en test som leste `''`, ser `<!---->`.
+- **En manglende nøkkel under `html` er tekst.** Nøkkelen escapes, fordi bare en oversettelse er pålitelig og en nøkkel kan komme fra en forespørsel. En `defaultValue` er din og forblir markup.
+- Med `plural` står en `defaultValue` eller nøkkelen hel ved et bom, som i `$tc`: `a | b` deles ikke lenger.
+- `defaultValue` står i stedet for en manglende nøkkel i alle grener, ikke selve nøkkelen, og en `customPluralRule` får den via getteren sin ved et bom. Den pleide å gjøre noe bare etter `hideIfEmpty`.
+- `<i18n-t>` med `number`, `date` eller `relativeDate` beholder `params`; de flettes inn.
+- Utdata fra `date` og `relativeDate` har `data-allow-mismatch="text"`: en klokke eller tidssone som er forskjellig mellom server og nettleser, gir ikke lenger advarsel under hydrering. Ved siden av en navngitt slot ligger teksten rundt slot-en i sin egen `<span>`, fordi Vue sjekker attributtet bare på et elements eneste tekst.
+- Attributtene `.innerHTML` og `textContent` fjernes sammen med `innerHTML`.
+- `<i18n-t>` og `<i18n-group>` leser den aktive ordboken, slik `$t` gjør, ikke rutens chunk. Fjernede chunks (`cacheMaxSize`) viser ikke lenger rå nøkler. En side i overgangen ut leser nå det `$t` leser der: den nye sidens ordbok, med fallback til sin egen ved bom, så en nøkkel begge sidene definerer, viser den nye teksten, og etter et locale-bytte vises sidens egne nøkler rått til den avmonteres.
+
+### `<i18n-switcher>` og `<i18n-link>` {#&lt;i18n-switcher>-and-&lt;i18n-link>}
+
+- **Et klikk på en lenke i språkvelgeren er én navigasjon.** Det er en vanlig `<a>` som kaller `$switchLocale`, ikke en `NuxtLink` pluss en klikkhåndterer, så `router-link-active`-klassene er borte. `href` har fortsatt `app.baseURL`, og lenken for gjeldende locale har fortsatt `aria-current="page"`. Ctrl/cmd-klikk åpner en ny fane og lar denne fanen være i fred. Lenker beholder query og hash.
+- Knappen er `type="button"`, så den sender ikke lenger inn et omsluttende skjema, og har `aria-expanded`. `aria-haspopup` er fjernet, i modulen, `@i18n-micro/vue` og `@i18n-micro/astro`: den lovet en meny, og listen består av lenker. Escape og et klikk utenfor lukker nedtrekksmenyen; to språkvelgere blir ikke lenger stående åpne samtidig.
+- Wrapperen og nedtrekksmenyen har klassene `i18n-switcher-wrapper` og `i18n-switcher-dropdown`; knappen har `i18n-switcher-button` i tillegg til `language-switcher`, og etiketten ligger i en `<span>`. Standardstilene bruker logiske CSS-egenskaper (`inset-inline-start`, `margin-inline-start`), og pilen er `▾`. Nedtrekksmenyen har `z-index: 1000` (den var 10), `min-width: 150px` og en `box-shadow`, wrapperen `vertical-align: middle`. Hver lenke har `lang`, og `dir` når localet angir det.
+- `<i18n-link>`: `https://`, `mailto:` og `tel:` matches uavhengig av store/små bokstaver (`HTTPS://x.com`, `Mailto:`). En naken `report.pdf` eller `index.html` er en rute, ikke `https://report.pdf`; `example.com` og `example.com:8080` forblir eksterne. En filendelse som også er et toppnivådomene (`example.md`, `x.zip`), regnes som en fil: skriv `https://`. `activeStyle` ignorerer en avsluttende skråstrek, query og hash. Den er nå typet `CSSProperties`, så noen typede verdier kan trenge en endring.
+
+### Hooks, plugins og typer {#hooks-plugins-and-types}
+
+- **`i18n:register` kjører ved `app:created` ved oppstart,** etter alle plugins i stedet for mellom dem. En plugin med `order` over 1 eller `enforce: 'post'` får nå også abonnenten sin kalt ved oppstart, men leser ikke lenger registrerte nøkler i sin egen `setup`. Ved navigasjon kjører hooken nå før andre plugins' `router.beforeEach`-guards.
+- **`i18n:register` får localet til siden den fyller.** Under `hashMode` pleide en navigasjon som endrer localet, å sende det gamle, og nøklene havnet i feil chunk.
+- **`i18n:register` er en runtime-hook:** registrer den med `nuxtApp.hook('i18n:register', …)` i en plugin, uten `@ts-expect-error`. Se [Hooks](/no/api/events).
+- **`hooks: false` og `define: false`** slår fortsatt av sine deler.
+- **Med `plugin: false` forblir `$defineI18nRoute` kallbar** og gjør ingenting ved kjøretid. Den pleide å krasje siden.
+- Alternativet `hooks` dokumenterer ikke lenger `i18n:beforeLocaleSwitch` / `i18n:afterLocaleSwitch`; de ble aldri sendt ut.
+- `const { $defineI18nRoute } = useNuxtApp()` i en side fungerer nå med konfigurasjoner som bruker variabler.
+- `useI18n()` har flere nøkler: `clearCache`, `pluralFunc`, `pluralLocale`. `clearCache` er med i typen.
+- `$getRouteName(route)` svarer for ruten den får. Den returnerte en tom streng.
+- `useI18nLocale()` fjerner `getLocaleWithServerFallback(serverLocale)`: skriv `getPreferredLocale() ?? serverLocale ?? null`.
+- **`$getI18nConfig()` er skrivebeskyttet på serveren i utvikling.** En skriving kaster en feil der, og i produksjon ville den nådd hver forespørsel.
+
+### Server, bygging og utrulling {#server,-build-and-deployment}
+
+- **En sides payload-fil inneholder bare det som skiller seg fra localets rot.** Klienten laster roten én gang og fletter hver side over den, så disk- og Edge-bunter krymper, og en andre side koster en brøkdel av den første. `premerged` skriver nå `__root/<locale>/data.json`, og `/_locales/<page>/<locale>/data.json` inneholder bare differansen: alt som leser disse filene direkte, må flette de to. En fullstendig ordbok er fortsatt en gyldig fil, så en vert eller `source`-modus som serverer en slik, fortsetter å fungere.
+- **Ordbokfiler mellomlagres etter versjon.** En URL med gjeldende `?v=` låses i ett år på en Node-server, andre URL-er revalideres, og en verts statiske kopi svarer `max-age=60`: se [Cache-headere](/no/guide/deployment#cache-headers-and-datebuild). `httpCacheControl: false` beholder `max-age=0`. En oversettelse som endres uten ny bygging, når en nettleser bare når `v` flytter seg: sett `NUXT_I18N_DATE_BUILD`.
+- **Ordbøker følger `app.cdnURL`.** Nettleseren henter offentlige payload-filer fra `<cdnURL>/_locales/...`, der den brukte `app.baseURL`: CDN-et må inneholde `_locales/` og tillate nettstedets origin (CORS). Se [App-baseURL og payload-verter](/no/guide/deployment#app-baseurl-and-payload-hosts).
+- **SSR ber ikke lenger om `/_locales` over HTTP,** så en servermiddleware eller en logg på den ruten slutter å se renderingens lesinger. En ekstern `apiBaseServerHost` går fortsatt over HTTP.
+- **En mislykket lesing blir ikke lenger hengende, og det gjør heller ikke en 404.** En 404 fra en vert betyr at den ikke har noen slik fil: renderingen viser rotordboken, slik nettleseren gjør, ingenting beholdes, og filen leses når den dukker opp. Enhver annen feil, en 200 som ikke er et JSON-objekt, eller en uleselig eller korrupt lokal fil havner ikke i noen cache, og neste forespørsel leser på nytt: en siderendering logger en advarsel, viser rå nøkler og svarer `503` med `no-store` og `Retry-After`, slik at en ruteregel eller et CDN ikke beholder noe av det mens nettleseren fortsatt leser ordboken ved hydrering, `/_locales/...` svarer `503` med `no-store`, og `useTranslationServerMiddleware` gir en `t` som svarer med nøkkelen eller standardverdien. Under et avbrudd når hver forespørsel verten, og en vert som ikke sender noen svarheadere på 60 sekunder, får lesingen til å feile. En langsom nedlasting av en stor fil har ingen grense. Se [Når en ordbok ikke kan leses](/no/guide/deployment#when-a-dictionary-cannot-be-read). `/_locales` sender også den 404-en videre, der den svarte `200 {}`.
+- **En prerendering som ikke kan laste ordboken sin, feiler,** og det gjør også en der verten verken har sidens fil eller rotfilen. Ruten blir en 500, en advarsel navngir localet og siden, og ingen fil skrives; med Nuxts standard `failOnError` avslutter byggingen med 1. En side uten egen fil over en rotfil prerendres med roten.
+- **En vert satt ved bygging svarer på SSR,** også med den offentlige standardkopien, og på en feilside på en intern sti. Den offentlige filen pleide å svare. `NUXT_I18N_APP_BASE_SERVER_HOST` ved kjøretid når nå `/_locales` og serverlasteren, og renderingen leser begge verter gjennom den lasteren.
+- **En egendefinert `nitro.output.publicDir`, og enhver annen struktur der `public/` ikke ligger ved siden av serveren, bygger inn payloadene.**
+- **`nuxi build --preset <static preset>` prerendrer slik `nuxi generate` gjør,** så den kan skrive flere filer. `nuxi generate` prerendrer hver statiske side på hvert locale som betjener den, lenket eller ikke, med mindre en ruteregel setter `prerender: false`.
+- **`source` eller `publicAssets: false` på statisk output gir advarsel.** Det finnes ingenting for nettleseren å lese.
+- **Innbyggingsadvarselen er nå en størrelsessjekk.** Byggingen advarer bare over en plattforms grense: se [Buntgrenser](/no/guide/deployment#bundle-limits-on-edge).
+- **`Vary` settes overalt der den besøkende avgjør:** på hver side under `no_prefix`, og på `/` og enhver annen URL som kan omdirigere etter preferanse. Den inneholder `Cookie` når en informasjonskapsel er i bruk og, med `autoDetectLanguage`, `Accept-Language`. Sjekk CDN-ets cache-nøkkel: se [Mellomlagring av HTML](/no/guide/deployment#caching-html).
+- **Mellomlagringen av `/_locales` er endret.** Det finnes ingen Nitro-rutecache på `/{apiBaseUrl}/**`, og headeren `s-maxage=60, stale-while-revalidate` er borte. Hvis du var avhengig av den cachen, sett et CDN foran payload-ruten. En tom ordbok er aldri `immutable`.
+- **Servercachen er begrenset som standard:** høyst 1000 oppføringer når `cacheMaxSize` ikke er satt. `cacheTtl` teller fra når en oppføring ble lagret; lesinger forlenger den ikke lenger.
+- **Ny valgfri [`cacheStorage`](/no/guide/performance#shared-cache-for-several-instances):** en ordbokcache som flere instanser deler. Uten den endres ingenting.
+
+### Rammeverkspakker {#framework-packages}
+
+`2.0.0`-pakkene avhenger av hverandre: oppgrader dem sammen.
+
+#### `@i18n-micro/react`, `@i18n-micro/preact`, `@i18n-micro/solid` {#@i18n-micro/react-@i18n-micro/preact-@i18n-micro/solid}
+
+| Pakke | Endring | Tiltak |
+| --- | --- | --- |
+| react | React 18 eller nyere; `use-sync-external-store` er ikke lenger en avhengighet; `react-dom` er en valgfri peer; nye innganger `/client` og `/server` | Bli på 1.x for React 16 eller 17 |
+| react | Rendrer på en server: 1.x feilet med `Missing getServerSnapshot` | — |
+| react, solid | Router-adaptere er flyttet til understien `/router` | `import { createReactRouterAdapter } from '@i18n-micro/react/router'` (Solid: `createSolidRouterAdapter` fra `@i18n-micro/solid/router`) |
+| preact | `createBrowserHistoryAdapter` er flyttet til `@i18n-micro/preact/router`; `createPreactRouterAdapter` er fjernet. Nytt valgfritt tredje argument `ssrUrl` | Endre importen. Under SSR sender du forespørselens URL, ellers rendres lenker og språkvelgeren som på `/` |
+| react, preact | `numberFormats` og `datetimeFormats` respekteres, så utdata fra `tn(n, 'currency')` endres. De pleide å bli ignorert | Sjekk navngitte formater |
+| react, preact | En lenke til `/` eller en locale-rot er aktiv bare ved eksakt treff; `className` på språkvelgeren legges til `i18n-switcher-wrapper` | Sjekk stiler for aktive lenker |
+| alle tre | `I18nT` følger [`<i18n-t>`](#&lt;i18n-t>): `html` escaper parametere, `plural` beholder desimaler, `number`, `date` og `relativeDate` slår en parameter med samme navn, `hideIfEmpty` og `defaultValue` gjelder i alle grener, en skjult verdi rendres naken, uten element. Attributtene `dangerouslySetInnerHTML`, `innerHTML` og `textContent` fjernes | Flytt markup fra parametere inn i oversettelsen eller `components` |
+| alle tre | Ny `components`-prop på `I18nT` for rik tekst, barn som Vues default-slot | Se [Rik tekst](/no/integrations/overview#rich-text) |
+| alle tre | `I18nSwitcher` samsvarer med Vue-varianten: `<a href>`-elementer med `aria-current="page"` på gjeldende locale, `▾` med et mellomrom foran, logisk CSS, `language-switcher` på knappen, ingen `aria-haspopup`, klikk bobler, Escape lukker den. En kallers `getLocaleName` vinner over listen også i Solid | Sjekk stiler og tester som så etter `li button` eller `▼` |
+| alle tre | `I18nLink`: en brukers `onClick` og `style` beholdes, et modifisert klikk eller `target` overlates til nettleseren, query og hash teller ikke for aktiv-sjekken. Uten router er et klikk nettleserens eget, og ingen lenke er aktiv | — |
+| react, preact | `I18nLocalesContext`, `I18nDefaultLocaleContext` og `I18nRouterContext` er én `I18nConfigContext`; `I18nContext` inneholder fortsatt instansen | Bruk `I18nProvider`, eller hooks i `useI18nLocales`-stil |
+| solid | Én kontekst: `I18nContext` inneholder `{ i18n, locales, defaultLocale, router }`; de tre andre er borte | Bruk `I18nProvider`, eller hooks i `useI18nLocales`-stil |
+| alle tre | `getCurrentPath` i adapterne har query og hash, så `switchLocale` beholder dem; `resolvePath` beholder dem også. `getRoute().fullPath` har dem også, og en gjentatt nøkkel i `getRoute().query` er en array | Egendefinerte strategier: returner hele stien, lenker sammenlignes etter side |
+| react, preact | `ReactI18n` og `PreactI18n` er runtimens `I18n`; `t` fra `useI18n()` beholder identiteten sin til storen endres; `defaultLocale()` uten verdi er `fallbackLocale`, den pleide å følge localet | — |
+| alle tre | En nestet `I18nProvider` uten `i18n` beholder den ytre instansen; en provider uten noen instans i det hele tatt kaster en feil. I React og Preact kan den i stedet få `createI18n`-alternativene som props. `locales` legger sin `iso` til `localeIso` | — |
+| solid | `SolidI18n` er bygget på runtimen, og pakken avhenger nå av `@i18n-micro/runtime` og publiserer `src/` via en `solid`-eksportbetingelse. `routeMessages`, `loadFromUrl`, `hasTranslation`, `clear` og en `fallbackLocale`-setter er nye. `getCurrentPathAccessor` er fjernet: les et signal i `getCurrentPath`. `useI18n()` kaster ikke lenger en feil uten `locales`, `useI18nLocales` og `useI18nDefaultLocale` svarer `undefined`. Adapteren trenger ikke lenger en reaktiv eier | Fjern accessoren fra egendefinerte strategier |
+
+#### `@i18n-micro/vue` {#@i18n-micro/vue}
+
+| Endring | Tiltak |
+| --- | --- |
+| `numberFormats` og `datetimeFormats` respekteres, så utdata fra `tn(n, 'currency')` endres | Sjekk navngitte formater |
+| `I18nT` er en funksjonell komponent og følger [`<i18n-t>`](#&lt;i18n-t>); `I18nSwitcher` og `I18nLink` følger [avsnittet ovenfor](#&lt;i18n-switcher>-and-&lt;i18n-link>) | En `ref` på `<I18nT>` gir ikke lenger en komponentinstans |
+| `I18nLink` og `createVueRouterAdapter` slår opp `name`, `query` og `hash`; `#top` blir på denne siden; `switchLocale` og språkvelgeren beholder query og hash | Sjekk tester som låste `/de` for et navngitt mål. Et ukjent `name` kaster nå en feil, slik `RouterLink` gjør |
+| `useLocaleHead` bygger ikke lenger `//de/` med standard `baseUrl: '/'`; canonical og `hreflang` for én side stemmer overens (`/de`, var `/de/`), og hvitelistede query-parametere når `hreflang` og `x-default`, som i Nuxt. Canonical og `og:url` beholder `canonicalQueryWhitelist`-parametere med vue-router-adapteren | — |
+| `I18nRoutingStrategy`: `resolvePath` kan få et location-objekt og en sti med query og hash; ny valgfri `toHref` | Egendefinerte strategier: behold det som følger etter stien |
+
+#### `@i18n-micro/astro` {#@i18n-micro/astro}
+
+| Endring | Tiltak |
+| --- | --- |
+| `i18nIntegration` bunter `translationDir` og installerer middlewaren | Slett en `src/middleware.ts` som bare kopierer oppsettet. For å beholde den, send `middleware: false`, ellers går alternativene tapt (en advarsel sier fra) |
+| `i18nIntegration` **kaster en feil** ved `messages`, `plural`, `missingHandler` og `routingStrategy`, og setter ikke lenger en global rutingstrategi | Send dem til `createI18n` / `createI18nMiddleware` i `src/middleware.ts`, med `middleware: false` |
+| `I18nIntegrationOptions` arver ikke lenger modulens alternativer, så rundt 45 felt som `strategy` og `meta` er TypeScript-feil. De gjorde aldri noe der | Fjern dem |
+| `loadTranslationsFromDir`, `loadTranslationsIntoI18n` er flyttet til `@i18n-micro/astro/node`, som bare er ESM | Endre importen; `virtual:i18n-micro/messages` har de buntede ordbøkene |
+| `getGlobalRoutingStrategy`, `setGlobalRoutingStrategy`, `runWithRoutingStrategy` er fjernet, sammen med sin `AsyncLocalStorage` | Les `Astro.locals.routingStrategy` |
+| `AstroI18n` utvider runtimens `I18n`: `clone()` er `fork()`, alternativet `_storage` er borte. Pakken avhenger av `@i18n-micro/runtime`, ikke lenger av `@i18n-micro/node` | — |
+| Dynamiske sider er én rute: `/blog/hello` er `blog-slug` (var `blog-hello`), `[...path]` er `path` | Flytt `pages/blog-hello/` til `pages/blog-slug/`. En egendefinert `getRouteName` får mønsteret som tredje argument |
+| `base` fungerer: hjelpere returnerer URL-er med den, informasjonskapselen ligger under den | En egen `src/middleware.ts` sender `base: config.base` |
+| URL-en avgjør sidens locale; `autoDetect` er en 302 fra `/` til startsiden for det foretrukne localet; nytt middleware-alternativ `localeCookie`; `redirectToDefault` er implementert | Se [Astro](/no/integrations/astro-package) |
+| En sidevisning fra en side med samme origin på et annet locale skriver locale-informasjonskapselen og omdirigerer ikke; endepunkter, bilder, 404-er, POST-forespørsler og prefetcher gjør det ikke. Serverøyer og actions omdirigerer aldri og har `Vary: Referer` | Sjekk CDN-et ditt hvis det avviser `Set-Cookie`; bak en proxy setter du `security.allowedDomains` |
+| Deaktiverte locales: `config.localeCodes` utelater dem, `/fr` er ikke noe locale, `prepareLocaleRewrite` svarer 404 | — |
+| `prepareLocaleRewrite` og `getLocaleRewritePath` tar en smalere type; alt som gikk gjennom før, går fortsatt gjennom | — |
+| `getI18nProps()` uten nøkler sender alt `t()` kan svare på på siden, med en utviklingsadvarsel over 20 KB; `fallbackLocale` er instansens; `translations` har alltid ruten | Send inn nøklene øya bruker |
+| `useLocaleHead`: standard `baseUrl` er `site`, ellers rot-relativ (`/about`, var `//about`); lenker og metaer har `id`; etter `Astro.rewrite` navngir den den forespurte URL-en | — |
+| `<I18nT html>` escaper `params`; enhver `tag` fungerer; attributter sendes videre; en tom oversettelse rendres tom, ikke som nøkkelen | Flytt en parameter som inneholder markup, inn i oversettelsen |
+| `<I18nLink>` lar eksterne URL-er, `#hash` og `?query` være i fred og beholder en avsluttende skråstrek; `localizePath` det samme, og uten locale bruker den det gjeldende | — |
+| `<I18nSwitcher>` beholder query, ett skript for alle språkvelgere, `hidden` på listen, `data-i18n-switcher` i stedet for de genererte id-ene, ingen `aria-haspopup` | Sjekk selektorer |
+| `@i18n-micro/astro/client` har bare `translate` og `hasTranslation` | Importer adaptere fra `/client/vue`, `/client/react`, `/client/preact`, `/client/svelte` |
+| `client/vue` bunter ikke lenger sin egen Vue: reaktivitet fungerer, og `vue` må være installert | Installer `vue` |
+| Øyer: `has()` er sann for et undertre, `t('')` er `''`, som på serveren; React og Preact får `setLocale`, `setRoute`. `provideI18n` tar en getter for å følge nye props | Bruk `provideI18n(() => props.i18n)` med `transition:persist` |
+| `getLocale`, `getDefaultLocale` kaster en feil uten middlewaren i stedet for å svare `'en'` | — |
+
+#### `@i18n-micro/vitepress` {#@i18n-micro/vitepress}
+
+| Endring | Tiltak |
+| --- | --- |
+| Lenker, språkvelgeren, `push` og `replace` har `site.base`; `resolvePath` og `localizePath` forblir relative til den; `numberFormats`, `datetimeFormats` og `timeZone` når `createI18n` | — |
+| Locale-head med `alternates: false` fjerner også `x-default` | — |
+
+#### `@i18n-micro/node`, `@i18n-micro/runtime` {#@i18n-micro/node-@i18n-micro/runtime}
+
+| Pakke | Endring | Tiltak |
+| --- | --- | --- |
+| node | Laster oversettelser på Node 24 (`dirent.path` er borte der) | — |
+| node | Nye `run(locale, fn)` og `fork(locale)` for forespørsler; `reload()` bytter ut ordbøker i stedet for å tømme dem først, og logger ingen suksessmelding; en mappe som er borte, beholder de gamle, en tømt mappe tømmer dem | — |
+| node, astro, vitepress | Én leser av en locales-mappe: filer med symbolske lenker leses, en manglende mappe gir advarsel, en fil som ikke er et JSON-objekt, rapporteres og hoppes over, en BOM er greit. Meldinger starter med `[i18n]` | Juster tester som låste de gamle meldingene |
+| runtime | `numberFormats` og `datetimeFormats` respekteres, så utdata fra `tn(n, 'currency')` endres; nye alternativer `timeZone`, `now` og `localeIso` | Sjekk navngitte formater |
+| runtime | En skriving til et locale som verken er aktivt eller reserve, varsler ikke | En lytter som vil ha hver forhåndslasting: les storen når localet endres |
+| runtime | Ny `fork(locale)`; `storage` er en getter; `loadFromUrls` henter parallelt og skriver ingenting hvis én feiler | — |
+| runtime, vue, node, astro | `addRouteTranslations(locale, route, messages, false)` erstatter chunken. Den pleide å flette | Send `true`, eller standarden, for å flette |
+
+### Andre pakker {#other-packages}
+
+Disse er offentlige på npm, men de fleste apper bruker dem bare gjennom modulen.
+
+#### `@i18n-micro/core`, `@i18n-micro/utils` {#@i18n-micro/core-@i18n-micro/utils}
+
+| Pakke | Endring | Tiltak |
+| --- | --- | --- |
+| core | `useTranslationHelper(storage)` er borte | `new TranslationHelper(storage)`. En destrukturert metode mister `this` |
+| core | `TranslationHelper` fjerner `setCache`, `getGeneration`, `lookupIn`; `BaseI18n` fjerner `ensurePinnedChunk`, `invalidatePin`; rutechunks inneholder bare sine egne nøkler, og oppslag faller gjennom til rotchunken | Egendefinerte adaptere: bruk `lookup(chunkKey, key)` |
+| core | `TranslationHelper.hasPageTranslation` er borte | `hasCache(locale, routeName)` |
+| core | `TranslationHelper.loadTranslations` er borte | `mergeTranslation(locale, routeName, data)`; `routeName` har ingen standard, rotchunken er `'index'` |
+| core | `TranslationHelper.loadPageTranslations` er borte | `mergeTranslation(locale, routeName, data)` |
+| core | `BaseI18n.loadRouteTranslationsCore(locale, routeName, translations, merge)` er borte | `loadTranslationsCore(locale, translations, merge, routeName)` |
+| core | `tc` sender antallet som et `Number`, så en egendefinert regel ser `1.5` der den så `1` | — |
+| utils | `resolveI18nConfigWithRuntimeOverrides(base, pub, warn)` er borte | `createI18nConfigResolver(warn)(base, pub)`. Den memoiserer, leser miljøet én gang, og resultatet er fryst i utvikling |
+| utils | Understiene `./route`, `./route-pattern`, `./build`, `./payload-stats`, `./payload-config` er fjernet | De var modulinterne |
+| utils | `mergeRouteTranslationsWithRoot` er borte | `deepMergeTranslationsRecursive`, som fletter på alle dybder |
+| utils | `deepMergeTranslations` er borte | `deepMergeTranslationsRecursive`. Det gamle navnet stoppet ved to nivåer frem til denne utgivelsen |
+| utils | `applyAutoDetectLanguage` er borte | `hasExplicitPreference \|\| !autoDetect ? locale : detectLocaleFromAcceptLanguage(header, validLocales) ?? locale` |
+| utils | `LocaleHeadLink` er en union etter `rel` | Kode som bygger en med en fri `rel`, eller en `alternate` uten `hreflang`, kompilerer ikke lenger |
+
+#### `@i18n-micro/path-strategy`, `@i18n-micro/route-strategy` {#@i18n-micro/path-strategy-@i18n-micro/route-strategy}
+
+| Pakke | Endring | Tiltak |
+| --- | --- | --- |
+| path-strategy | **`switchLocaleRoute(fromLocale, toLocale, route, options)` er `switchLocaleRoute(toLocale, route, options)`. Et gammelt JS-kall returnerer et feil resultat, uten feilmelding** | Fjern det første argumentet |
+| path-strategy | `localeRoute(locale, routeOrPath)` mistet sin tredje parameter, `getRouteBaseName(route)` sin andre. Begge ble ignorert | Fjern dem |
+| path-strategy | Aliaset `Strategy` er fjernet | Bruk `I18nPathStrategy` |
+| path-strategy | `createPathStrategy` bygger ikke lenger absolutte URL-er | Bruk `new DomainPathStrategy(ctx)` når locales har `baseUrl` |
+| path-strategy | Understiene `/prefix`, `/no-prefix`, `/prefix-except-default`, `/prefix-and-default` er fjernet. Borte fra roten: `BasePathStrategy`, `analyzeRoute`, `getRouteBaseName`, `buildLocalizedName`, `isIndexRouteName`, `resolvePathWithParams`. Borte fra strategiene: `getRedirect`, `getCanonicalPath`, `get*`-konfigurasjonsgetterne. Konteksten fjerner `globalLocaleRoutes`, `routeLocales`, `routesLocaleLinks`, `noPrefixRedirect`. `RouterAdapter` krever `getRoutes` | Bygg fra `createPathStrategy` eller de to klassene |
+| route-strategy | `isInternalPath` re-eksporteres ikke lenger | Importer den fra `@i18n-micro/utils/app-path` |
+| route-strategy | Hjelpeeksporter er borte: `buildFullPath`, `buildFullPathNoPrefix`, `buildRouteName`, `extractLocalizedPaths`, `isLocalizationDisabledForPage` med flere. `filesLocaleRoutes` og `fallbackRedirectComponentPath` er fjernet. Nytt: `generateRoutes`, `Rules`, `nameOfPath`, `routeKey` | Bruk `RouteGenerator` eller `generateRoutes` |
+
+#### `@i18n-micro/test-utils`, `@i18n-micro/types-generator`, `@i18n-micro/devtools-ui` {#@i18n-micro/test-utils-@i18n-micro/types-generator-@i18n-micro/devtools-ui}
+
+| Pakke | Endring | Tiltak |
+| --- | --- | --- |
+| test-utils | Mocken er en `BaseI18n`: `tc('a', 1.5)` tar den siste formen, `td('nope')` er `Invalid Date`, `tdr` følger det aktive localet, `t(miss, undefined, '')` er nøkkelen, rotnøkler svarer på en rute, et bom logges ikke lenger | Rett tester som låste noe appen aldri gjorde |
+| test-utils | `settRouteName` og `$settRouteName` er fjernet | Bruk `setRouteName` |
+| test-utils | Strategi-fakens `switchLocaleRoute` følger den nye signaturen | Fjern det første argumentet |
+| test-utils | `isolated` er borte fra `createI18nTestContext` (hver kontekst har alltid vært det); `./publish-smoke` er fjernet | — |
+| types-generator | `I18nTypesPlugin(options)` er en vanlig Vite- og Rollup-plugin: ingen `.vite()`, `.webpack()`, `.esbuild()`. `flattenKeys`, `isPlainTranslationObject` er fjernet; `getTypesString` og `generateTypes` er synkrone; `translationDir` kan være en array | `I18nTypesPlugin.vite(o)` → `I18nTypesPlugin(o)`; for webpack eller esbuild kaller du `generateTypes` i et skript |
+| types-generator | Nøklene er det `t()` leser: objektstier lagt til, `__proto__` og filer utenfor locale-strukturen fjernet, verdier typet etter JSON-en sin. Nuxt-modulen leser `i18n.translationDir`, innebygde alternativer, lag og `additionalTranslationDirs`. `@nuxt/kit` er en valgfri peer, `@nuxt/schema` og `vite` er nye valgfrie peers | — |
+| devtools-ui | `/files` og `/file` er erstattet av `/translations`; en forespørsel på tvers av nettsteder eller fra en fremmed vert er en 403, `/save` krever `application/json`; oppdateringer kommer over Vites socket, ingen polling hvert 2. sekund; Astro bruker `i18nDevToolsIntegration`. `vite` er en valgfri peer | — |
+| devtools-ui | `createBridge` tar et `base`-alternativ; en mislykket lagring til et nåbart endepunkt kaster en feil og rulles tilbake | Send `base` hvis du endret pluginens `base` |
+| devtools-ui | `/save` godtar bare en eksisterende `.json` inne i `translationDir` og oppretter ikke lenger filer | Opprett nye locale-filer selv |
+
+## Fra v2 til v3 {#from-v2-to-v3}
+
+### Fjernede alternativer {#removed-options}
+
+```diff
+ i18n: {
+-  includeDefaultLocaleRoute: true,
++  strategy: 'prefix',
+-  fallbackRedirectComponentPath: '~/components/MyRedirect.vue',
+-  experimental: { hmr: true, previousPageFallback: true },
++  hmr: true,
+ }
+```
+
+- `includeDefaultLocaleRoute: true` er `strategy: 'prefix'`; `false` er standarden `prefix_except_default`.
+- `fallbackRedirectComponentPath` er borte: omdirigeringer skjer på serveren før rendering og i en rutemiddleware på klienten. Egendefinert omdirigeringslogikk legges i en plugin som setter localet, se [Egendefinert locale-deteksjon](/no/guide/custom-auto-detect).
+- `experimental.hmr` er rotalternativet `hmr` (på som standard).
+- `previousPageFallback` er borte: nøklene til siden som forlates, slås opp til overgangen er ferdig, uten noe alternativ.
+
+### Locale-state {#locale-state}
+
+Bruk `useI18nLocale()` i stedet for `useState('i18n-locale')` og `useCookie('user-locale')`:
+
+```diff
+- useState('i18n-locale').value = 'fr'
+- useCookie('user-locale').value = 'fr'
++ useI18nLocale().setLocale('fr') // state and cookie together
+```
+
+### Konfigurasjon ved kjøretid {#config-at-runtime}
+
+Les konfigurasjonen, inkludert runtime-overstyringer, med `$getI18nConfig()`:
+
+```diff
+- const cookieName = useRuntimeConfig().public.i18nConfig?.localeCookie
++ const { $getI18nConfig } = useNuxtApp()
++ const cookieName = $getI18nConfig().localeCookie
+```
+
+### Interne typealiaser {#internal-type-aliases}
+
+Hvis IDE-en din eller `vue-tsc` ikke kan løse opp `#i18n-internal/*`-importer, tilordner du dem i `package.json`. Nuxt løser dem opp ved bygging, så dette trengs sjelden:
+
+```json
+{
+  "imports": {
+    "#i18n-internal/plural": "nuxt-i18n-micro/internals",
+    "#i18n-internal/strategy": "nuxt-i18n-micro/internals",
+    "#i18n-internal/config": "nuxt-i18n-micro/internals"
+  }
+}
+```
+
+## Relatert {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Locale-deteksjon" icon="book-open" href="/no/guide/locale-detection">
+
+</Card>
+
+<Card title="Modulalternativer" icon="brackets-curly" href="/no/api/module-options">
+
+</Card>
+
+<Card title="Endringslogg" icon="arrow-up-right-from-square" href="https://github.com/s00d/nuxt-i18n-micro/blob/main/CHANGELOG.md">
+
+</Card>
+
+</CardGroup>

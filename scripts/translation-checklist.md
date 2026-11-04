@@ -1,0 +1,326 @@
+# Translation checklist
+
+Source files (filesystem walk): 80. Target languages: 37. All target files missing.
+
+## Group 1
+
+- api/events.mdx
+- api/packages/types-generator.mdx
+- api/packages/types.mdx
+- changelog/2024-12-24.mdx
+- guide/excluding-static-files.mdx
+- guide/locale-detection.mdx
+- guide/per-component-translations.mdx
+- guide/strategy.mdx
+- guide/upgrade.mdx
+- integrations/astro-islands.mdx
+- integrations/runtime-package.mdx
+- integrations/vitepress-package.mdx
+
+## Group 2
+
+- api/cli.mdx
+- api/packages/cli.mdx
+- api/packages/devtools-ui.mdx
+- api/packages/path-strategy.mdx
+- api/packages/runtime.mdx
+- api/packages/solid.mdx
+- api/packages/utils.mdx
+- api/packages/vue.mdx
+- changelog/2026-02-04.mdx
+- changelog/2026-05-14.mdx
+- composables/useI18nLocale.mdx
+- integrations/devtools-ui-package.mdx
+- integrations/vue-package.mdx
+
+## Group 3
+
+- api/module-options.mdx
+- api/overview.mdx
+- api/packages/test-utils.mdx
+- api/packages/vitepress.mdx
+- changelog/2025-01-20.mdx
+- changelog/2025-12-07.mdx
+- changelog/2026-07-30-v3-22-0.mdx
+- changelog/2026-07-30-v3-24-0.mdx
+- components/i18n-switcher.mdx
+- guide/devtools.mdx
+- guide/performance.mdx
+- guide/storybook.mdx
+- guide/testing.mdx
+
+## Group 4
+
+- changelog/2025-10-30.mdx
+- changelog/2026-11-03.mdx
+- components/i18n-group.mdx
+- components/i18n-link.mdx
+- components/i18n-t.mdx
+- guide/cli.mdx
+- guide/faq.mdx
+- guide/layers.mdx
+- guide/migration.mdx
+- guide/runtime-overrides.mdx
+- index.mdx
+- integrations/nodejs-package.mdx
+- integrations/react-package.mdx
+- integrations/solid-package.mdx
+
+## Group 5
+
+- api/methods.mdx
+- api/packages/astro.mdx
+- api/packages/core.mdx
+- api/packages/node.mdx
+- api/packages/overview.mdx
+- api/packages/route-strategy.mdx
+- changelog/2025-01-27.mdx
+- changelog/2026-06-25.mdx
+- guide/custom-auto-detect.mdx
+- guide/deployment.mdx
+- guide/getting-started.mdx
+- guide/performance-results.mdx
+- integrations/astro-package.mdx
+- integrations/types-generator.mdx
+
+## Group 6
+
+- api/packages/preact.mdx
+- api/packages/react.mdx
+- changelog/2025-01-10.mdx
+- changelog/2026-05-25.mdx
+- composables/useI18n.mdx
+- composables/useI18nHead.mdx
+- composables/useLocaleHead.mdx
+- guide/crowdin.mdx
+- guide/custom-locale-routes.mdx
+- guide/seo.mdx
+- guide/server-side-translations.mdx
+- guide/translations.mdx
+- integrations/overview.mdx
+- v3.mdx
+
+## Status
+
+- [x] group 1 / ru
+- [x] group 1 / ar
+- [x] group 1 / pt-BR
+- [x] group 1 / fr-CA
+- [x] group 1 / ca
+- [x] group 1 / cn
+- [x] group 1 / zh
+- [x] group 1 / da
+- [x] group 1 / cs
+- [x] group 1 / nl
+- [x] group 1 / fi
+- [x] group 1 / fr
+- [x] group 1 / de
+- [x] group 1 / he
+- [x] group 1 / hi
+- [x] group 1 / hu
+- [x] group 1 / id
+- [x] group 1 / it
+- [x] group 1 / ja
+- [x] group 1 / ko
+- [x] group 1 / lv
+- [x] group 1 / no
+- [x] group 1 / pl
+- [x] group 1 / pt
+- [x] group 1 / ro
+- [x] group 1 / zh-CN
+- [x] group 1 / es
+- [x] group 1 / sv
+- [x] group 1 / tr
+- [x] group 1 / zh-Hant
+- [x] group 1 / zh-Hans
+- [x] group 1 / zh-TW
+- [x] group 1 / uk
+- [x] group 1 / uz
+- [x] group 1 / vi
+- [x] group 1 / jp
+- [x] group 1 / ja-jp
+- [ ] group 2 / ru
+- [ ] group 2 / ar
+- [ ] group 2 / pt-BR
+- [ ] group 2 / fr-CA
+- [ ] group 2 / ca
+- [ ] group 2 / cn
+- [ ] group 2 / zh
+- [ ] group 2 / da
+- [ ] group 2 / cs
+- [ ] group 2 / nl
+- [ ] group 2 / fi
+- [ ] group 2 / fr
+- [ ] group 2 / de
+- [ ] group 2 / he
+- [ ] group 2 / hi
+- [ ] group 2 / hu
+- [ ] group 2 / id
+- [ ] group 2 / it
+- [ ] group 2 / ja
+- [ ] group 2 / ko
+- [ ] group 2 / lv
+- [ ] group 2 / no
+- [ ] group 2 / pl
+- [ ] group 2 / pt
+- [ ] group 2 / ro
+- [ ] group 2 / zh-CN
+- [ ] group 2 / es
+- [ ] group 2 / sv
+- [ ] group 2 / tr
+- [ ] group 2 / zh-Hant
+- [ ] group 2 / zh-Hans
+- [ ] group 2 / zh-TW
+- [ ] group 2 / uk
+- [ ] group 2 / uz
+- [ ] group 2 / vi
+- [ ] group 2 / jp
+- [ ] group 2 / ja-jp
+- [ ] group 3 / ru
+- [ ] group 3 / ar
+- [ ] group 3 / pt-BR
+- [ ] group 3 / fr-CA
+- [ ] group 3 / ca
+- [ ] group 3 / cn
+- [ ] group 3 / zh
+- [ ] group 3 / da
+- [ ] group 3 / cs
+- [ ] group 3 / nl
+- [ ] group 3 / fi
+- [ ] group 3 / fr
+- [ ] group 3 / de
+- [ ] group 3 / he
+- [ ] group 3 / hi
+- [ ] group 3 / hu
+- [ ] group 3 / id
+- [ ] group 3 / it
+- [ ] group 3 / ja
+- [ ] group 3 / ko
+- [ ] group 3 / lv
+- [ ] group 3 / no
+- [ ] group 3 / pl
+- [ ] group 3 / pt
+- [ ] group 3 / ro
+- [ ] group 3 / zh-CN
+- [ ] group 3 / es
+- [ ] group 3 / sv
+- [ ] group 3 / tr
+- [ ] group 3 / zh-Hant
+- [ ] group 3 / zh-Hans
+- [ ] group 3 / zh-TW
+- [ ] group 3 / uk
+- [ ] group 3 / uz
+- [ ] group 3 / vi
+- [ ] group 3 / jp
+- [ ] group 3 / ja-jp
+- [ ] group 4 / ru
+- [ ] group 4 / ar
+- [ ] group 4 / pt-BR
+- [ ] group 4 / fr-CA
+- [ ] group 4 / ca
+- [ ] group 4 / cn
+- [ ] group 4 / zh
+- [ ] group 4 / da
+- [ ] group 4 / cs
+- [ ] group 4 / nl
+- [ ] group 4 / fi
+- [ ] group 4 / fr
+- [ ] group 4 / de
+- [ ] group 4 / he
+- [ ] group 4 / hi
+- [ ] group 4 / hu
+- [ ] group 4 / id
+- [ ] group 4 / it
+- [ ] group 4 / ja
+- [ ] group 4 / ko
+- [ ] group 4 / lv
+- [ ] group 4 / no
+- [ ] group 4 / pl
+- [ ] group 4 / pt
+- [ ] group 4 / ro
+- [ ] group 4 / zh-CN
+- [ ] group 4 / es
+- [ ] group 4 / sv
+- [ ] group 4 / tr
+- [ ] group 4 / zh-Hant
+- [ ] group 4 / zh-Hans
+- [ ] group 4 / zh-TW
+- [ ] group 4 / uk
+- [ ] group 4 / uz
+- [ ] group 4 / vi
+- [ ] group 4 / jp
+- [ ] group 4 / ja-jp
+- [ ] group 5 / ru
+- [ ] group 5 / ar
+- [ ] group 5 / pt-BR
+- [ ] group 5 / fr-CA
+- [ ] group 5 / ca
+- [ ] group 5 / cn
+- [ ] group 5 / zh
+- [ ] group 5 / da
+- [ ] group 5 / cs
+- [ ] group 5 / nl
+- [ ] group 5 / fi
+- [ ] group 5 / fr
+- [ ] group 5 / de
+- [ ] group 5 / he
+- [ ] group 5 / hi
+- [ ] group 5 / hu
+- [ ] group 5 / id
+- [ ] group 5 / it
+- [ ] group 5 / ja
+- [ ] group 5 / ko
+- [ ] group 5 / lv
+- [ ] group 5 / no
+- [ ] group 5 / pl
+- [ ] group 5 / pt
+- [ ] group 5 / ro
+- [ ] group 5 / zh-CN
+- [ ] group 5 / es
+- [ ] group 5 / sv
+- [ ] group 5 / tr
+- [ ] group 5 / zh-Hant
+- [ ] group 5 / zh-Hans
+- [ ] group 5 / zh-TW
+- [ ] group 5 / uk
+- [ ] group 5 / uz
+- [ ] group 5 / vi
+- [ ] group 5 / jp
+- [ ] group 5 / ja-jp
+- [ ] group 6 / ru
+- [ ] group 6 / ar
+- [ ] group 6 / pt-BR
+- [ ] group 6 / fr-CA
+- [ ] group 6 / ca
+- [ ] group 6 / cn
+- [ ] group 6 / zh
+- [ ] group 6 / da
+- [ ] group 6 / cs
+- [ ] group 6 / nl
+- [ ] group 6 / fi
+- [ ] group 6 / fr
+- [ ] group 6 / de
+- [ ] group 6 / he
+- [ ] group 6 / hi
+- [ ] group 6 / hu
+- [ ] group 6 / id
+- [ ] group 6 / it
+- [ ] group 6 / ja
+- [ ] group 6 / ko
+- [ ] group 6 / lv
+- [ ] group 6 / no
+- [ ] group 6 / pl
+- [ ] group 6 / pt
+- [ ] group 6 / ro
+- [ ] group 6 / zh-CN
+- [ ] group 6 / es
+- [ ] group 6 / sv
+- [ ] group 6 / tr
+- [ ] group 6 / zh-Hant
+- [ ] group 6 / zh-Hans
+- [ ] group 6 / zh-TW
+- [ ] group 6 / uk
+- [ ] group 6 / uz
+- [ ] group 6 / vi
+- [ ] group 6 / jp
+- [ ] group 6 / ja-jp

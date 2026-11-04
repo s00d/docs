@@ -1,0 +1,139 @@
+---
+title: "Localen tunnistus"
+description: "Miten sivun tai API-pyynnön locale valitaan: URL, kysely, tila, eväste, Accept-Language ja oletus, sekä milloin vierailija ohjataan uudelleen."
+---
+
+Jokainen pyyntö saa yhden localen, joka valitaan samasta lähdelistasta samassa järjestyksessä sekä palvelimella että selaimessa. Lue tämä, kun päätät, mille kielelle ensikertalaiset vierailijat päätyvät, muistetaanko heidän valintansa ja mitä palvelimesi API näkee. Saat selville etusijajärjestyksen, kunkin strategian tekemän uudelleenohjauksen sekä asetukset, joilla kunkin lähteen voi kytkeä päälle tai pois.
+
+<Tip>
+
+**Esitiedot** — [Reititysstrategiat](/fi/guide/strategy)
+
+</Tip>
+
+## Etusijajärjestys {#the-precedence}
+
+Ensimmäinen lähde, joka nimeää **käytössä olevan** localen, voittaa. Virheellinen tai väärin muotoiltu arvo (tuntematon koodi, rikkinäinen eväste) ohitetaan, ja seuraava lähde ratkaisee.
+
+| # | Lähde | Huomioidaan, kun |
+| --- | --- | --- |
+| 1 | URL-etuliite (`/de/about`) | etuliitestrategiat. Strategioissa `prefix_except_default` ja `prefix_and_default` etuliitteetön URL on oletuslocale |
+| 2 | `?locale=de` | sivut: vain `no_prefix`. Palvelimen API-apufunktiot: aina, ja ennen URL:ää |
+| 3 | Sovelluksen asettama locale-tila (`useI18nLocale().setLocale()`) | URL:ssä ei ole localea |
+| 4 | Eväste | [`localeCookie`](/fi/api/module-options#localecookie) on asetettu (`no_prefix`-strategiassa automaattisesti `'user-locale'`) |
+| 5 | `Accept-Language`-otsake | [`autoDetectLanguage`](/fi/api/module-options#autodetectlanguage) on `true` (oletus) |
+| 6 | [`defaultLocale`](/fi/api/module-options#defaultlocale) | aina |
+
+Etuliitestrategiassa URL siis ratkaisee, mitä sivu näyttää; preferenssilähteet (3–5) ratkaisevat vain sen, minne vierailija **ohjataan uudelleen**, ja vain poluilla, jotka `autoDetectPath` sallii. `no_prefix`-strategiassa ei ole mitään uudelleenohjattavaa, ja preferenssilähteet ratkaisevat, mitä sivu näyttää.
+
+![Päätösvuo: URL:n locale-etuliite renderöi kyseisen localen. Ilman sitä no_prefix renderöi preferenssilähteiden perusteella, prefix_and_default renderöi oletuslocalen, ja prefix tai prefix_except_default ohjaa uudelleen preferenssin mukaan, kun autoDetectPath sallii polun](/images/diagrams/locale-detection.svg)
+
+## Uudelleenohjaukset strategioittain {#redirects-per-strategy}
+
+Uudelleenohjaukset ovat `302`-vastauksia, jotka tehdään palvelimella ennen sivun renderöintiä ja asiakkaan navigoinneissa reittimiddlewarella. Kysely ja hash säilytetään. Asetuksella [`redirects: false`](/fi/api/module-options#redirects) niitä ei tapahdu; väärät etuliitteet antavat silti 404-vastauksen.
+
+Vierailija suosii localea `de` (eväste tai otsake), `defaultLocale: 'en'`, oletusarvo `autoDetectPath: '/'`:
+
+| Pyyntö | `prefix_except_default` | `prefix` | `prefix_and_default` | `no_prefix` |
+| --- | --- | --- | --- | --- |
+| `/` | → `/de` | → `/de` | `/` localella `en` | `/` localella `de` |
+| `/about` | `/about` localella `en` | → `/de/about` | `/about` localella `en` | `/about` localella `de` |
+| `/fr/about` | `/fr/about` | `/fr/about` | `/fr/about` | — |
+| `/en/about` | 404 | `/en/about` | `/en/about` | — |
+
+`prefix_and_default` ei koskaan ohjaa uudelleen: etuliitteetön URL kuuluu oletuslocalelle, ja muut localet ovat etuliitteidensä alla. Vierailijaa, joka suosii localea `en`, ei ohjata uudelleen polusta `/` strategiassa `prefix_except_default`. Kohteissa ei ole loppukauttaviivaa (`/de`, ei `/de/`), ja ne noudattavat mukautettuja polkuja (`/about` → `/de/ueber-uns`).
+
+Aina kun eväste tai otsake ratkaisee (uudelleenohjaus polusta `/`, jokainen sivu `no_prefix`-strategiassa), vastauksessa on `Vary: Cookie, Accept-Language`, jotta CDN pitää vastaukset erillään.
+
+### `autoDetectPath` {#autodetectpath}
+
+Minne preferenssilähteet voivat siirtää vierailijan:
+
+| Arvo | Preferenssi huomioidaan |
+| --- | --- |
+| `'/'` (oletus) | vain polulla `/`. Syvälinkit pysyvät URL:n kielellä |
+| `'no_prefix'` | jokaisella polulla, jossa ei ole locale-etuliitettä (`/about` → `/de/about`) |
+| `'/welcome'` | täsmälleen tällä polulla (loppukauttaviiva ohitetaan) |
+| `'*'` | jokaisella polulla, myös etuliitteellisillä: `/about` ja `/fr/about` → `/de/about`, kun vierailija suosii localea `de` |
+
+- Poluilla, joita se ei salli, etuliitteetöntä URL:ää käsitellään oletuslocalena.
+- `prefix` on poikkeus: siinä ei ole etuliitteettömiä sivuja, joten `/about` menee aina vierailijan localelle (`/de/about` evästeellä `de`, `/en/about` ilman preferenssiä).
+- Arvolla `'*'` palvelin ohittaa sovelluksen tilan, eikä etuliitteellinen URL enää tallenna omaa localeaan evästeeseen; eväste muuttuu, kun vierailija vaihtaa localea `$switchLocale`-funktiolla.
+
+<Warning>
+
+Arvolla `'*'` jaetut linkit avautuvat lukijan kielellä, mikä voi yllättää. Suosi arvoja `'/'` tai `'no_prefix'`, ellei juuri tätä haluta.
+
+</Warning>
+
+## Accept-Language {#accept-language}
+
+Otsake luetaan RFC 9110:n määrittelemällä tavalla ja sitä verrataan konfiguraatiosi locale-**koodeihin**:
+
+- Merkintöjä kokeillaan `q`-arvon mukaan suurimmasta alkaen (`fr;q=0.1, de;q=0.9` → `de`). `q=0` tarkoittaa "ei tätä kieltä"; merkintä, jonka `q` on väärin muotoiltu, ohitetaan. `*` ei vastaa mitään.
+- `_` luetaan merkkinä `-` (`en_US` = `en-US`).
+- Merkinnöittäin: tarkka koodi, sitten lyhyemmät muodot (`de-AT` → `de`), sitten saman kielen alueellinen locale (`en` → `en-US`). Tarkat ja lyhyemmät muodot eivät riipu `locales`-listan järjestyksestä; useiden alueellisten osumien joukosta voittaa ensimmäinen `locales`-listassa.
+- Kirjoitusjärjestelmien rajaa ei koskaan ylitetä: `zh-TW` ja `zh-HK` tarkoittavat perinteistä, `zh-CN` yksinkertaistettua, joten `zh-CN` ei koskaan vastaa `zh-Hant`-localea.
+- Pois käytöstä otetut localet eivät koskaan vastaa.
+
+```ts
+// locales: [{ code: 'en' }, { code: 'de' }, { code: 'zh-Hant' }]
+// 'de-CH,de;q=0.9,en;q=0.8'  → 'de'
+// 'en-GB'                    → 'en'
+// 'zh-TW'                    → 'zh-Hant'
+// 'zh-CN'                    → no match, next source
+```
+
+Kytke otsakkeen perusteella tunnistus pois asetuksella `autoDetectLanguage: false`; eväste ja tila huomioidaan edelleen.
+
+## Eväste {#the-cookie}
+
+- **Oletuksena pois päältä** etuliitestrategioissa (`localeCookie: null`). Uudelleenohjaukset toimivat silloin pelkän otsakkeen perusteella, eikä valintaa muisteta vierailujen välillä. Aseta `localeCookie: 'user-locale'`, jotta se muistetaan.
+- `no_prefix`-strategiassa se on `'user-locale'`, ellet aseta toista nimeä. `localeCookie: null` kytkee sen pois myös siellä.
+- Se kirjoitetaan, kun vierailija vaihtaa localea (`$switchLocale`, `<i18n-switcher>`, `useI18nLocale().setLocale()`), sekä etuliitteen alla olevan sivun palvelinrenderöinnissä (`/fr/about` tallentaa arvon `fr`; ei kuitenkaan asetuksella `autoDetectPath: '*'` uudelleenohjausten ollessa päällä, jolloin URL voi vielä siirtyä). Asiakkaan navigointi sivulle tallentaa myös kyseisen sivun localen, myös oletuslocalen etuliitteettömällä sivulla; kyseisen URL:n ensimmäinen lataus ei tallenna. `no_prefix`-strategiassa ja hash-tilassa navigointi tallentaa vain muutoksen. 404 ei tallenna mitään, ellei `$switchLocale` päädy sille.
+- Se on voimassa vuoden (`path=/`, `SameSite=Lax`).
+- `hashMode`-tilassa preferenssi on sen sijaan `hash-locale`-evästeessä; palvelin ja asiakas lukevat saman evästeen. Palvelin renderöi kyseisen localen eikä `prefix`-strategian ulkopuolella koskaan ohjaa uudelleen; hashissa oleva locale (`/#/de`) voittaa sen ja tulee voimaan heti hydraation jälkeen. `prefix`-strategiassa polulla `/` ei ole sivua, joten `/` renderöidään selaimessa, joka siirtyy osoitteeseen `/#/de` evästeen ja sitten selaimen kielen (`autoDetectLanguage`) perusteella; mikä tahansa muu dokumentti (`/about`, `/de`) ohjataan hashiin.
+
+Lue ja aseta preferenssi [`useI18nLocale`](/fi/composables/useI18nLocale)-composablella, älä suoraan `useCookie`- tai `useState`-funktioilla.
+
+## Oma tunnistus {#your-own-detection}
+
+Jos haluat valita localen itse (käyttäjäasetus, aliverkkotunnus), kutsu `useI18nLocale().setLocale(code)` pluginissa, joka suoritetaan ennen moduulin pluginia. Siitä tulee lähde 3, sovelluksen tila. [Mukautettu localen tunnistus](/fi/guide/custom-auto-detect) sisältää täydellisen ohjeen, mukaan lukien sisäänrakennetun tunnistuksen kytkemisen pois.
+
+## Palvelimen API-reitit {#server-api-routes}
+
+[`useLocaleServerMiddleware`](/fi/guide/server-side-translations) ja `useTranslationServerMiddleware` käyttävät omaa järjestystään, koska API-URL on harvoin lokalisoitu:
+
+1. `?locale=`
+2. `[locale]`-reittiparametri tai locale-etuliite polussa
+3. eväste (kun `localeCookie` on asetettu)
+4. `Accept-Language` (kun `autoDetectLanguage` on päällä)
+5. `defaultLocale`
+
+`localeCookie: null` ja `autoDetectLanguage: false` kytkevät lähteet 3 ja 4 pois myös tässä.
+
+## Ajonaikaiset ohitukset {#runtime-overrides}
+
+[Ajonaikaiset ohitukset](/fi/guide/runtime-overrides) muuttavat listaa, johon lähteitä verrataan:
+
+- Ajonaikaiset `disabledLocales` poistetaan jokaisesta vaiheesta: eväste tai otsake, joka nimeää sellaisen, ohitetaan.
+- Ajonaikainen `defaultLocale` on vaihe 6 strategioissa `prefix` ja `no_prefix`.
+- Strategioissa `prefix_except_default` ja `prefix_and_default` oletuslocale kiinnitetään buildissa (sen sivut ovat etuliitteettömät reitit). Ajonaikainen `defaultLocale` tai buildin oletuslocalen poistaminen käytöstä ohitetaan varoituksen kera.
+
+## Aiheeseen liittyvää {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Mukautettu localen tunnistus" icon="book-open" href="/fi/guide/custom-auto-detect">
+
+</Card>
+
+<Card title="Palvelinreitit ja API" icon="book-open" href="/fi/guide/server-side-translations">
+
+</Card>
+
+<Card title="useI18nLocale" icon="brackets-curly" href="/fi/composables/useI18nLocale">
+
+</Card>
+
+</CardGroup>

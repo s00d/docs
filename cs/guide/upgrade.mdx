@@ -1,0 +1,451 @@
+---
+title: "Upgrade"
+description: "Co dělat při upgradu nuxt-i18n-micro: hlavní vydání po 3.30.3 a přechod z v2 na v3."
+---
+
+Tato stránka uvádí, co se pro vaši aplikaci změní při upgradu nuxt-i18n-micro a jeho balíčků `@i18n-micro/*`. Než zvýšíte verzi závislosti, přečtěte si část pro verzi, ze které přecházíte. Většina aplikací potřebuje jen málo změn v kódu.
+
+<Tip>
+
+**Přecházíte z `@nuxtjs/i18n`?** — Viz [Migrace z @nuxtjs/i18n](/cs/guide/migration).
+
+</Tip>
+
+## Po 3.30.3: hlavní vydání {#after-3-30-3-the-major-release}
+
+Možnosti modulu, `$t`, `$localePath`, `$switchLocale` a ostatní pomocné funkce, komponenty, composables a zdokumentované serverové utility si ponechávají své názvy. Změnilo se chování, většinou šlo o opravy chyb. Balíčky adaptérů a balíčky pro routování mají skutečné změny API, které narušují kompatibilitu: viz [Balíčky pro frameworky](#framework-packages) a [Ostatní balíčky](#other-packages).
+
+### Nejdřív udělejte toto {#do-this-first}
+
+1. **Zkontrolujte verze.** Modul vyžaduje Nuxt 3.18 nebo novější a Node 20 nebo novější. Nuxt má vlastní minimum pro Node: Nuxt 4.5 deklaruje `^22.19.0 || ^24.11.0 || >=26.0.0`. `nuxt generate` na samotném Nuxtu 3.18.0 selhává i v čistém Nuxtu (`[unstorage] Invalid key: "/"`); 3.21.11 funguje. `@i18n-micro/react` vyžaduje React 18 nebo novější.
+2. **Opravte nainstalované balíčky.**
+   - Odstraňte `@i18n-micro/hmr`. HMR překladů je vestavěné v modulu.
+   - Pokud vaše testy importují `@i18n-micro/test-utils`, přidejte ho: `npm install -D @i18n-micro/test-utils`. S modulem se už neinstaluje.
+   - Nahraďte `nuxt-i18n-micro-cli` za `@i18n-micro/cli`. Z 28 příkazů se stalo 16, `check` nahrazuje tři z nich a mění se návratové kódy: viz [průvodce CLI](/cs/guide/cli#moving-from-nuxt-i18n-micro-cli).
+3. **Prohledejte svůj kód** na položky z tabulky níže.
+4. **Zkontrolujte, co stojí před aplikací.** S `baseUrl` u lokalizací za proxy viz [Za proxy nebo CDN](/cs/guide/deployment#behind-a-proxy-or-cdn). S CDN zkontrolujte její klíč cache vůči hlavičce `Vary`: viz [Cachování HTML](/cs/guide/deployment#caching-html). S `apiBaseClientHost` nebo přísnou CSP povolte nový odkaz `preload`: viz [SEO a tagy v head](#seo-and-head-tags).
+5. **Aktualizujte snapshoty.** Snapshoty head získají odkaz `preload`, markup přepínače se změnil ([`<i18n-switcher>` a `<i18n-link>`](#&lt;i18n-switcher>-and-&lt;i18n-link>)) a query řetězce ve výstupu `$localeRoute` se kódují jinak.
+6. **Otevřete své stránky v každé lokalizaci a hledejte surové klíče.** Layouty, které používaly klíče ze souboru předchozí stránky, je nyní zobrazují surově: přesuňte tyto klíče do kořenového souboru.
+
+<Warning>
+
+**`switchLocaleRoute` z `@i18n-micro/path-strategy` přišel o první argument** — `switchLocaleRoute(fromLocale, toLocale, route, options)` je nyní `switchLocaleRoute(toLocale, route, options)`. **Staré volání v JavaScriptu neselže: vrátí špatný výsledek,** protože `fromLocale` se čte jako cíl a `toLocale` jako trasa. Upozorní vás jen TypeScript. `$switchLocaleRoute` v Nuxtu se to netýká.
+
+</Warning>
+
+| Hledejte | Co udělat |
+| --- | --- |
+| `switchLocaleRoute(` z `@i18n-micro/path-strategy` | Odstraňte první argument, viz výše |
+| `i18n-plugin-hooks` nebo `i18n-plugin-define` v `dependsOn` | Použijte `i18n-plugin-loader`. Staré názvy už na nic nečekají, a to bez chyby |
+| Názvy `localized-…` v `router.push({ name })` | Předejte vlastní název stránky do `$localeRoute` nebo `<i18n-link>` |
+| `.name` nebo `.params` na výsledku `$localeRoute` nebo `$switchLocaleRoute` | Ošetřete jejich nepřítomnost, viz [Odkazy](#links-and-route-objects) |
+| `$localeRoute(x, 'fr')` v `<NuxtLink :to>` nebo `router.push`, s `baseUrl` u lokalizací | Použijte `$localePath`, viz [Domény lokalizací](#locale-domains) |
+| `$getI18nConfig().globalLocaleRoutes` nebo z něj `isSSG`, `hmr`, `hooks`, `noPrefixRedirect`, `routeLocales`, `routeDisableMeta` | Z runtime konfigurace zmizely. Četl je jen build a samotné možnosti se nemění. `ModuleOptionsExtend.isSSG` zůstává jako volitelná zastaralá vlastnost, kterou nic nenastavuje |
+| Serverové auto-importy jiné než `useLocaleServerMiddleware`, `useTranslationServerMiddleware`, `loadTranslationsFromServer`, `detectCurrentLocale` | Odstraňte je. `getI18nServerConfig`, `detectRequestLocale`, `getRequestLocale`, `loadLiveDevTranslations`, `getOrCreateServerTranslationCache`, `DEFAULT_SERVER_CACHE_SIZE` a pomocné funkce watcheru se už automaticky neimportují |
+| `resolveTranslationPayloadMode`, `resolveTranslationPayloadOptions`, `resolveTranslationPayloadPublicDir`, `resolveTranslationPayloadPublicRel`, `shouldCopyTranslationPayloadsToPublic`, `shouldRegisterNitroServerAssets` z `nuxt-i18n-micro` | Odstraňte je. Typ `TranslationPayloadMode` zůstává |
+| `html` na `<i18n-t>` s markupem v `params` | Přesuňte markup do překladu, viz [`<i18n-t>`](#&lt;i18n-t>) |
+| `ref` na `<i18n-t>` | Je to funkcionální komponenta, takže `ref` nedává žádnou instanci |
+| `useI18n().$t = stub` a podobné zápisy | `useI18n()` je jeden objekt na aplikaci, takže zápis zasáhne každého volajícího. Stubujte samotné `useI18n` |
+| Typ `ModuleHooks` | Přejmenován na `ModuleRuntimeHooks` |
+| `resolveServerLocale`, `resolvePreferredLocale` z `@i18n-micro/utils/resolve-locale` | Volejte `resolveLocale` s `url`, `query`, `state`, `cookie` a `acceptLanguage` |
+
+`detectCurrentLocale` je zastaralé. Stále funguje a je stále serverovým auto-importem; použijte [`useLocaleServerMiddleware(event).current`](/cs/guide/server-side-translations), které uplatňuje stejná pravidla.
+
+17 stránek této dokumentace se přesunulo. Staré URL přesměrovávají, takže odkazy na ně dál fungují.
+
+### URL a přesměrování {#urls-and-redirects}
+
+- **`/en` a `/en/...` vracejí při `prefix_except_default` 404** (kde `en` je výchozí), jak je zdokumentováno.
+- **Prefix lokalizace v jiné velikosti písmen nebo jiném zápisu vrací 404.** `/DE/about` dříve vykreslilo německou trasu ve výchozí lokalizaci nebo přesměrovalo na `/en/DE/about`. Vlastní stránka na této URL zůstává stránkou. Catch-all nebo stránka `[slug]` takovou stránkou není: `/DE/x` pod `[...slug]` a `/DE` vedle `[slug]` také vrací 404, takže slug z CMS, který se rovná kódu lokalizace v jiné velikosti písmen, přijde o svou stránku. S `ssr: false` neodpovídá žádný server, takže `/DE/about` zobrazí německou stránku.
+- **Cesta stránky v jiné velikosti písmen přesměruje na svůj vlastní zápis.** `/T/BASIC` vracelo 200 a nyní je to `302` na `/t/basic`.
+- **Neznámá URL zůstává 404.** S `autoDetectPath: '*'` nebo `'no_prefix'` už `/nope` nejdřív nepřesměruje na `/de/nope`. `prefix` přesměrování ponechává (nic se tam bez prefixu neobsluhuje), stejně jako `/` všude.
+- **Vlastní cesta jiné lokalizace bez prefixu najde při `prefix_except_default` svou stránku.** `/a-propos` vracelo 404 a nyní je to `302` na URL výchozí lokalizace (`/about`). Při `prefix` totéž přesměrování nyní vede na živou stránku (`/en/about`, dříve `/en/a-propos`, tedy 404). `prefix_and_default` zůstává 404.
+- **`prefix` s `redirects: false` odpovídá na URL bez prefixu 404** (`/about` bylo `302`), včetně původní URL stránky s vlastní výchozí cestou. `$localePath('/about')` tuto stránku stále najde.
+- **Při `prefix_except_default` původní URL stránky s vlastní výchozí cestou na ni přesměruje,** včetně dynamických stránek. `/dir/one` vracelo 404 a nyní je to `302` na `/dir-one/one`.
+- **`autoDetectPath: '*'` nyní uplatňuje cookie a `Accept-Language` i na cesty bez prefixu** (`/about` → `/de/about`).
+- **Při `prefix` si URL bez prefixu ponechá lokalizaci návštěvníka.** S cookie `de` vedou `/about` i obyčejný `<NuxtLink to="/about">` na `/de/about`, na každé cestě, bez ohledu na `autoDetectPath`.
+- **Při `prefix_and_default` je URL bez prefixu výchozí lokalizace.** `/contact` s `Accept-Language: de` dříve vykreslilo němčinu a pak hydratovalo angličtinu. Nyní vykreslí výchozí lokalizaci; k němčině se návštěvníci dostanou přes `/de/...`.
+- **Při `no_prefix` vlastní cesta vykreslí svou vlastní lokalizaci** (`/ueber-uns` je německy při jakékoli preferenci) a omezená stránka se vykreslí v lokalizaci, kterou obsluhuje. Cesta sdílená několika lokalizacemi vykreslí preferenci, pokud je jednou z nich, a při `baseUrl` je stránkou na doméně každé z nich. Tyto lokalizace sdílejí jeden záznam, `localized-<page>-<first locale>`.
+- **`noPrefixRedirect` se řídí lokalizací návštěvníka.** S cookie `de` vede `/about` na `/ueber-uns` a vykreslí němčinu, ne na `/about-us` výchozí lokalizace. Lokalizace bez vlastní cesty zůstane na `/about`.
+- **Přesměrování v `routeRules` bez stránky se nelokalizuje.** `/de/old` vracelo prázdnou 200, nyní je to 404: pokud ho potřebujete, přidejte pravidlo pro cestu s prefixem. Odkaz z jiné lokalizace na takové pravidlo ponechá cestu tak, jak je napsaná, a skončí na cíli pravidla.
+- **Pravidla tras zasahují i vlastní cesty.** `/blog/**` platí i pro `/de/artikel/:slug`, když má `blog/[slug]` tuto cestu, a pravidla se kopírují i při `no_prefix`. Tomuto vzoru odpovídá i statický sourozenec jako `/de/artikel/news`. Pravidlo již zapsané pod prefixem lokalizace zůstává tak, jak je napsané.
+- **Lokalizace s `disabled: true` odpovídá na svém prefixu okamžitě 404** a odkazy na ni zůstávají na stránce. Totéž dělá lokalizace zakázaná za běhu: dříve se vykreslovala v záložní lokalizaci.
+- **Stránka 404 modulu zní `Page Not Found`** na prefixu zakázané lokalizace a na vlastním prefixu hostitele, kde Nuxt psal `Page not found: /de/about`. Stavový kód je stejný.
+- **`customRegexMatcher` už nevrací 404 pro skutečnou stránku,** jejíž první segment vypadá jako lokalizace.
+- **Názvy lokalizovaných tras jsou konzistentní.** Potomek pod sdíleným záznamem lokalizace si ponechá název stránky, `no_prefix` respektuje `localizedRouteNamePrefix` a rodič s potomkem index zůstává bez názvu.
+- **Stránky, které modul přidá bez `name`** (`extendPages`), se lokalizují a dostanou název, s variantami lokalizací a `hreflang`. Dříve zůstávaly nelokalizované.
+- **Položka v `nuxt.config` má přednost před `$defineI18nRoute`,** v jakémkoli tvaru klíče (`about/team`, `/about/team`, `about-team`). Která vyhrála, dříve záviselo na zápisu.
+- **Nová varování při buildu:** hodnota `localeRoutes`, která začíná vlastním kódem lokalizace (`fr: '/fr/article'`), a vlastní cesta potomka mimo jeho rodiče.
+- **Režim hash funguje při `prefix`.** Dokumentem je `/` a `/en` nebo `/about` přesměrují do hashe.
+- **`/#/de/x` se vykreslí německy** při `prefix_except_default` a `prefix_and_default`. Dříve se vykreslilo anglicky s nesouladem při hydrataci.
+
+### Odkazy a objekty tras {#links-and-route-objects}
+
+- **Lokalizace, která stránku neobsluhuje, odkazuje na svou domovskou stránku.** `$localeRoute`, `$switchLocalePath` ani přepínač už nevracejí stránku jiné lokalizace.
+- **Neznámý kód lokalizace vede na výchozí lokalizaci.** `$localePath(path, 'xx')` a `$localeRoute` dříve dávaly `/xx`.
+- **`$localePath` vrací řetězec se schématem `http(s):`, `mailto:` nebo `tel:` beze změny a `path` a `fullPath` z `$localeRoute` ho nesou nezměněný**, takže jim jako cíl odkazu nepředávejte neověřenou hodnotu (parametr `?next=`). `//host` a holé názvy jako `x.com` zůstávají cestami, na tomto originu v každé lokalizaci, a žádný odkaz, na který se změní, ho neopustí: `/de//x.com` do výchozí lokalizace je `/x.com`. Zpětná lomítka se počítají jako lomítka.
+- **`$localePath` kóduje cestu:** `/a b` dá `/a%20b`.
+- **`$localeRoute` a `$switchLocaleRoute` vracejí obyčejné objekty,** bezpečné v `ref`, `reactive`, `useState`, JSON i spreadech. Když parametr potřebuje escapování, objekt je `{ path, fullPath, query, hash }` (`$localeRoute` přidává `href`), bez `name` a `params`, a URL zůstává stejná před opětovným načtením i po něm. Obyčejná URL má obojí. `name` je nové: staré objekty ho nikdy neměly. Kód, který čte `.name` nebo `.params`, musí ošetřit jejich nepřítomnost, a který tvar dostanete, závisí na hodnotě.
+- **Při `trailingSlash` vrací `$switchLocaleRoute` vždy tento tvar cesty,** i u obyčejných slugů, a serverová přesměrování se řídí `trailingSlash`. Výsledky a hlavičky `Location` se při této možnosti mohou změnit.
+- **Hodnoty query ve výstupu `$localeRoute` používají kódování vue-routeru:** `/` zůstává doslovně a mezera je `+` (`?redirect=/v2`, dříve `%2Fv2`). Dekódovaná hodnota je stejná, ale snapshot takového `href` se změní.
+- **Odkaz bez cesty zůstává na aktuální stránce.** `$localePath('#top')`, `'?p=2'`, `''` a `{ query }` ponechávají stránku, na které jsou; `'#top'` se dříve četlo od kořene webu. Holé `'about'` stále znamená `/about`.
+- **Spready.** `{ ...route, query }` a `{ ...route, hash }` změnu zachovají, i přes `$switchRoute`. Nová `path` vyhrává v `$localeRoute`, `$localePath` i `$switchRoute`. `{ ...route, params }` funguje u pojmenované trasy; u trasy ve tvaru cesty vyhrává cesta a parametry se ignorují, s vývojovým varováním vue-routeru. Použijte `$localeRoute({ name, params })`.
+- **`$switchRoute` zůstává v aplikaci.** Vlastní `baseUrl` lokalizace, `mailto:` a `tel:` ji opouštějí; jakýkoli jiný řetězec je cesta.
+- **`excludePatterns`** odpovídají celým segmentům (`'/admin'` už neodpovídá `/administrator`) a globy jsou ukotvené (`/docs/*` už neodpovídá `/en/docs/x`). Vzory `RegExp` se nyní dostanou do runtime; dříve se tam ztrácely. Stránka, které odpovídají, je nelokalizovaná: žádné `hreflang` a při `prefix_except_default` výchozí lokalizace. Zkontrolujte své vzory podle stránky [Vyloučení cest](/cs/guide/excluding-static-files).
+
+`%` nebo `?` v parametru nepřežije serverově vykreslené opětovné načtení na Nuxtu 4.5.2, v jakékoli aplikaci: to je chyba upstreamu, ne modulu.
+
+### Domény lokalizací {#locale-domains}
+
+- **`locales[].baseUrl` nyní směruje požadavky.** Jeden build obsluhuje všechny domény: viz [Vrstvy a domény](/cs/guide/layers#multiple-domains). S nastaveným `baseUrl` je lokalizace jiné domény na tomto hostiteli 404 (`/en/about` na `example.de`) a odkazy na lokalizaci na stejném hostiteli jsou relativní. Požadavky na jakémkoli jiném hostiteli, včetně `localhost`, se chovají jako dříve, s výjimkou toho, že canonical a `hreflang` používají `metaBaseUrl`, pokud je nastaveno, jinak `baseUrl` výchozí lokalizace, a ne origin požadavku.
+- **Za proxy, která přepisuje `Host`,** padá každý požadavek na konfiguraci z buildu, dokud nenastavíte [`trustForwardedHost`](/cs/api/module-options#trustforwardedhost). Výchozí hodnota je `false`, na rozdíl od `metaTrustForwardedHost`. Viz [Za proxy nebo CDN](/cs/guide/deployment#behind-a-proxy-or-cdn).
+- **`nuxi generate` s `baseUrl` vyžaduje `NUXT_I18N_DOMAIN`, jednou pro každou doménu.** Bez něj build varuje a tyto lokalizace jsou odkazy bez stránek. Viz [Statický web](/cs/guide/deployment#static-site-(nuxi-generate)).
+- **Odkaz na lokalizaci s `baseUrl` vede přes `$localePath` nebo `<i18n-link>`.** `<NuxtLink :to="$localePath(x, 'fr')">` a `<i18n-link :to="$localeRoute(x, 'fr')">` jsou touto absolutní URL a kliknutí vede tam. Router nepřijímá absolutní objekt: `<NuxtLink :to="$localeRoute(x, 'fr')">` a `router.push($localeRoute(x, 'fr'))` zůstávají `/https://fr.example.com/...`, tedy cestou této aplikace. Na `localhost` nebo na hostiteli pro náhled je takovým odkazem každá lokalizace s `baseUrl`, i ta aktuální. V kódu použijte `navigateTo($localePath(x, 'fr'), { external: true })`.
+- **Domovská stránka domény se všude píše bez koncového lomítka** (`https://example.de`), v odkazech, canonical i `hreflang`.
+- **Při `prefix` si odkaz na jinou doménu ponechá prefix lokalizace, s `baseDefault` i bez něj.** `https://example.de/de/about`, ne `https://example.de/about`, které jen přesměrovává.
+- **Při `prefix_except_default` s `baseDefault` u jiné lokalizace než výchozí lokalizace buildu si trasy ponechají všechny prefixy,** aby na ně mohly odkazovat jiné domény. `/en` je stále 404. Rozdíl vidí jen kód, který čte `router.getRoutes()`.
+- **Při `prefix_except_default` je vlastní prefix hostitele na jeho hostiteli `baseDefault` 404.** `/de/x` na hostiteli `de` vracelo 200.
+- **`$getI18nConfig().locales` obsahuje jen to, co hostitel obsluhuje.** `linkLocales` obsahuje všechny a `$getLocales()` zůstává úplné.
+
+### Navigace a `$switchLocale` {#navigation-and-$switchlocale}
+
+- **Navigace se uplatní, když se potvrdí.** Slovník, lokalizace, parametry a head se mění v `router.afterEach`, takže zrušená nebo zablokovaná navigace nic nemění a odkazy staré stránky zůstávají platné, zatímco se načítá další chunk. `beforeResolve`, `beforeRouteEnter` nebo pozdější globální guard nyní vidí starý slovník a lokalizaci. Middleware tras se to netýká.
+- **Neúspěšný chunk ponechá aktuální slovník.** 5xx, chyba sítě nebo špatné tělo kořenového souboru dříve zobrazily surové klíče. Nová stránka se nyní vykreslí se starými řetězci a další navigace to zkusí znovu. 404 nebo SPA shell statického hostitele na místě souboru dá kořenový slovník až do dalšího opětovného načtení.
+- **`$switchLocale` se resolvuje na `true` nebo `false`** (dříve se nevracelo nic), `false`, když se slovník lokalizace neuplatnil. Je typováno jako `Promise<boolean>` a `$switchRoute` jako `Promise<void>`.
+- **`$switchLocale` je explicitní volba.** Po příchodu uloží lokalizaci, i na stránce 404. Pokud je navigace zablokována, zrušena nebo vyhodí výjimku, uložená preference i stav zůstanou, jak byly, a výjimka se vyhodí znovu. Přesun na jiného hostitele ji nejdřív uloží. Při `no_prefix` a v režimu hash přepnutí platí bez ohledu na to, co navigace udělá. Na stránce s jednou URL pro všechny lokalizace (`excludePatterns`) se volba nevrací zpět a rozhoduje URL další stránky: při `prefix_except_default` vrátí odkaz bez prefixu výchozí lokalizaci.
+- **Při `no_prefix` si `$switchLocale` ponechá svou stránku, když dvě stránky sdílejí vlastní cestu,** i s escapovanými parametry. Opětovné načtení takové URL a `$localeRoute` s escapovaným parametrem skončí na prvním záznamu.
+- **Klientské přesměrování si ponechá režim své navigace.** Obyčejný `<NuxtLink to="/about">` při `prefix` přidá záznam do historie místo přepsání aktuálního; `router.replace` stále nahrazuje.
+- **`$setI18nRouteParams` a `useI18nHead` ze serveru přežijí hydrataci.** Po příchodu na `/news/2` odkazuje přepínač na přeložený slug (`/de/news/2-zwei`), ne na `/de/news/2`, i v serverovém HTML, ať je přepínač kdekoli, když stránka nastaví parametry během SSR. Zahodí se, když se potvrdí navigace na jinou cestu, včetně `/news/1` na `/news/4`: na nové stránce je nastavte znovu.
+- **`$setI18nRouteParams` přečtené v setup je vázané na danou stránku.** Pozdní volání ze stránky, která už byla opuštěna, nic nedělá. `useNuxtApp().$setI18nRouteParams` je nyní accessor a dvě čtení dají dvě funkce. Nemá setter: `useI18n().$setI18nRouteParams = fn`, jak by to mohl udělat testovací stub, ve striktním režimu vyhodí výjimku, takže stubujte samotné `useI18n`. V layoutu nebo `app.vue` je to obyčejná funkce, protože tam se nic neopouští.
+- **Server přepíše odkazy `<i18n-switcher>` na konci vykreslování**, na stránkách s parametry, protože přepínač v layoutu se vykreslí před asynchronním setupem stránky. Ručně napsaný odkaz `$switchLocalePath` se nepřepisuje: viz [vlastní trasy lokalizací](/cs/guide/custom-locale-routes). Při SSR streamingu Nuxtu si první HTML ponechá parametry z URL.
+- **Prop s názvem `locale` na serverové komponentě nastaví lokalizaci jejího vykreslení**, takže `<Greeting :locale="$getLocale()" />` sleduje URL i přepnutí. `$getLocale()`, `$localePath` a `$getLocaleName` uvnitř ní sledují prop také. Viz [serverové překlady](/cs/guide/server-side-translations). Bez této prop stále používá cookie nebo výchozí hodnotu.
+- **Stránky `keepalive` dostanou po návratu zpět své parametry i head.**
+- **Vnořená stránka nastavená na `false` při `prefix_except_default` nemá URL lokalizace.** `/de/parent/kid` s `globalLocaleRoutes: { 'parent-kid': false }` se obsluhovalo a nyní je to 404: stránka zůstává na `/parent/kid`.
+
+### Detekce lokalizace a cookie {#locale-detection-and-the-cookie}
+
+Všude platí jedno pořadí priorit, popsané na stránce [Detekce lokalizace](/cs/guide/locale-detection).
+
+- **`?locale=` se na stránkách počítá jen při `no_prefix`.** Při prefixových strategiích rozhoduje URL; `/about?locale=de` už nevykreslí němčinu pod `lang="en"`. `?locale=de&locale=fr` přečte první hodnotu, dříve to bylo `"de,fr"`.
+- **`Accept-Language` respektuje hodnoty `q`** (`fr;q=0.1, de;q=0.9` → `de`; `q=0` jazyk vylučuje). Regionální porovnávání už nezávisí na pořadí `locales` a nikdy nekříží čínská písma.
+- **Klientská navigace na stránku uloží její lokalizaci do cookie, i na stránce výchozí lokalizace bez prefixu.** S nastaveným `localeCookie` má návštěvník, který klikne na odkaz na `/about`, nyní `user-locale=en` a pozdější změna jazyka prohlížeče už `/` nepřesměruje. První načtení této URL neukládá nic. Při `no_prefix` a v režimu hash ukládá navigace jen změnu.
+- **Stránka 404 nezapisuje cookie:** ani odpověď, ani obyčejná klientská navigace na ni, v žádném režimu. Při `no_prefix` nezapisuje nic ani URL, která vypadá jako s prefixem.
+- **Při `no_prefix` se respektuje explicitní `localeCookie: null`.** Dříve se z něj stalo `user-locale`. Nastavte ho v bloku `i18n` v `nuxt.config`: `null` v `modules: [[name, opts]]` nebo ve vrstvě se stále ztratí.
+- **Režim hash čte jen cookie `hash-locale`.** Samotné `user-locale=de` se už nepočítá.
+- **Poškozená cookie lokalizace se ignoruje a zůstane, jak je,** místo aby každá SSR stránka selhala s 500. Už se nemaže při každém požadavku, což také bránilo stránce s prefixem uložit svou lokalizaci.
+- **Lokalizace z URL má přednost.** `setLocale('de')` z pluginu na `/en/...` už nenačte slovník `de` a neznámý kód ve stavu se ignoruje.
+- **Serverové pomocné funkce API** (`useLocaleServerMiddleware`, `useTranslationServerMiddleware`) používají na každé trase jedno pořadí: `?locale` → parametr `[locale]` nebo prefix → cookie → hlavička → výchozí. Nyní respektují `localeCookie: null` a `autoDetectLanguage: false` a cachují slovník pro každou lokalizaci.
+- **Přepsání za běhu zasahují routování.** `NUXT_I18N_DEFAULT_LOCALE` a runtime `disabledLocales` nyní mění generovanou strategii (zakázaná lokalizace přestane být routována) a runtime `disabledLocales` se přidávají k těm z buildu. Při `prefix_except_default` a `prefix_and_default` se runtime `defaultLocale` ignoruje s varováním, protože trasy této lokalizace bez prefixu se generují při buildu. Runtime `fallbackLocale` musí být povolená lokalizace: jinak se s varováním zahodí a uplatní se hodnota z buildu, pokud je povolená. Viz [Přepsání za běhu](/cs/guide/runtime-overrides).
+
+### SEO a tagy v head {#seo-and-head-tags}
+
+- **`dir="auto"` už není výchozí.** Lokalizace bez `dir` dříve dostávala `dir="auto"`, což zpomaluje parsování velkých stránek. Nyní známý RTL jazyk dostane `dir="rtl"` a jakákoli jiná lokalizace žádný atribut. To platí pro Nuxt, `@i18n-micro/vue`, `astro` i `vitepress`. Pokud nastavíte `dir: 'auto'` u lokalizace, abyste zachovali starý výstup, stojí to asi 1 s parsování při 20 000 elementech: viz [Směr textu](/cs/guide/seo#text-direction).
+- **Každá SSR stránka má nový tag:** `<link rel="preload" as="fetch" crossorigin="anonymous" href="/_locales/...">`, i stránky 404. S `apiBaseClientHost` je `href` na tomto hostiteli, což vyžaduje CORS. Přísná CSP ho musí povolit.
+- **`hreflang` uvádí jen lokalizace, které stránku obsluhují**; `x-default` se generuje jen tehdy, když ji obsluhuje výchozí lokalizace.
+- **Nelokalizovaná stránka nemá `hreflang` ani `og:locale:alternate`.**
+- **Canonical a `hreflang` obsahují `app.baseURL`**, když origin pochází z požadavku. `metaBaseUrl` a `site.url` zůstávají, jak jsou napsané.
+- **Stránky 404 nesou `<html lang dir>`** v lokalizaci URL. Nemají canonical, `hreflang`, `og:url`, `og:locale` ani alternativy, i když 404 na odpovídajícím záznamu (`/en/...`) vrací sám modul. Tagy, které předáte přes `replace` v `useI18nHead`, zůstávají, takže je na chybových stránkách vynechte.
+- **Canonical, `og:url` a `hreflang` ponechávají query z whitelistu** (`/about?page=2`), i na serveru: během SSR se dříve zahazovala. Ve výchozím stavu jsou na whitelistu `page`, `sort`, `filter`, `search`, `q`, `query` a `tag`; viz [`canonicalQueryWhitelist`](/cs/api/module-options#canonicalquerywhitelist).
+- **`X-Forwarded-Host`, který nelze naparsovat, se ignoruje** místo 500 na každé stránce. Bez použitelného hostitele a bez `metaBaseUrl` nebo `site.url` jsou URL canonical a `hreflang` v této odpovědi relativní. `Host`, který nelze naparsovat, zůstává 500, stejně jako v čisté aplikaci Nuxt.
+- **`disableMeta` nyní funguje,** v `$defineI18nRoute` i v `routeDisableMeta`, i když je nastaveno v `nuxt.config`: stránka nemá `hreflang`, canonical ani `og:locale`. `lang` a `dir` zůstávají.
+- `useLocaleHead()` vrací také `build()`, getter pro `useHead(() => build())`.
+- V obyčejném buildu bez `metaBaseUrl` stále vybírá hostitele v těchto tazích `X-Forwarded-Host`, jako dříve. Pokud je origin dostupný přímo, zafixujte `metaBaseUrl`: viz [Za proxy nebo CDN](/cs/guide/deployment#behind-a-proxy-or-cdn).
+
+### Překlady {#translations}
+
+- **Slučování je hloubkové na každé úrovni.** Kořenové, stránkové a záložní soubory používaly dvouúrovňové slučování, takže `a.b.c` ze záložního nebo kořenového souboru se v režimu source a ve vývoji ztratilo. Všechny režimy nyní dávají stejný slovník.
+- **Řetězce záložních lokalizací se sledují až do konce** (`fr` → `de` → `en`) v každém režimu.
+- **Slučuje se podle lokalizace, ne podle druhu souboru.** Kořenový soubor aktivní lokalizace nyní vyhrává nad stránkovým souborem záložní lokalizace. Viz [Záložní lokalizace](/cs/guide/translations#fallback-locales).
+- **Položka `locales` projektu vyhrává nad položkou vrstvy** pro stejný `code`; vrstva jen doplňuje mezery.
+- **Stránka bez vlastní složky `pages/<name>/` čte kořenový slovník,** i podřízené stránky. Dříve dostávala `{}` a zobrazovala surové klíče. Výstup získá soubor pro každou takovou stránku a `__root/<locale>/data.json` pro každou lokalizaci: `/_locales/<any name>/en/data.json` vrací 200 s kořenovými klíči, dříve to bylo `{}`. To je důležité pro monitoring, pro allow-listy na statických hostitelích a pro nástroje, které strom čtou.
+- **`disablePageLocales: true` čte jen kořenové soubory;** `pages/index` se už nepřimíchává.
+- **Klíče opouštěné stránky se přestanou vyhodnocovat, když její element opustí dokument.** Pokud layout používal klíče, které měl jen soubor předchozí stránky, přesuňte je do kořenového souboru. Klíče rodiče zůstávají, dokud je zobrazen jeho potomek, včetně rodiče s potomkem `index`, až do další navigace. Mezi dvěma potomky jednoho rodiče potřebují vlastní klíče rodiče slovník potomka nebo kořenový slovník.
+- **`$clearCache()` znovu načte slovník aktuální stránky** a ponechá starý na obrazovce, dokud nedorazí nový. Neúspěšné opětovné načtení ponechá starý slovník, odpověď vyžádaná před vymazáním se zahodí a stránka v odchodové transici zůstane přeložená.
+- **`$has(key, route)` respektuje trasu.**
+- **`$loadPageTranslations` na dosud nenavštívené stránce už nebrání načtení jejího souboru.** Soubor se načte při první návštěvě a vaše klíče zůstanou nad ním. Stránka dříve zobrazovala surové klíče až do opětovného načtení.
+- **HMR překladů uplatňuje úpravy na místě**, bez opětovného načtení stránky; odstraněné klíče zmizí a úpravy kořenového souboru se dostanou na každou stránku.
+- **Poškozený soubor lokalizace varuje jednou se svou cestou, v každém režimu.** Vývojový režim dříve vyhazoval výjimku a premerged ho tiše přeskočil, takže aplikace, která spoléhala na tvrdé selhání ve vývoji, to už neuvidí.
+
+### Plurály a formátování {#plurals-and-formatting}
+
+- `$tc` se záporným, desetinným nebo obrovským počtem vezme poslední tvar se skutečným počtem; `{ count: null }` už nevyhazuje výjimku; chybějící klíč plurálu se dostane k handleru chybějících klíčů.
+- `$tdr` dává skutečná budoucí data (`in 3 days` nebo `tomorrow` s `numeric: 'auto'`) a pro neplatný vstup `Invalid Date`. Méně než sekunda v minulosti je `0 seconds ago`.
+- **`$tn`, `$td` a `$tdr` se řídí `iso`**, stejně jako plurály: `{ code: 'en', iso: 'en-GB' }` nyní formátuje data jako `31/10/2026`. V kódu lokalizace se `_` čte jako `-`, takže `en_US` už nevyhazuje výjimku, a kód, který `Intl` nezná, se formátuje jako `en`, místo aby se řídil lokalizací počítače. Pojmenované formáty se stále hledají podle `code`.
+- Zástupný symbol `{param}` čte jen parametry, které předáte (`{constructor}` zůstává, jak je napsáno).
+- Názvy `{placeholder}` mohou obsahovat jakýkoli znak kromě složených závorek a mezer: `{firstName}`, `{first-name}` i `{user.name}` se čtou z `params`. Bez takového parametru zůstávají, jak jsou napsané, jako dříve.
+- `defaultValue` se interpoluje, v `$t` i `$tc`: `$t('missing', { n: 1 }, 'Got {n}')` dá `Got 1`, dříve dávalo `Got {n}`. Výchozí hodnota, která není řetězcem, se vrátí tak, jak je.
+- `$tc` na prázdném překladu odpoví `''`, stejně jako `$t`. Dříve odpovídalo výchozí hodnotou nebo klíčem.
+- **Šablony plurálů si ponechávají svůj význam, s jednou výjimkou.** Tabulka uvádí všechny tvary. Chcete-li kategorie `Intl.PluralRules`, řekněte to novou [značkou `=0 `](/cs/api/methods#$tc): `=0 no apples | one apple | {count} apples`.
+
+  | Tvar | Příklad (v `uk`) | Dříve | Nyní |
+  | --- | --- | --- | --- |
+  | Jakákoli šablona v lokalizaci s jednou nebo dvěma celočíselnými kategoriemi (`en`, `de`, `fr`, `es`, `ja`...) | `none \| one \| {count} many` | podle indexu | **beze změny** |
+  | Jeden tvar pro každou kategorii | `one \| few \| many` | podle indexu: 21 → `many` | **beze změny**. Přidejte značku pro 21 → `one` |
+  | Nejdřív nulový tvar, tři tvary | `none \| one \| many` | podle indexu | **beze změny** |
+  | Jiné zástupné symboly | `no items \| {n} item \| {n} items` | podle indexu | **beze změny** |
+  | `{count}` v každém tvaru | `{count} many \| {count} one \| {count} few` | podle indexu | **beze změny** |
+  | Méně nebo více tvarů než níže | `a \| b`, `none \| one \| two \| {count} many` | podle indexu | **beze změny** |
+  | V `lv`, `prg`, `blo`, `cv`, `ksh`, `lag` | `none \| one \| {count} many` | podle indexu | **beze změny** |
+  | Označeno `=0 ` | `=0 none \| one \| many` | značka se zobrazovala jako text | nulový tvar, pak kategorie |
+  | **Nulový tvar bez zástupného symbolu, pak jeden tvar pro každou kategorii, s `{count}` v každém tvaru, který sdílí několik počtů** | `none \| {count} one \| {count} few \| {count} many` | podle indexu: 3 → `3 many`, 21 → `21 many` | **podle kategorie**: 3 → `3 few`, 21 → `21 one`. 0, 1, 2 a každý počet, který zůstává v `many`, dávají stejný výsledek |
+
+  Poslední tvar vyžaduje tři nebo více kategorií (`ru`, `uk`, `pl`, `cs`, `sk`, `hr`, `sr`, `lt`, `ro`, `sl`, `he`, `ar`, `cy`...). V `ar` jsou `one` a `two` jednotlivé počty, takže tyto dva tvary nepotřebují číslo.
+- **Kód lokalizace, který `Intl` nezná, dostane pravidlo podle indexu**, s kategoriemi značky i bez nich: `ua` se už neřídí lokalizací počítače. Nastavte `iso`: `{ code: 'ua', iso: 'uk-UA' }` skloňuje plurály jako ukrajinštinu, v modulu i v `@i18n-micro/vue`.
+- **Vlastní pravidlo `plural` si ponechává svou signaturu** a stále dostává kód lokalizace. Čte surovou hodnotu, takže označená šablona k němu dorazí s `=0 ` na místě, a počet dostává jako `Number`: `1.5` tam, kde dříve dostávalo `1`. Vrácení `null` se vrátí k vestavěnému pravidlu, které značku respektuje.
+- **Možnost `timeZone`.** Nastavte ji (`Europe/Berlin`), aby se na serveru i v každém prohlížeči vykreslilo jedno kalendářní datum. Nemá vliv na `relativeDate`, které závisí na hodinách.
+
+### `<i18n-t>` {#&lt;i18n-t>}
+
+Tato část pokrývá `<i18n-t>` v modulu a `I18nT` v `@i18n-micro/vue`. Pro ostatní frameworky viz [Balíčky pro frameworky](#framework-packages).
+
+- **`html` escapuje `params`, ve všech případech, a ignoruje všechny sloty.** Důvěryhodným markupem je jen překlad. Parametr, který úmyslně obsahoval markup, se nyní zobrazí jako text: dejte markup do překladu a data předejte jako parametry, nebo použijte sloty bez `html`.
+- **Sloty fungují s `plural`, `number`, `date` a `relativeDate`** a slot `default` dostává `{ translation }` i v těchto případech. Vyplní se každé `{name}`, ne jen první.
+- **Slot vyhrává nad parametrem stejného názvu.** Hodnota parametru, která vypadá jako zástupný symbol, zůstane textem. S `customPluralRule` nebo vlastním `plural` vrací pravidlo hotový řetězec, takže parametr, který interpolovalo, může být považován za zástupný symbol.
+- **`null` znamená nenastaveno** pro `plural`, `number`, `date` a `relativeDate`. `:plural="null"` dříve způsobilo selhání vykreslení, `:date="null"` vykreslilo rok 1970.
+- `plural` počítá jako `$tc`, s `Number`: `1.5` zůstane `1.5` a vezme poslední tvar, dříve se ořízlo na `1`; `"2 items"` je `NaN`, dříve to bylo `2`; `""` je `0`. `customPluralRule` vidí také `1.5`. Jeho ostatní kontrakt se nemění: stejné argumenty, jeho odpověď se použije tak, jak je, `null` vykreslí prázdno.
+- `hideIfEmpty` platí pro `plural`, `number`, `date` a `relativeDate`. Skrytá hodnota vykreslí komentář, ne prázdný textový uzel, takže test, který četl `''`, uvidí `<!---->`.
+- **Chybějící klíč pod `html` je text.** Klíč se escapuje, protože důvěryhodný je jen překlad a klíč může pocházet z požadavku. `defaultValue` je vaše a zůstává markupem.
+- S `plural` zůstává `defaultValue` nebo klíč při nenalezení celý, jako v `$tc`: `a | b` se už nerozděluje.
+- `defaultValue` zastupuje chybějící klíč v každé větvi, ne samotný klíč, a `customPluralRule` ho při nenalezení dostane přes svůj getter. Dříve něco dělalo jen po `hideIfEmpty`.
+- `<i18n-t>` s `number`, `date` nebo `relativeDate` ponechává `params`; přimíchají se.
+- Výstup `date` a `relativeDate` nese `data-allow-mismatch="text"`: hodiny nebo časové pásmo, které se liší mezi serverem a prohlížečem, už při hydrataci nevarují. Vedle pojmenovaného slotu je text kolem slotu ve vlastním `<span>`, protože Vue kontroluje atribut jen u jediného textu elementu.
+- Atributy `.innerHTML` a `textContent` se zahazují spolu s `innerHTML`.
+- `<i18n-t>` a `<i18n-group>` čtou aktivní slovník, stejně jako `$t`, ne chunk trasy. Vyřazené chunky (`cacheMaxSize`) už nezobrazují surové klíče. Stránka v odchodové transici nyní čte to, co tam čte `$t`: slovník nové stránky, při nenalezení se propadne do svého vlastního, takže klíč, který definují obě stránky, zobrazí nový text, a po přepnutí lokalizace se její vlastní klíče zobrazují surově, dokud se neodpojí.
+
+### `<i18n-switcher>` a `<i18n-link>` {#&lt;i18n-switcher>-and-&lt;i18n-link>}
+
+- **Kliknutí na odkaz přepínače je jedna navigace.** Je to obyčejné `<a>`, které volá `$switchLocale`, ne `NuxtLink` plus handler kliknutí, takže třídy `router-link-active` zmizely. `href` stále nese `app.baseURL` a odkaz aktuální lokalizace má stále `aria-current="page"`. Ctrl/cmd-kliknutí otevře novou kartu a tuto kartu nechá být. Odkazy ponechávají query i hash.
+- Tlačítko je `type="button"`, takže už neodesílá okolní formulář, a má `aria-expanded`. `aria-haspopup` zmizelo, v modulu, `@i18n-micro/vue` i `@i18n-micro/astro`: slibovalo menu, a seznam jsou odkazy. Escape a kliknutí mimo rozbalovací nabídku zavřou; dva přepínače už nezůstávají otevřené současně.
+- Obal a rozbalovací nabídka mají třídy `i18n-switcher-wrapper` a `i18n-switcher-dropdown`; tlačítko má `i18n-switcher-button` i `language-switcher` a jeho popisek je v `<span>`. Výchozí styly používají logické CSS vlastnosti (`inset-inline-start`, `margin-inline-start`) a šipka je `▾`. Rozbalovací nabídka má `z-index: 1000` (dříve 10), `min-width: 150px` a `box-shadow`, obal `vertical-align: middle`. Každý odkaz má `lang` a `dir`, pokud ho lokalizace nastavuje.
+- `<i18n-link>`: `https://`, `mailto:` a `tel:` se rozpoznávají v jakékoli velikosti písmen (`HTTPS://x.com`, `Mailto:`). Holé `report.pdf` nebo `index.html` je trasa, ne `https://report.pdf`; `example.com` a `example.com:8080` zůstávají externí. Koncovka souboru, která je zároveň TLD (`example.md`, `x.zip`), se počítá jako soubor: napište `https://`. `activeStyle` ignoruje koncové lomítko, query i hash. Nyní je typováno jako `CSSProperties`, takže některé typované hodnoty mohou vyžadovat změnu.
+
+### Hooky, pluginy a typy {#hooks-plugins-and-types}
+
+- **`i18n:register` se při spuštění spouští v `app:created`,** po všech pluginech místo mezi nimi. Plugin s `order` vyšším než 1 nebo `enforce: 'post'` má nyní svého odběratele zavolaného také při spuštění, ale ve svém vlastním `setup` už registrované klíče nepřečte. Při navigaci se hook nyní spouští před guardy `router.beforeEach` ostatních pluginů.
+- **`i18n:register` dostává lokalizaci stránky, kterou plní.** Při `hashMode` navigace, která mění lokalizaci, dříve předávala tu starou a klíče skončily ve špatném chunku.
+- **`i18n:register` je runtime hook:** registrujte ho pomocí `nuxtApp.hook('i18n:register', …)` v pluginu, bez `@ts-expect-error`. Viz [Hooky](/cs/api/events).
+- **`hooks: false` a `define: false`** stále vypínají své části.
+- **S `plugin: false` zůstává `$defineI18nRoute` volatelné** a za běhu nic nedělá. Dříve shodilo stránku.
+- Možnost `hooks` už nedokumentuje `i18n:beforeLocaleSwitch` / `i18n:afterLocaleSwitch`; nikdy se nevyvolávaly.
+- `const { $defineI18nRoute } = useNuxtApp()` ve stránce nyní funguje s konfiguracemi, které používají proměnné.
+- `useI18n()` má více klíčů: `clearCache`, `pluralFunc`, `pluralLocale`. `clearCache` je v jeho typu.
+- `$getRouteName(route)` odpovídá pro trasu, kterou dostane. Dříve vracelo prázdný řetězec.
+- `useI18nLocale()` odstraňuje `getLocaleWithServerFallback(serverLocale)`: napište `getPreferredLocale() ?? serverLocale ?? null`.
+- **`$getI18nConfig()` je na serveru ve vývojovém režimu jen pro čtení.** Zápis tam vyhodí výjimku a v produkci by zasáhl každý požadavek.
+
+### Server, build a nasazení {#server,-build-and-deployment}
+
+- **Payload soubor stránky obsahuje jen to, čím se liší od kořene lokalizace.** Klient načte kořen jednou a každou stránku na něj přimíchá, takže disk i Edge bundly se zmenší a druhá stránka stojí zlomek té první. `premerged` nyní zapisuje `__root/<locale>/data.json` a `/_locales/<page>/<locale>/data.json` obsahuje jen rozdíl: cokoli, co tyto soubory čte přímo, musí oba sloučit. Úplný slovník je stále platný soubor, takže hostitel nebo režim `source`, který ho obsluhuje, dál funguje.
+- **Soubory slovníků se cachují podle verze.** URL s aktuálním `?v=` je na Node serveru zafixována na rok, ostatní URL se revalidují a statická kopie hostitele odpovídá `max-age=60`: viz [Hlavičky cache](/cs/guide/deployment#cache-headers-and-datebuild). `httpCacheControl: false` ponechá `max-age=0`. Překlad změněný bez nového buildu se do prohlížeče dostane, jen když se `v` posune: nastavte `NUXT_I18N_DATE_BUILD`.
+- **Slovníky se řídí `app.cdnURL`.** Prohlížeč stahuje veřejné payload soubory z `<cdnURL>/_locales/...`, kde dříve používal `app.baseURL`: CDN musí obsahovat `_locales/` a povolit origin vašeho webu (CORS). Viz [App baseURL a hostitelé payloadů](/cs/guide/deployment#app-baseurl-and-payload-hosts).
+- **SSR už nevyžaduje `/_locales` přes HTTP,** takže serverový middleware nebo log na této trase přestane vidět čtení z vykreslování. Externí `apiBaseServerHost` stále jde přes HTTP.
+- **Neúspěšné čtení už neulpívá, a stejně tak ani 404.** 404 od hostitele znamená, že takový soubor nemá: vykreslení zobrazí kořenový slovník, stejně jako prohlížeč, nic se neuchovává a soubor se přečte, jakmile se objeví. Jakékoli jiné selhání, 200, které není JSON objektem, nebo nečitelný či poškozený lokální soubor se nedostane do žádné cache a další požadavek čte znovu: vykreslení stránky zapíše varování, zobrazí surové klíče a odpoví `503` s `no-store` a `Retry-After`, takže pravidlo trasy ani CDN z toho nic neuchovají, zatímco prohlížeč stále čte slovník při hydrataci, `/_locales/...` odpovídá `503` s `no-store` a `useTranslationServerMiddleware` dává `t`, které odpovídá klíčem nebo výchozí hodnotou. Během výpadku se každý požadavek dostane k hostiteli a hostitel, který 60 sekund neposílá žádné hlavičky odpovědi, způsobí selhání čtení. Pomalé stahování velkého souboru nemá žádný limit. Viz [Když slovník nelze přečíst](/cs/guide/deployment#when-a-dictionary-cannot-be-read). `/_locales` tuto 404 také předává dál, kde dříve odpovídalo `200 {}`.
+- **Prerender, který nemůže načíst svůj slovník, selže,** a stejně tak prerender, jehož hostitel nemá ani soubor stránky, ani kořenový soubor. Trasa je 500, varování uvádí lokalizaci a stránku a žádný soubor se nezapíše; s výchozím `failOnError` Nuxtu build skončí s kódem 1. Stránka bez vlastního souboru nad kořenovým souborem se prerenderuje s kořenem.
+- **Hostitel nastavený při buildu odpovídá na SSR,** i s výchozí veřejnou kopií a na chybové stránce na interní cestě. Dříve odpovídal veřejný soubor. `NUXT_I18N_APP_BASE_SERVER_HOST` za běhu nyní dosáhne na `/_locales` i na serverový loader a vykreslování čte z kteréhokoli hostitele přes tento loader.
+- **Vlastní `nitro.output.publicDir` a jakékoli jiné rozložení, kde `public/` není vedle serveru, payloady vkládá do bundlu.**
+- **`nuxi build --preset <static preset>` prerenderuje stejně jako `nuxi generate`,** takže může zapsat více souborů. `nuxi generate` prerenderuje každou statickou stránku v každé lokalizaci, která ji obsluhuje, ať je odkazovaná, nebo ne, pokud pravidlo trasy nenastaví `prerender: false`.
+- **`source` nebo `publicAssets: false` při statickém výstupu varuje.** Prohlížeč nemá co číst.
+- **Varování o vkládání je nyní kontrolou velikosti.** Build varuje jen po překročení limitu platformy: viz [Limity bundlu](/cs/guide/deployment#bundle-limits-on-edge).
+- **`Vary` se nastavuje všude, kde rozhoduje návštěvník:** na každé stránce při `no_prefix` a na `/` a jakékoli jiné URL, která může přesměrovat podle preference. Obsahuje `Cookie`, když se používá cookie, a s `autoDetectLanguage` také `Accept-Language`. Zkontrolujte klíč cache vaší CDN: viz [Cachování HTML](/cs/guide/deployment#caching-html).
+- **Cachování `/_locales` se změnilo.** Na `/{apiBaseUrl}/**` není žádná route cache Nitra a hlavička `s-maxage=60, stale-while-revalidate` zmizela. Pokud jste na tuto cache spoléhali, dejte před payload trasu CDN. Prázdný slovník nikdy není `immutable`.
+- **Serverová cache je ve výchozím stavu omezená:** nejvýše 1000 položek, když není nastaveno `cacheMaxSize`. `cacheTtl` se počítá od okamžiku uložení položky; čtení ji už neprodlužují.
+- **Nové volitelné [`cacheStorage`](/cs/guide/performance#shared-cache-for-several-instances):** cache slovníků sdílená několika instancemi. Pokud není nastaveno, nic se nemění.
+
+### Balíčky pro frameworky {#framework-packages}
+
+Balíčky `2.0.0` na sobě navzájem závisejí: upgradujte je společně.
+
+#### `@i18n-micro/react`, `@i18n-micro/preact`, `@i18n-micro/solid` {#@i18n-micro/react-@i18n-micro/preact-@i18n-micro/solid}
+
+| Balíček | Změna | Co udělat |
+| --- | --- | --- |
+| react | React 18 nebo novější; `use-sync-external-store` už není závislostí; `react-dom` je volitelná peer závislost; nové vstupní body `/client` a `/server` | Pro React 16 nebo 17 zůstaňte na 1.x |
+| react | Vykresluje se na serveru: 1.x selhávalo s `Missing getServerSnapshot` | — |
+| react, solid | Adaptéry routeru se přesunuly do subpath `/router` | `import { createReactRouterAdapter } from '@i18n-micro/react/router'` (Solid: `createSolidRouterAdapter` z `@i18n-micro/solid/router`) |
+| preact | `createBrowserHistoryAdapter` se přesunul do `@i18n-micro/preact/router`; `createPreactRouterAdapter` je odstraněn. Nový volitelný třetí argument `ssrUrl` | Změňte import. Při SSR předejte URL požadavku, jinak se odkazy a přepínač vykreslí jako na `/` |
+| react, preact | `numberFormats` a `datetimeFormats` se respektují, takže se mění výstup `tn(n, 'currency')`. Dříve se ignorovaly | Zkontrolujte pojmenované formáty |
+| react, preact | Odkaz na `/` nebo kořen lokalizace je aktivní jen při přesné shodě; `className` na přepínači se přidává k `i18n-switcher-wrapper` | Zkontrolujte styly aktivních odkazů |
+| všechny tři | `I18nT` se řídí [`<i18n-t>`](#&lt;i18n-t>): `html` escapuje parametry, `plural` zachovává desetinná čísla, `number`, `date` a `relativeDate` vyhrávají nad parametrem svého názvu, `hideIfEmpty` a `defaultValue` platí v každé větvi, skrytá hodnota se vykreslí holá, bez elementu. Atributy `dangerouslySetInnerHTML`, `innerHTML` a `textContent` se zahazují | Přesuňte markup z parametrů do překladu nebo do `components` |
+| všechny tři | Nová prop `components` na `I18nT` pro rich text, potomci jako výchozí slot ve Vue | Viz [Rich text](/cs/integrations/overview#rich-text) |
+| všechny tři | `I18nSwitcher` odpovídá tomu ve Vue: položky `<a href>` s `aria-current="page"` u aktuální lokalizace, `▾` s mezerou před ním, logické CSS, `language-switcher` na tlačítku, žádné `aria-haspopup`, kliknutí probublávají, Escape ho zavře. `getLocaleName` volajícího vyhrává nad seznamem i v Solidu | Zkontrolujte styly a testy, které hledaly `li button` nebo `▼` |
+| všechny tři | `I18nLink`: uživatelské `onClick` a `style` se zachovají, kliknutí s modifikátorem nebo `target` se nechá na prohlížeči, query a hash se do kontroly aktivity nepočítají. Bez routeru je kliknutí vlastním kliknutím prohlížeče a žádný odkaz není aktivní | — |
+| react, preact | `I18nLocalesContext`, `I18nDefaultLocaleContext` a `I18nRouterContext` jsou jeden `I18nConfigContext`; `I18nContext` stále drží instanci | Použijte `I18nProvider` nebo hooky ve stylu `useI18nLocales` |
+| solid | Jeden kontext: `I18nContext` drží `{ i18n, locales, defaultLocale, router }`; ostatní tři zmizely | Použijte `I18nProvider` nebo hooky ve stylu `useI18nLocales` |
+| všechny tři | `getCurrentPath` adaptérů obsahuje query a hash, takže je `switchLocale` zachová; zachová je i `resolvePath`. Má je také `getRoute().fullPath` a opakovaný klíč v `getRoute().query` je pole | Vlastní strategie: vracejte celou cestu, odkazy se porovnávají podle stránky |
+| react, preact | `ReactI18n` a `PreactI18n` jsou `I18n` z runtime; `t` z `useI18n()` si ponechává svou identitu, dokud se store nezmění; `defaultLocale()` bez hodnoty je `fallbackLocale`, dříve sledovalo lokalizaci | — |
+| všechny tři | Vnořený `I18nProvider` bez `i18n` ponechá vnější instanci; provider úplně bez instance vyhodí výjimku. V Reactu a Preactu může místo toho dostat možnosti `createI18n` jako props. `locales` přidávají své `iso` do `localeIso` | — |
+| solid | `SolidI18n` je postaven na runtime a balíček nyní závisí na `@i18n-micro/runtime` a publikuje `src/` přes exportní podmínku `solid`. `routeMessages`, `loadFromUrl`, `hasTranslation`, `clear` a setter `fallbackLocale` jsou nové. `getCurrentPathAccessor` je odstraněn: čtěte signál v `getCurrentPath`. `useI18n()` už bez `locales` nevyhazuje výjimku, `useI18nLocales` a `useI18nDefaultLocale` odpovídají `undefined`. Adaptér už nepotřebuje reaktivního vlastníka | Odstraňte accessor z vlastních strategií |
+
+#### `@i18n-micro/vue` {#@i18n-micro/vue}
+
+| Změna | Co udělat |
+| --- | --- |
+| `numberFormats` a `datetimeFormats` se respektují, takže se mění výstup `tn(n, 'currency')` | Zkontrolujte pojmenované formáty |
+| `I18nT` je funkcionální komponenta a řídí se [`<i18n-t>`](#&lt;i18n-t>); `I18nSwitcher` a `I18nLink` se řídí [částí výše](#&lt;i18n-switcher>-and-&lt;i18n-link>) | `ref` na `<I18nT>` už nedává instanci komponenty |
+| `I18nLink` a `createVueRouterAdapter` vyhodnocují `name`, `query` a `hash`; `#top` zůstává na této stránce; `switchLocale` a přepínač zachovávají query i hash | Zkontrolujte testy, které fixovaly `/de` pro pojmenovaný cíl. Neznámé `name` nyní vyhodí výjimku, stejně jako `RouterLink` |
+| `useLocaleHead` už nesestavuje `//de/` s výchozím `baseUrl: '/'`; canonical a `hreflang` jedné stránky se shodují (`/de`, dříve `/de/`) a query parametry z whitelistu se dostanou do `hreflang` i `x-default`, jako v Nuxtu. Canonical a `og:url` s adaptérem vue-routeru zachovávají parametry z `canonicalQueryWhitelist` | — |
+| `I18nRoutingStrategy`: `resolvePath` může dostat objekt umístění a cestu s query a hashem; nové volitelné `toHref` | Vlastní strategie: zachovejte to, co následuje za cestou |
+
+#### `@i18n-micro/astro` {#@i18n-micro/astro}
+
+| Změna | Co udělat |
+| --- | --- |
+| `i18nIntegration` přibaluje `translationDir` a instaluje middleware | Smažte `src/middleware.ts`, který jen kopíruje nastavení. Chcete-li ho ponechat, předejte `middleware: false`, jinak se jeho možnosti ztratí (upozorní na to varování) |
+| `i18nIntegration` **vyhodí výjimku** u `messages`, `plural`, `missingHandler` a `routingStrategy` a už nenastavuje globální strategii routování | Předejte je do `createI18n` / `createI18nMiddleware` v `src/middleware.ts`, s `middleware: false` |
+| `I18nIntegrationOptions` už nedědí možnosti modulu, takže asi 45 polí jako `strategy` a `meta` jsou chyby TypeScriptu. Nikdy tam nic nedělala | Odstraňte je |
+| `loadTranslationsFromDir`, `loadTranslationsIntoI18n` se přesunuly do `@i18n-micro/astro/node`, které je pouze ESM | Změňte import; `virtual:i18n-micro/messages` obsahuje přibalené slovníky |
+| `getGlobalRoutingStrategy`, `setGlobalRoutingStrategy`, `runWithRoutingStrategy` odstraněny, spolu se svým `AsyncLocalStorage` | Čtěte `Astro.locals.routingStrategy` |
+| `AstroI18n` rozšiřuje runtime `I18n`: `clone()` je `fork()`, možnost `_storage` zmizela. Balíček závisí na `@i18n-micro/runtime`, už ne na `@i18n-micro/node` | — |
+| Dynamické stránky jsou jedna trasa: `/blog/hello` je `blog-slug` (dříve `blog-hello`), `[...path]` je `path` | Přesuňte `pages/blog-hello/` do `pages/blog-slug/`. Vlastní `getRouteName` dostane vzor jako třetí argument |
+| `base` funguje: pomocné funkce vracejí URL s ním, cookie žije pod ním | Váš vlastní `src/middleware.ts` předává `base: config.base` |
+| O lokalizaci stránky rozhoduje URL; `autoDetect` je 302 z `/` na domovskou stránku preferované lokalizace; nová možnost middlewaru `localeCookie`; `redirectToDefault` je implementováno | Viz [Astro](/cs/integrations/astro-package) |
+| Zobrazení stránky ze stránky jiné lokalizace na stejném originu zapíše cookie lokalizace a nepřesměruje; endpointy, obrázky, 404, POSTy a prefetche ne. Serverové ostrovy a akce nikdy nepřesměrovávají a nesou `Vary: Referer` | Zkontrolujte svou CDN, pokud odmítá `Set-Cookie`; za proxy nastavte `security.allowedDomains` |
+| Zakázané lokalizace: `config.localeCodes` je vynechává, `/fr` není lokalizace, `prepareLocaleRewrite` odpovídá 404 | — |
+| `prepareLocaleRewrite` a `getLocaleRewritePath` přijímají užší typ; cokoli, co prošlo dříve, projde i nyní | — |
+| `getI18nProps()` bez klíčů posílá vše, na co umí `t()` na stránce odpovědět, s vývojovým varováním nad 20 KB; `fallbackLocale` je ta z instance; `translations` vždy obsahuje trasu | Předejte klíče, které ostrov používá |
+| `useLocaleHead`: výchozí `baseUrl` je `site`, jinak relativní ke kořeni (`/about`, dříve `//about`); odkazy a meta tagy nesou `id`; po `Astro.rewrite` uvádí požadovanou URL | — |
+| `<I18nT html>` escapuje `params`; funguje jakýkoli `tag`; atributy procházejí; prázdný překlad se vykreslí prázdný, ne jako klíč | Přesuňte parametr obsahující markup do překladu |
+| `<I18nLink>` nechává externí URL, `#hash` a `?query` beze změny a zachovává koncové lomítko; `localizePath` stejně, a bez lokalizace používá aktuální | — |
+| `<I18nSwitcher>` zachovává query, jeden skript pro všechny přepínače, `hidden` na seznamu, `data-i18n-switcher` místo generovaných id, žádné `aria-haspopup` | Zkontrolujte selektory |
+| `@i18n-micro/astro/client` obsahuje jen `translate` a `hasTranslation` | Importujte adaptéry z `/client/vue`, `/client/react`, `/client/preact`, `/client/svelte` |
+| `client/vue` už nepřibaluje vlastní Vue: reaktivita funguje a `vue` musí být nainstalováno | Nainstalujte `vue` |
+| Ostrovy: `has()` je true pro podstrom, `t('')` je `''`, stejně jako na serveru; React a Preact dostávají `setLocale`, `setRoute`. `provideI18n` přijímá getter, aby sledoval nové props | Použijte `provideI18n(() => props.i18n)` s `transition:persist` |
+| `getLocale`, `getDefaultLocale` bez middlewaru vyhodí výjimku místo odpovědi `'en'` | — |
+
+#### `@i18n-micro/vitepress` {#@i18n-micro/vitepress}
+
+| Změna | Co udělat |
+| --- | --- |
+| Odkazy, přepínač, `push` a `replace` nesou `site.base`; `resolvePath` a `localizePath` zůstávají relativní k němu; `numberFormats`, `datetimeFormats` a `timeZone` se dostanou do `createI18n` | — |
+| Head lokalizace s `alternates: false` zahodí také `x-default` | — |
+
+#### `@i18n-micro/node`, `@i18n-micro/runtime` {#@i18n-micro/node-@i18n-micro/runtime}
+
+| Balíček | Změna | Co udělat |
+| --- | --- | --- |
+| node | Načítá překlady na Node 24 (`dirent.path` tam zmizelo) | — |
+| node | Nové `run(locale, fn)` a `fork(locale)` pro požadavky; `reload()` vyměňuje slovníky, místo aby je nejdřív vyprázdnilo, a nezapisuje do logu zprávu o úspěchu; adresář, který zmizel, ponechá staré, vyprázdněný je vyprázdní | — |
+| node, astro, vitepress | Jedna čtečka složky lokalizací: soubory přes symlinky se čtou, chybějící složka varuje, soubor, který není JSON objektem, se nahlásí a přeskočí, BOM nevadí. Zprávy začínají `[i18n]` | Upravte testy, které fixovaly staré zprávy |
+| runtime | `numberFormats` a `datetimeFormats` se respektují, takže se mění výstup `tn(n, 'currency')`; nové možnosti `timeZone`, `now` a `localeIso` | Zkontrolujte pojmenované formáty |
+| runtime | Zápis do lokalizace, která není ani aktivní, ani záložní, neupozorňuje | Posluchač, který chce každé přednačtení: čtěte store při změně lokalizace |
+| runtime | Nové `fork(locale)`; `storage` je getter; `loadFromUrls` stahuje paralelně a nic nezapíše, pokud jedno selže | — |
+| runtime, vue, node, astro | `addRouteTranslations(locale, route, messages, false)` nahradí chunk. Dříve slučovalo | Pro sloučení předejte `true` nebo výchozí hodnotu |
+
+### Ostatní balíčky {#other-packages}
+
+Jsou veřejné na npm, ale většina aplikací k nim přistupuje jen přes modul.
+
+#### `@i18n-micro/core`, `@i18n-micro/utils` {#@i18n-micro/core-@i18n-micro/utils}
+
+| Balíček | Změna | Co udělat |
+| --- | --- | --- |
+| core | `useTranslationHelper(storage)` zmizelo | `new TranslationHelper(storage)`. Destrukturovaná metoda přijde o `this` |
+| core | `TranslationHelper` odstraňuje `setCache`, `getGeneration`, `lookupIn`; `BaseI18n` odstraňuje `ensurePinnedChunk`, `invalidatePin`; chunky tras obsahují jen své vlastní klíče a vyhledávání se propadá do kořenového chunku | Vlastní adaptéry: použijte `lookup(chunkKey, key)` |
+| core | `TranslationHelper.hasPageTranslation` zmizelo | `hasCache(locale, routeName)` |
+| core | `TranslationHelper.loadTranslations` zmizelo | `mergeTranslation(locale, routeName, data)`; `routeName` nemá výchozí hodnotu, kořenový chunk je `'index'` |
+| core | `TranslationHelper.loadPageTranslations` zmizelo | `mergeTranslation(locale, routeName, data)` |
+| core | `BaseI18n.loadRouteTranslationsCore(locale, routeName, translations, merge)` zmizelo | `loadTranslationsCore(locale, translations, merge, routeName)` |
+| core | `tc` předává počet jako `Number`, takže vlastní pravidlo vidí `1.5` tam, kde vidělo `1` | — |
+| utils | `resolveI18nConfigWithRuntimeOverrides(base, pub, warn)` zmizelo | `createI18nConfigResolver(warn)(base, pub)`. Memoizuje, čte prostředí jednou a jeho výsledek je ve vývojovém režimu zmrazený |
+| utils | Subpaths `./route`, `./route-pattern`, `./build`, `./payload-stats`, `./payload-config` odstraněny | Byly interní součástí modulu |
+| utils | `mergeRouteTranslationsWithRoot` zmizelo | `deepMergeTranslationsRecursive`, které slučuje v každé hloubce |
+| utils | `deepMergeTranslations` zmizelo | `deepMergeTranslationsRecursive`. Starý název se až do tohoto vydání zastavoval na dvou úrovních |
+| utils | `applyAutoDetectLanguage` zmizelo | `hasExplicitPreference \|\| !autoDetect ? locale : detectLocaleFromAcceptLanguage(header, validLocales) ?? locale` |
+| utils | `LocaleHeadLink` je union podle `rel` | Kód, který ho sestavuje s libovolným `rel` nebo `alternate` bez `hreflang`, se už nezkompiluje |
+
+#### `@i18n-micro/path-strategy`, `@i18n-micro/route-strategy` {#@i18n-micro/path-strategy-@i18n-micro/route-strategy}
+
+| Balíček | Změna | Co udělat |
+| --- | --- | --- |
+| path-strategy | **`switchLocaleRoute(fromLocale, toLocale, route, options)` je `switchLocaleRoute(toLocale, route, options)`. Staré volání v JS vrátí špatný výsledek, a to bez chyby** | Odstraňte první argument |
+| path-strategy | `localeRoute(locale, routeOrPath)` přišlo o třetí parametr, `getRouteBaseName(route)` o druhý. Oba se ignorovaly | Odstraňte je |
+| path-strategy | Alias `Strategy` odstraněn | Použijte `I18nPathStrategy` |
+| path-strategy | `createPathStrategy` už nesestavuje absolutní URL | Použijte `new DomainPathStrategy(ctx)`, když mají lokalizace `baseUrl` |
+| path-strategy | Subpaths `/prefix`, `/no-prefix`, `/prefix-except-default`, `/prefix-and-default` odstraněny. Z kořene zmizely: `BasePathStrategy`, `analyzeRoute`, `getRouteBaseName`, `buildLocalizedName`, `isIndexRouteName`, `resolvePathWithParams`. Ze strategií zmizely: `getRedirect`, `getCanonicalPath`, gettery konfigurace `get*`. Kontext odstraňuje `globalLocaleRoutes`, `routeLocales`, `routesLocaleLinks`, `noPrefixRedirect`. `RouterAdapter` vyžaduje `getRoutes` | Stavějte z `createPathStrategy` nebo ze dvou tříd |
+| route-strategy | `isInternalPath` se už znovu neexportuje | Importujte ho z `@i18n-micro/utils/app-path` |
+| route-strategy | Exporty pomocných funkcí zmizely: `buildFullPath`, `buildFullPathNoPrefix`, `buildRouteName`, `extractLocalizedPaths`, `isLocalizationDisabledForPage` a další. `filesLocaleRoutes` a `fallbackRedirectComponentPath` odstraněny. Nové: `generateRoutes`, `Rules`, `nameOfPath`, `routeKey` | Použijte `RouteGenerator` nebo `generateRoutes` |
+
+#### `@i18n-micro/test-utils`, `@i18n-micro/types-generator`, `@i18n-micro/devtools-ui` {#@i18n-micro/test-utils-@i18n-micro/types-generator-@i18n-micro/devtools-ui}
+
+| Balíček | Změna | Co udělat |
+| --- | --- | --- |
+| test-utils | Mock je `BaseI18n`: `tc('a', 1.5)` vezme poslední tvar, `td('nope')` je `Invalid Date`, `tdr` sleduje aktivní lokalizaci, `t(miss, undefined, '')` je klíč, kořenové klíče odpovídají na trase, nenalezení už nezapisuje do logu | Opravte testy, které fixovaly to, co aplikace nikdy nedělala |
+| test-utils | `settRouteName` a `$settRouteName` odstraněny | Použijte `setRouteName` |
+| test-utils | `switchLocaleRoute` falešné strategie se řídí novou signaturou | Odstraňte první argument |
+| test-utils | `isolated` zmizelo z `createI18nTestContext` (každý kontext vždy izolovaný byl); `./publish-smoke` odstraněno | — |
+| types-generator | `I18nTypesPlugin(options)` je obyčejný plugin pro Vite a Rollup: žádné `.vite()`, `.webpack()`, `.esbuild()`. `flattenKeys`, `isPlainTranslationObject` odstraněny; `getTypesString` a `generateTypes` jsou synchronní; `translationDir` může být pole | `I18nTypesPlugin.vite(o)` → `I18nTypesPlugin(o)`; pro webpack nebo esbuild volejte `generateTypes` ve skriptu |
+| types-generator | Klíče jsou to, co čte `t()`: přidány cesty objektů, `__proto__` a soubory mimo rozložení lokalizací vypuštěny, hodnoty typované podle svého JSON. Modul pro Nuxt čte `i18n.translationDir`, inline možnosti, vrstvy a `additionalTranslationDirs`. `@nuxt/kit` je volitelná peer závislost, `@nuxt/schema` a `vite` jsou nové volitelné peer závislosti | — |
+| devtools-ui | `/files` a `/file` jsou nahrazeny `/translations`; požadavek z jiného webu nebo cizího hostitele je 403, `/save` vyžaduje `application/json`; aktualizace přicházejí přes socket Vite, žádné dvousekundové dotazování; Astro používá `i18nDevToolsIntegration`. `vite` je volitelná peer závislost | — |
+| devtools-ui | `createBridge` přijímá možnost `base`; neúspěšné uložení na dostupný endpoint vyhodí výjimku a vrátí změny zpět | Předejte `base`, pokud jste změnili `base` pluginu |
+| devtools-ui | `/save` přijímá jen existující `.json` uvnitř `translationDir` a už nevytváří soubory | Nové soubory lokalizací vytvořte sami |
+
+## Z v2 na v3 {#from-v2-to-v3}
+
+### Odstraněné možnosti {#removed-options}
+
+```diff
+ i18n: {
+-  includeDefaultLocaleRoute: true,
++  strategy: 'prefix',
+-  fallbackRedirectComponentPath: '~/components/MyRedirect.vue',
+-  experimental: { hmr: true, previousPageFallback: true },
++  hmr: true,
+ }
+```
+
+- `includeDefaultLocaleRoute: true` je `strategy: 'prefix'`; `false` je výchozí `prefix_except_default`.
+- `fallbackRedirectComponentPath` zmizelo: přesměrování probíhají na serveru před vykreslením a v klientském middlewaru tras. Vlastní logika přesměrování patří do pluginu, který nastavuje lokalizaci, viz [Vlastní detekce lokalizace](/cs/guide/custom-auto-detect).
+- `experimental.hmr` je kořenová možnost `hmr` (ve výchozím stavu zapnutá).
+- `previousPageFallback` zmizelo: klíče opouštěné stránky se vyhodnocují, dokud neskončí její transice, bez jakékoli možnosti.
+
+### Stav lokalizace {#locale-state}
+
+Místo `useState('i18n-locale')` a `useCookie('user-locale')` použijte `useI18nLocale()`:
+
+```diff
+- useState('i18n-locale').value = 'fr'
+- useCookie('user-locale').value = 'fr'
++ useI18nLocale().setLocale('fr') // state and cookie together
+```
+
+### Konfigurace za běhu {#config-at-runtime}
+
+Konfiguraci, včetně přepsání za běhu, čtěte pomocí `$getI18nConfig()`:
+
+```diff
+- const cookieName = useRuntimeConfig().public.i18nConfig?.localeCookie
++ const { $getI18nConfig } = useNuxtApp()
++ const cookieName = $getI18nConfig().localeCookie
+```
+
+### Interní aliasy typů {#internal-type-aliases}
+
+Pokud vaše IDE nebo `vue-tsc` nedokáže vyřešit importy `#i18n-internal/*`, namapujte je ve svém `package.json`. Nuxt je řeší při buildu, takže je to potřeba jen zřídka:
+
+```json
+{
+  "imports": {
+    "#i18n-internal/plural": "nuxt-i18n-micro/internals",
+    "#i18n-internal/strategy": "nuxt-i18n-micro/internals",
+    "#i18n-internal/config": "nuxt-i18n-micro/internals"
+  }
+}
+```
+
+## Související {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Detekce lokalizace" icon="book-open" href="/cs/guide/locale-detection">
+
+</Card>
+
+<Card title="Možnosti modulu" icon="brackets-curly" href="/cs/api/module-options">
+
+</Card>
+
+<Card title="Seznam změn" icon="arrow-up-right-from-square" href="https://github.com/s00d/nuxt-i18n-micro/blob/main/CHANGELOG.md">
+
+</Card>
+
+</CardGroup>
