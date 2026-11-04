@@ -1,0 +1,120 @@
+---
+title: "Palvelinreitit ja API"
+description: "Käännä merkkijonoja ja lue pyynnön kieli Nitro-palvelinreiteissä ja API-käsittelijöissä."
+---
+
+`server/api/`- ja `server/routes/`-hakemistojen palvelinkäsittelijät voivat kääntää merkkijonoja ja lukea pyynnön kielen kahdella automaattisesti tuodulla apufunktiolla. Käytä niitä API-vastauksissa, sähköposteissa, syötteissä tai missä tahansa Vue-sivun ulkopuolella renderöitävässä. Ne lukevat samoja käännöstiedostoja kuin sivusi ja tunnistavat kielen pyynnöstä.
+
+## Kääntäminen käsittelijässä {#translate-in-a-handler}
+
+```ts
+// server/api/greeting.get.ts
+export default defineEventHandler(async (event) => {
+  const t = await useTranslationServerMiddleware(event)
+  return { message: t('greeting', { name: 'Ada' }) }
+})
+```
+
+```bash
+curl 'http://localhost:3000/api/greeting?locale=de'
+# {"message":"Hallo, Ada!"}
+```
+
+`useTranslationServerMiddleware(event, defaultLocale?, locale?)` on asynkroninen ja palauttaa funktion `t(key, params?, defaultValue?)`. `t` palauttaa merkkijonon, interpoloi `{name}`-parametrit ja palauttaa avaimen puuttuessa ei-tyhjän `defaultValue`-arvon, muuten avaimen.
+
+`t` näkee vain `index`-palan: juuritiedostot (`locales/<locale>.json`) sekä `locales/pages/index/`-hakemiston, jos se on olemassa (vain juuritiedostot asetuksella `disablePageLocales`). Muiden sivujen avaimia ei ladata. Niitä varten lataa pala itse:
+
+```ts
+const { data } = await loadTranslationsFromServer('de', 'about') // Translations object of the about page
+```
+
+## Pyynnön kielen lukeminen {#read-the-request-locale}
+
+```ts
+// server/api/locale.get.ts
+export default defineEventHandler((event) => {
+  const { current, isDefault, locale } = useLocaleServerMiddleware(event)
+  return { current, isDefault, dir: locale?.dir ?? 'ltr' }
+})
+```
+
+`useLocaleServerMiddleware(event, defaultLocale?, locale?)` on synkroninen ja palauttaa:
+
+```ts
+interface LocaleInfo {
+  current: string // detected locale code
+  default: string // defaultLocale, runtime overrides included (fixed at build under prefix_except_default / prefix_and_default)
+  fallback: string // fallbackLocale, else the default
+  available: string[] // enabled locale codes
+  locale: Locale | null // the config entry of `current`
+  isDefault: boolean
+  isFallback: boolean
+}
+```
+
+## Miten kieli valitaan {#how-the-locale-is-chosen}
+
+Molemmat apufunktiot käyttävät samaa järjestystä jokaisella palvelinreitillä, oli kyse `/api`-reitistä tai ei:
+
+1. `?locale=`-kyselyparametri (ensimmäinen arvo, jos toistettu);
+2. `[locale]`-reittiparametri tai kielietuliite polussa (`/de/...`);
+3. kielieväste, kun [`localeCookie`](/fi/api/module-options#localecookie) on asetettu (`hash-locale` `hashMode`-tilassa);
+4. `Accept-Language`, kun `autoDetectLanguage` on käytössä (q-arvot huomioidaan);
+5. `defaultLocale`.
+
+Virheelliset ja käytöstä poistetut koodit ohitetaan jokaisessa vaiheessa. Tämä on API-järjestys; sivun renderöinti ohittaa `?locale=`-parametrin etuliitestrategioissa. Molempia järjestyksiä verrataan sivulla [Kielen tunnistus](/fi/guide/locale-detection).
+
+## Kielen pakottaminen {#force-a-locale}
+
+Välitä kolmas argumentti ohittaaksesi tunnistuksen, esimerkiksi työssä, joka lähettää sähköpostia käyttäjän kielellä:
+
+```ts
+export default defineEventHandler(async (event) => {
+  const user = await getUser(event) // your code
+  const t = await useTranslationServerMiddleware(event, undefined, user.locale)
+  return sendMail(user.email, t('mail.welcome.subject'))
+})
+```
+
+Toinen argumentti korvaa `defaultLocale`-arvon tämän kutsun tunnistuksessa, joten sillä ei ole vaikutusta, kun kieli pakotetaan. Sanakirjat tallennetaan välimuistiin pyyntö- ja kielikohtaisesti sekä pyyntöjen välillä palvelimen käännösvälimuistiin, joten apufunktion kutsuminen useita kertoja on edullista.
+
+## Palvelinkomponentit {#server-components}
+
+Palvelinkomponentti (`.server.vue`, `<NuxtIsland>`) renderöidään omasta URL-osoitteestaan, `/__nuxt_island/...`, joten se ei näe sivun URL-osoitetta, ja Nuxt välittää sille vain sen propsit. Välitä kieli `locale`-propsina. Silloin se renderöidään kyseisellä kielellä, ja kielen vaihto hakee sen uudelleen, koska propsit ovat osa islandin URL-osoitetta ja välimuistiavainta. Nimi on varattu: mikä tahansa käytössä oleva kielikoodi `locale`-nimisessä propsissa asettaa renderöinnin kielen, joten anna jotain muuta tarkoittavalle propsille, kuten numeromuodolle, toinen nimi:
+
+```vue
+<!-- components/Greeting.server.vue -->
+<template><p>{{ $t('greeting') }}</p></template>
+<script setup lang="ts">
+defineProps<{ locale?: string }>()
+</script>
+```
+
+```vue
+<template>
+  <Greeting :locale="$getLocale()" />
+  <NuxtIsland name="Greeting" :props="{ locale: $getLocale() }" />
+</template>
+```
+
+Ilman propsia se renderöidään evästeen kielellä, muuten oletuskielellä, riippumatta URL-osoitteesta, eikä se seuraa kielen vaihtoa. Sen `$t` näkee `index`-palan: juuritiedostot sekä `locales/pages/index/`-hakemiston.
+
+## Aiheeseen liittyvää {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Kielen tunnistus" icon="book-open" href="/fi/guide/locale-detection">
+
+</Card>
+
+<Card title="Käännöstiedostot" icon="book-open" href="/fi/guide/translations">
+
+</Card>
+
+<Card title="Julkaisu" icon="book-open" href="/fi/guide/deployment">
+
+Mistä palvelin lukee käännökset
+
+</Card>
+
+</CardGroup>

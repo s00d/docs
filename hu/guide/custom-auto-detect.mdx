@@ -1,0 +1,111 @@
+---
+title: "Egyéni locale-felismerés"
+description: "Válaszd ki magad a locale-t — domain, fejléc vagy felhasználói profil alapján — egy szerver pluginnel és a useI18nLocale().setLocale() segítségével."
+---
+
+A beépített felismerés az URL-t, egy cookie-t és az `Accept-Language` fejlécet olvassa. Ha a locale valami mástól függ — a domaintől, a CDN által beállított geo-fejléctől, egy felhasználói profiltól —, állítsd be magad egy olyan pluginben, amely az i18n plugin előtt fut. A modul ezután betölti az adott locale fordításait, és pontosan úgy használja az átirányításokhoz, mintha ő maga ismerte volna fel. Azok a szabályok, amelyek eldöntik, mikor győz a kiválasztott locale az URL felett, a [Locale-felismerés](/hu/guide/locale-detection) oldalon találhatók; ez az oldal azt mutatja be, hogyan csatlakoztathatod a saját forrásodat.
+
+## A locale beállítása szerver pluginben {#set-the-locale-in-a-server-plugin}
+
+```ts
+// plugins/i18n-locale.server.ts
+export default defineNuxtPlugin({
+  name: 'i18n-custom-locale',
+  enforce: 'pre',
+  order: -10, // before the i18n plugin (order -5)
+  setup() {
+    const { setLocale } = useI18nLocale()
+    const host = (useRequestHeaders(['host']).host ?? '').split(':')[0]! // without the port
+
+    if (host.endsWith('.de')) setLocale('de')
+    else if (host.endsWith('.fr')) setLocale('fr')
+  },
+})
+```
+
+A `setLocale(code)` beírja a locale állapotát (`useState('i18n-locale')`), és ha be van állítva locale-cookie, akkor a cookie-t is. Ezt használd ahelyett, hogy magad írnád a `useState`-et vagy a `useCookie`-t. Csak engedélyezett locale-kódokat adj át.
+
+Tartsd meg a plugin `.server.ts` kiterjesztését, ha kérésfejléceket olvas: ezek a böngészőben nem léteznek. A csak böngészőben elérhető forrásokhoz, például a `localStorage`-hoz, egy `.client.ts` plugin a megfelelő hely.
+
+## A beépített Accept-Language lépés kikapcsolása {#turn-off-the-built-in-accept-language-step}
+
+A pluginod és az `Accept-Language` eltérő eredményt adhat. Ha azt szeretnéd, hogy csak a saját kódod (valamint az URL és a cookie) döntsön, kapcsold ki a fejlécet:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    autoDetectLanguage: false,
+  },
+})
+```
+
+Az [`autoDetectLanguage`](/hu/api/module-options#autodetectlanguage) csak a fejléc-lépést szabályozza. Az URL és egy érvényes cookie továbbra is számít.
+
+## Mi történik ezután {#what-happens-next}
+
+A `setLocale` hatása a [stratégiától](/hu/guide/strategy) függ:
+
+| Stratégia | A `setLocale('de')` hatása a pluginben |
+| --- | --- |
+| `no_prefix` | Az oldal németül jelenik meg; az URL nem változik. |
+| `prefix`, `prefix_except_default` | Előtag nélküli útvonalon, ahol az [`autoDetectPath`](/hu/api/module-options#autodetectpath) engedélyezi az átirányítást (alapértelmezés szerint csak `/`), a szerver `302`-vel válaszol a német URL-re. A locale-előtaggal rendelkező URL megtartja azt. |
+| `prefix_and_default` | Nincs átirányítás: az előtag nélküli URL érvényes alapértelmezett locale-oldal. |
+
+Az előtagos stratégiák esetén az URL-ben szereplő locale a felhasználó választása, és a pluginod nem írja felül. Kivétel az `autoDetectPath: '*'`: ekkor a szerver cookie és `Accept-Language` alapján mozgatja az előtagos URL-eket, és figyelmen kívül hagyja az állapotot, de a `setLocale()` a cookie-t is beírja, ha az be van állítva, így a következő kéréstől a pluginod választása átirányíthat egy előtagos URL-t. Tartsd meg a `'/'` értéket, vagy használd a `'no_prefix'`-et, ha az explicit locale-URL-eknek kell győzniük. A pluginoddal azt válaszd ki, hová érkezik a látogató, ne azt írd át, amely linkeket követett.
+
+## A felhasználó által választott locale tiszteletben tartása {#respect-a-locale-the-user-picked}
+
+Amint a felhasználó nyelvet vált, a váltás beírja a cookie-t. Hagyd ki a saját felismerésedet, ha már van érvényes preferencia:
+
+```ts
+// plugins/i18n-locale.server.ts
+import { detectLocaleFromAcceptLanguage } from '@i18n-micro/utils/accept-language'
+
+export default defineNuxtPlugin({
+  name: 'i18n-custom-locale',
+  enforce: 'pre',
+  order: -10,
+  setup() {
+    const { getPreferredLocale, setLocale, validLocales } = useI18nLocale()
+    if (getPreferredLocale()) return // valid state or cookie: keep it
+
+    const country = useRequestHeaders(['x-country'])['x-country']
+    if (country === 'JP') return setLocale('ja')
+
+    const header = useRequestHeaders(['accept-language'])['accept-language']
+    setLocale(detectLocaleFromAcceptLanguage(header, validLocales))
+  },
+})
+```
+
+A `getPreferredLocale()` csak akkor adja vissza az állapotot vagy a cookie-t, ha az engedélyezett locale, így egy elavult cookie nem akadályozza meg a felismerést. A `detectLocaleFromAcceptLanguage` a q-értékeket figyelembe vevő illesztő, amelyet maga a modul is használ (az importáláshoz telepítsd az `@i18n-micro/utils` csomagot); a `setLocale(null)` nem csinál semmit.
+
+## Egy domain locale-onként {#one-domain-per-locale}
+
+Ha minden domainnek a saját locale-jait kell kiszolgálnia, nincs szükséged pluginra: adj minden locale-nak `baseUrl`-t, állítsd be a `baseDefault: true` értéket minden domain alapértelmezett locale-jánál, és buildelj egyszer (statikus oldal esetén továbbra is domainenként kell futtatni a `nuxi generate`-et). Lásd: [Rétegek és domainek](/hu/guide/layers#multiple-domains).
+
+## Kapcsolódó {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Locale-felismerés" icon="book-open" href="/hu/guide/locale-detection">
+
+A teljes elsőbbségi és átirányítási szabályok
+
+</Card>
+
+<Card title="useI18nLocale" icon="brackets-curly" href="/hu/composables/useI18nLocale">
+
+</Card>
+
+<Card title="Útválasztási stratégiák" icon="book-open" href="/hu/guide/strategy">
+
+</Card>
+
+<Card title="Rétegek és domainek" icon="book-open" href="/hu/guide/layers">
+
+</Card>
+
+</CardGroup>

@@ -1,0 +1,261 @@
+---
+title: "效能調校"
+description: "會影響記憶體、payload 大小與快取的設定，以及如何衡量您的應用程式實際傳送的內容。"
+---
+
+預設值已針對典型應用程式調校：每個頁面與 locale 一個 JSON payload、翻譯不放進 HTML、伺服器上的快取有上限。本頁列出在翻譯目錄龐大、伺服器記憶體受限，或 payload 來自其他主機時，值得調整的少數幾項設定。與 `@nuxtjs/i18n` 及純 Nuxt 比較的實測數據，請參閱[基準測試](/zh-Hant/guide/performance-results)。
+
+## 預設值已經做了什麼 {#what-the-defaults-already-do}
+
+- **每個頁面一個 payload。** 建置時會將根層級、頁面與 fallback locale 的鍵合併到 `/_locales/<page>/<locale>/data.json`，因此頁面只需載入一個檔案，`$t` 也只需一次查詢。
+- **HTML 中沒有字典。** SSR 將翻譯保留在伺服器記憶體中；瀏覽器會擷取 payload，而不是從 `__NUXT_DATA__` 解析。
+- **瀏覽器快取。** `?v=` 只有在翻譯變更時才會改變，因此在未動到翻譯的部署之間，瀏覽器會保留其 payload。主機的靜態副本在 60 秒內是新鮮的，之後會重新驗證：重複載入只需等待一次 `304`。伺服器路由則以 `immutable` 回應一年（[部署](/zh-Hant/guide/deployment#cache-headers-and-datebuild)）。
+- **有上限的伺服器記憶體。** 伺服器預設最多快取 1000 個 payload，並淘汰最久未使用的項目。
+
+## 依頁面拆分翻譯 {#split-translations-by-page}
+
+只在單一頁面使用的鍵應該放在 `locales/pages/<page>/<locale>.json`，而不是根檔案中：根層級的鍵會包含在每個頁面的 payload 裡。請參閱[翻譯檔案](/zh-Hant/guide/translations)。
+
+有兩項設定會改變這種拆分方式：
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    // pages that show the same keys share one payload: /de/products/123 loads the products payload
+    routesLocaleLinks: { 'products-id': 'products' },
+    // or: no page files at all, every page loads only the root dictionary
+    // disablePageLocales: true,
+  },
+})
+```
+
+[`routesLocaleLinks`](/zh-Hant/api/module-options#routeslocalelinks) 可減少相關路由的重複 payload。[`disablePageLocales`](/zh-Hant/api/module-options#disablepagelocales) 適合每個 locale 只用一個字典較為簡單的小型應用程式。
+
+## 伺服器快取 {#server-caches}
+
+| 設定 | 預設值 | 效果 |
+| --- | --- | --- |
+| [`cacheMaxSize`](/zh-Hant/api/module-options#cachemaxsize) | `0` | payload 快取的最大項目數。`0` = 瀏覽器中無上限，伺服器上為 1000。 |
+| [`cacheTtl`](/zh-Hant/api/module-options#cachettl) | `0` | 快取項目重新載入前的秒數。`0` = 永不重新載入；當 payload 來自 `apiBaseServerHost` 且會在未重新部署的情況下變更時，請設定此值。 |
+| `serverTranslationPreload` | `false` | 在 Nitro 中介軟體中為每個頁面請求載入 `index` payload，讓伺服器輔助函式與首頁可以重複使用。 |
+
+在頁面 × locale 數量很多的小型執行個體上，請調低 `cacheMaxSize`。在本機編輯的翻譯永遠不需要 TTL：開發環境會即時讀取檔案，正式環境的 payload 只會隨部署而變更。
+
+## Node 伺服器上的記憶體 {#memory-on-a-node-server}
+
+在穩定負載下，Node 伺服器的記憶體可能維持在其存活堆積的約 12 倍。在每頁 10 萬個鍵的壓力測試中，90 MB 的存活堆積對應到約 1.1 GB 的 RSS。這不是記憶體洩漏。在一次過大的 GC 週期之後，V8 會提高其堆積上限，並在負載持續期間將釋放的分頁保留在池中以供重複使用。負載停止約 8 秒後，池會清空，RSS 降至約 160 MB。`global.gc()` 不會歸還這部分記憶體。沒有此模組的純 Nuxt 也會出現相同現象，只是依其較小的堆積等比縮小。
+
+這會占用餘裕空間：若記憶體上限低於該水準且沒有設定堆積上限，處理程序可能會被終止。請設定一個符合您的限制、且遠高於存活堆積的上限：
+
+```bash
+NODE_OPTIONS=--max-old-space-size=512 node .output/server/index.mjs
+```
+
+| 10 萬個鍵、12 個 locale、5 至 30 分鐘的負載 | 預設 | `--max-old-space-size=512` |
+| --- | --- | --- |
+| 負載下的 RSS | 約 1,150 MB | 254-287 MB |
+| 每秒請求數 | 624 | 517-572 |
+
+因此，這個上限是以 8 至 10% 的吞吐量換取記憶體。一般大小的翻譯目錄堆積較小，增幅也較小。這些測試是在 macOS 上以 Node 22 執行，而非在容器中。
+
+## 解析時間與 `dir` {#parse-time-and-dir}
+
+在 locale 上設定 `dir: 'auto'` 會讓瀏覽器在解析時根據內容判斷文字方向。在 Chromium 中，20,000 個元素時，使用 `dir="auto"` 的 DOMContentLoaded 約為 1.1 秒，不使用則為 0.1 秒；5,000 個元素時則約為 130 ms 對 45 ms。請不要設定 `dir`，或將其設為 `ltr` 或 `rtl`（[文字方向](/zh-Hant/guide/seo#text-direction)）。
+
+## 多個執行個體的共用快取 {#shared-cache-for-several-instances}
+
+當同一個建置有多個執行個體時，[`cacheStorage`](/zh-Hant/api/module-options#other) 可讓它們在任何 Nitro storage 中共用一個字典快取，使用您的應用程式在 `nitro.storage` 中設定的連線。模組不會加入任何連接器或相依套件。
+
+**它是快取，不是來源。** 翻譯來自內嵌或公開的 payload，或來自 `apiBaseServerHost`。只有來自來源的內容才會被寫入，而且鍵帶有建置資訊，因此您手動填入的 store 不會被讀取。若要從 KV 或資料庫提供翻譯，請在 `apiBaseServerHost` 放一個讀取它的小型路由。
+
+**何時有幫助。** 只有在使用遠端 `apiBaseServerHost` 時。三個執行個體走訪 39 個字典時，未使用此選項會對主機發出 117 次請求，使用後則為 48 次。若檔案位於磁碟上，從 store 命中並不比讀檔快；對 12 個頁面的首次走訪，未使用此選項需 280-296 ms，使用已填滿的 Redis 則需 308-325 ms，因此請不要設定。在內嵌字典的 preset 上，若沒有主機，它不會有任何作用，建置時也會提示這一點。
+
+冷字典、單一用戶端、每項各走訪一次，因此數據較粗略，而且大部分時間花在與主機之間的距離：
+
+| Store | 從主機 | 從 store |
+| --- | --- | --- |
+| Cloudflare KV | 約 300 ms | 約 110 ms |
+| D1 | 約 230 ms | 約 115 ms |
+| Deno KV | 約 430 ms | 約 100 ms |
+| Upstash，Vercel serverless | 約 445 ms | 約 245 ms |
+| Upstash，Vercel Edge | 約 505 ms | 約 235 ms |
+
+### Redis {#redis}
+
+您的專案中需要 `ioredis`。
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      redis: { driver: 'redis', url: process.env.REDIS_URL },
+    },
+  },
+  i18n: {
+    cacheStorage: 'redis', // the mount name
+    apiBaseServerHost: 'https://translations.internal',
+    cacheTtl: 300,
+  },
+})
+```
+
+### Vercel 與 Vercel Edge 上的 Upstash {#upstash-on-vercel-and-vercel-edge}
+
+兩者都請使用 `upstash` 驅動程式：它使用 REST 通訊，而 `redis` 驅動程式需要 TCP。您的專案中需要 `@upstash/redis`，並會從環境變數讀取 `UPSTASH_REDIS_REST_URL` 與 `UPSTASH_REDIS_REST_TOKEN`。
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      upstash: { driver: 'upstash' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'upstash',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+### Cloudflare KV {#cloudflare-kv}
+
+將一個命名空間以 `I18N_KV` 繫結到 Worker（在其 wrangler 設定的 `kv_namespaces` 中）。
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      kv: { driver: 'cloudflare-kv-binding', binding: 'I18N_KV' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'kv',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+若主機是同一帳戶下的另一個 Worker，則需要 `global_fetch_strictly_public` 相容性旗標，否則 fetch 無法到達該主機。
+
+### Cloudflare D1 {#cloudflare-d1}
+
+`nitro.storage` 無法持有資料庫物件，因此需由 Nitro 外掛掛載驅動程式。掛載會在第一次使用時檢查，所以這樣的時機已經夠早。請將資料庫繫結為 `I18N_DB`（`d1_databases`），並在專案中加入 `unstorage`。
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    experimental: { database: true },
+    database: {
+      default: { connector: 'cloudflare-d1', options: { bindingName: 'I18N_DB' } },
+    },
+  },
+  i18n: {
+    cacheStorage: 'd1',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+```ts
+// server/plugins/i18n-storage.ts
+import dbDriver from 'unstorage/drivers/db0'
+
+export default defineNitroPlugin(() => {
+  useStorage().mount('d1', dbDriver({ database: useDatabase() }))
+})
+```
+
+`db0` 驅動程式被標示為實驗性，且會忽略 TTL：舊建置的資料列會一直保留，直到您刪除為止。
+
+### Deno KV {#deno-kv}
+
+在 Deno Deploy 上，佈建一個資料庫（`deno deploy database provision <name> --kind denokv`），將其指派給應用程式（`deno deploy database assign`），然後使用此驅動程式：
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      kv: { driver: 'deno-kv' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'kv',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+### 運作方式 {#how-it-behaves}
+
+字典會先在執行個體自己的快取中查詢，接著是共用 storage，最後才是其來源。執行個體自己的快取會保留，因為 `$t` 是同步的，需要樹狀結構位於記憶體中：這是將「誰負責擷取」與「誰負責提供」分開，並不會節省記憶體。
+
+- **誰負責擷取。** 使用遠端主機時，每個字典只會從後端擷取一次，而不是每個執行個體各擷取一次。在同一時刻未命中的執行個體會各自擷取，因為沒有鎖定機制。
+- **沒有專屬字典的頁面**不會被儲存，以免捏造的頁面名稱新增鍵。每個執行個體會從主機擷取這類頁面一次；在 isolate 來來去去的 Workers 上，這會形成持續的少量請求。
+- **主機停擺時。** 已儲存字典的頁面可正常運作。沒有字典的頁面會以已儲存的根字典渲染，其自身的鍵則以原始形式顯示，並回傳[不會被任何快取保留的 `503`](/zh-Hant/guide/deployment#when-a-dictionary-cannot-be-read)；在主機恢復之前，`/_locales` 對該頁面也會回應 `503`。`useTranslationServerMiddleware` 對無法讀取的字典會回傳鍵本身。
+- **主機**是執行階段的 `NUXT_I18N_APP_BASE_SERVER_HOST`，否則為建置時的 `apiBaseServerHost`，與未使用此選項時相同。在內嵌字典的 preset 上（Cloudflare、Vercel、Netlify，請參閱[部署](/zh-Hant/guide/deployment#serverless-and-edge)），此 layer 只有在設定主機時才會套用：資料已經在 bundle 中，而 KV 中的副本只會為記憶體中已有的資料多一次網路讀取。
+- **鍵**的格式為 `i18n-micro:<buildId>~<dateBuild>~<fallbackLocale>~<host>:<locale>:<page>`，因此在滾動部署中的兩個建置永遠不會讀取彼此的資料，同一個產出物的兩個後端也不會。每個執行個體都必須來自同一個建置（同一個產出物，或固定的 Nuxt [`buildId`](https://nuxt.com/docs/api/nuxt-config#buildid)）；分別建置的執行個體就不會共用。若固定 `buildId` 且 `dateBuild: 0`，兩個不同的建置確實會共用鍵。只會查詢已啟用的 locale，名稱超過 200 個字元的頁面會略過此 layer。
+- **儲存的內容。** 字典在寫入前會與根字典（`__root`）比較，只有在包含所有根鍵且與根字典不同時才會寫入。因此，以根字典回應的捏造頁面不會新增鍵，頁面上的 200 錯誤內容也不會。每個執行個體會從來源讀取這類頁面一次。主機必須以根字典、空物件或 404 回應未知頁面，並提供 `__root`。沒有 `__root` 的主機，或提供不含根鍵之頁面的主機，將不會共用任何內容。如果主機對 `__root` 本身回傳格式正確的錯誤，該錯誤會被儲存：當後端可能這樣做時，請將 `cacheTtl` 設短一點。
+- **到期。** 項目會在寫入後 `cacheTtl` 秒到期，若 `cacheTtl` 為 `0` 則在一天後到期，因此舊建置的鍵不會堆積。一個值還可能在執行個體自己的快取中再停留一個 `cacheTtl`，並在渲染的區塊快取中再停留一個：後端的變更會在三倍 `cacheTtl` 內生效。沒有到期機制的驅動程式（`fs`）會保留舊鍵，直到您將其移除。
+- **當 storage 失敗時**，頁面不會失敗。一次讀取最多可花 1 秒，足以涵蓋連線交握，以及在該地點為冷狀態的 Cloudflare KV 鍵。失敗之後，在 store 再次回應前，上限為 250 ms。連續三次失敗會讓此 layer 關閉 5 秒。在關閉期間，以及剛發生讀取失敗時，不會寫入任何內容。寫入失敗不會關閉任何東西，因此唯讀副本仍可繼續提供讀取。回應時間超過這些上限的 store 會被視為失敗：視為未命中，字典改從其來源取得。使用 ioredis 時，每個命令約從 400 ms 起跳，因為其交握需要三次往返。模組每分鐘記錄一次警告；ioredis 還會另外印出自己的錯誤。不是字典的值會被視為未命中並被覆寫。未知的掛載名稱會在第一次使用時警告一次，之後應用程式會在沒有此 layer 的情況下執行。
+- **當來源失敗時**，不會保留任何失敗結果。失敗的擷取或無法讀取的檔案不會進入任何快取（無論是這個快取或執行個體自己的快取），下一個請求會再次讀取。請參閱[部署](/zh-Hant/guide/deployment#when-a-dictionary-cannot-be-read)。
+- **在開發與預渲染時關閉**，因為它們會讀取自己的檔案，不應需要您的正式環境 Redis。
+- **失效處理。** 沒有清除呼叫：新的建置會使用新的鍵。若要立即重新整理正在執行的建置，請從 storage 中移除 `i18n-micro:` 鍵並重新啟動執行個體。`clearCache` 與 HMR 只會影響處理程序的狀態。
+- 執行階段的變更（`$mergeTranslations`、`$defineI18nRoute`）只會留在進行變更的渲染或瀏覽器中，永遠不會寫入 storage。
+
+## Payload 大小 {#payload-size}
+
+當 payload 輸出超過 `translationPayloads.warnFileCount`（500 個檔案）或 `warnSizeBytes`（10 MB）時，建置會發出警告。發生這種情況時：
+
+- 將只在頁面使用的鍵移出根檔案；
+- 連結顯示相同鍵的路由（`routesLocaleLinks`）；
+- 在無伺服器或 Edge 環境中，使用 `translationPayloads.mode: 'source'`，讓伺服器 bundle 內嵌精簡的來源，而非每個頁面 × locale（[部署](/zh-Hant/guide/deployment#serverless-and-edge)）。Edge 建置超過平台限制時會自行發出警告（[Bundle 限制](/zh-Hant/guide/deployment#bundle-limits-on-edge)）；
+- 啟用 `nitro.compressPublicAssets` 以產生靜態 payload 的 `.gz` / `.br` 副本。
+
+## 測量 {#measuring}
+
+本儲存庫使用 `pnpm run budget:payload` 追蹤 playground 傳送的內容；目前的數據如下：
+
+在 `playground` 上針對 `/`、`/de` 測量：
+
+| 測量項目 | 大小 |
+| --- | --- |
+| 磁碟上的翻譯來源 | 7.8 MB |
+| 以個別 payload 檔案提供 | 23.9 MB |
+| 最大的行內 `__NUXT_DATA__` | 0.4 KB |
+| 用戶端資產 | 624.4 KB |
+
+Playground 是一個測試平台，其產生的字典多達 10 萬個鍵，因此這些數字並不是實際應用程式中會出現的數值
+— 它們是用來比較的固定基準。當數字意外增加時，預算檢查就會失敗，
+藉此發現 payload 內容的意外變更。
+
+您可以使用 `pnpm test:performance` 自行執行基準測試套件；其運作方式請參閱[基準測試方法](https://s00d.github.io/nuxt-i18n-micro/contributing/performance-methodology)。
+
+## 相關內容 {#related}
+
+<CardGroup cols={2}>
+
+<Card title="基準測試" icon="book-open" href="/zh-Hant/guide/performance-results">
+
+</Card>
+
+<Card title="部署" icon="book-open" href="/zh-Hant/guide/deployment">
+
+</Card>
+
+<Card title="翻譯檔案" icon="book-open" href="/zh-Hant/guide/translations">
+
+</Card>
+
+</CardGroup>

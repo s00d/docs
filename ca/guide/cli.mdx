@@ -1,0 +1,327 @@
+---
+title: "CLI"
+description: "Comproveu les traduccions a la CI, trobeu claus no utilitzades, ompliu buits mitjançant un servei de traducció i intercanvieu fitxers amb traductors des de la línia d'ordres."
+---
+
+`@i18n-micro/cli` gestiona els fitxers de locale d'un projecte Nuxt. Llegeix `locales`, `defaultLocale`, `translationDir` i les vostres capes de `nuxt.config`, de manera que no necessita cap configuració pròpia.
+
+![Un terminal que executa i18n-micro check, que llista una clau que falta, una de no definida i quatre de no utilitzades i falla; després extract, que afegeix la clau no definida; i després clean --dryRun, que llista les quatre claus que eliminaria](/images/cli/demo.gif)
+
+| Ordre | Feu-la servir per |
+| --- | --- |
+| `check` | Fer fallar una compilació per qualsevol problema als fitxers de locale |
+| `translate` | Omplir les claus que falten mitjançant un servei de traducció |
+| `clean` | Eliminar les claus que no fa servir res |
+| `rename` | Moure una clau, o un espai de noms sencer, a tot arreu alhora |
+
+```bash
+npm install -D @i18n-micro/cli
+npx i18n-micro --help
+```
+
+Executeu-la des de l'arrel de l'aplicació, o indiqueu-la amb `--cwd`. Tots els indicadors de totes les ordres són a la [referència d'ordres](/ca/api/cli).
+
+<Tip>
+
+**Veniu de nuxt-i18n-micro-cli?** `@i18n-micro/cli` el substitueix; els binaris `i18n-micro` i `i18n-micro-cli` es mantenen. Vegeu la [taula d'ordres antigues](#moving-from-nuxt-i18n-micro-cli).
+
+</Tip>
+
+## Fer-la servir a la CI {#use-it-in-ci}
+
+```bash
+i18n-micro check
+```
+
+`check` és el control de pas. Informa de:
+
+| Comprovació | Significa |
+| --- | --- |
+| `missing` | Una clau del locale per defecte no és en un locale |
+| `empty` | Un valor és `''`. L'aplicació mostra un buit, no el valor alternatiu |
+| `extra` | Un locale té una clau que el locale per defecte no té |
+| `placeholders` | S'ha perdut o afegit un `{name}`, o un plural ha perdut les seves formes |
+| `undefined` | El codi fa servir una clau que el locale per defecte no té |
+| `unused` | Res del projecte fa servir una clau |
+| `duplicates` | El mateix text sota claus diferents. Desactivat per defecte: passeu `--duplicates` |
+
+- `--only missing,placeholders` executa algunes comprovacions; una comprovació indicada a `--only` que no s'ha pogut executar falla.
+- `--json` dona un informe per a eines.
+- `--ignore` omet fitxers de codi font.
+- Mentre hi hagi claus calculades en temps d'execució, `unused` s'omet i l'informe n'explica el motiu.
+
+Totes les ordres acaben amb un de tres codis, de manera que una pipeline pot distingir un problema amb les traduccions d'un problema amb l'eina:
+
+| Codi de sortida | Significat |
+| --- | --- |
+| `0` | No hi ha res a informar |
+| `1` | Troballes |
+| `2` | L'ordre no s'ha pogut executar: un error d'ús, un fitxer malmès, una petició fallida |
+
+Altres ordres que val la pena posar en un pas de CI:
+
+```bash
+i18n-micro format --check      # fails if a file is not formatted
+i18n-micro lint                # stray spaces, empty values, your own regex rules
+i18n-micro stats --baseRef main
+```
+
+## Mantenir els locales sincronitzats {#keep-locales-in-step}
+
+| Ordre | Què fa |
+| --- | --- |
+| `extract` | Llista les claus que fa servir el codi i que encara no tenen text. Un text per defecte, com a `$t('key', {}, 'Welcome')`, va al locale per defecte. |
+| `sync` | Elimina les claus que el locale per defecte no té. Proveu primer `--dryRun`. |
+| `clean` | Elimina les claus que no fa servir res. Proveu primer `--dryRun`. |
+| `search` | Troba claus i valors, i mostra on es fa servir cada clau. |
+| `stats` | Compleció per locale; `--baseRef main` compara amb una referència de git. |
+
+`sync` s'atura com `clean` quan eliminaria una clau que no pot demostrar que no es fa servir, i també quan el locale per defecte no té res amb què comparar. Si no hi ha res a eliminar, no s'atura mai, de manera que `$t(item.label)` per si sol no és motiu per fer servir `--force`.
+
+<Note>
+
+`extract` i `sync` mai no escriuen `''` per a una clau sense traducció. La clau continua absent, de manera que `fallbackLocale` s'aplica en temps d'execució i `check` n'informa. Una cadena buida seria un valor definit i mostraria un buit.
+
+</Note>
+
+### Què llegeixen les ordres {#what-the-commands-read}
+
+`check`, `extract`, `sync`, `clean`, `search` i `rename` llegeixen el codi font de tot el projecte, no una llista fixa de carpetes:
+
+- **Es llegeix:** plantilles i scripts mitjançant un analitzador, `.html` i Pug com a text, totes les capes, i les carpetes fora de l'arrel a què apunta un àlies o `components`.
+- **S'omet:** `node_modules`, la sortida de compilació i els fitxers de locale. Afegiu-hi els vostres amb `--ignore 'legacy/**,*.stories.ts'`.
+- **El codi de proves** compta com a ús, de manera que `clean` i `check --only unused` mantenen una clau que només llegeix una prova. Mai no afegeix cap clau: `extract` omet aquestes claus, i `check` no les informa com a no definides.
+
+Codi de proves vol dir les carpetes arrel `tests`, `test`, `__tests__`, `e2e`, `cypress` i `playwright`, més els fitxers JavaScript i TypeScript `.spec` i `.test` (`.ts`, `.tsx`, `.mts`, `.js`, `.jsx`, `.mjs` i similars) en qualsevol lloc. Només les carpetes arrel queden exemptes dels dubtes que es descriuen a continuació: `pages/tests/[id].vue` és una pàgina com qualsevol altra, i també ho són `public/` i els fitxers minificats, el codi dels quals no forma part de l'aplicació.
+
+Les ordres reconeixen:
+
+- `$t`, `$ts`, `$tc`, `$has` i `$_t(route)`;
+- `t()` de `useI18n()` i `useTranslationServerMiddleware()`;
+- `<i18n-t keypath>` a les plantilles i a JSX, i `<i18n-group prefix>`;
+- àlies com ara `const { t: tr } = useI18n()`.
+
+### Com decideix `clean` {#how-clean-decides}
+
+`clean` prefereix deixar una clau morta que eliminar-ne una de viva. Una clau es manté quan es compleix qualsevol d'aquestes condicions:
+
+- una crida la fa servir, o fa servir una clau per sota o per sobre seu;
+- una cadena del codi hi és igual: `const key = 'menu.home'`, `<Item label="menu.home" />`;
+- un fitxer JSON, YAML o Markdown del projecte la conté;
+- una clau calculada té un inici estàtic que la cobreix: `` $t(`status.${state}`) `` manté tot el que hi ha sota `status.`;
+- una capa la defineix.
+
+`clean` s'atura sense canviar res quan no ho pot saber, i n'enumera els motius:
+
+- una clau és completament calculada, com a `$t(name)`, `<i18n-t :keypath="name" />` o `<i18n-t v-bind="props" />`;
+- `$t` es passa com a valor, com a `items.map($t)`;
+- una funció anomenada `t` rep un argument calculat i ve d'un paràmetre, una importació o una crida: pot ser un embolcall de la real. Una funció que defineix el mateix fitxer no compta, perquè un embolcall tindria la seva pròpia crida a dins;
+- un fitxer de codi font no es pot analitzar;
+- cap fitxer no fa servir cap clau, cosa que normalment vol dir que busca al lloc equivocat;
+- un fitxer de locale és un enllaç simbòlic fora del projecte, de manera que una altra aplicació el pot llegir.
+
+<Steps>
+
+<Step title="Previsualitzar">
+
+Executeu `i18n-micro clean --dryRun` i reviseu el que llista.
+
+</Step>
+
+<Step title="Protegir claus">
+
+Conserveu les claus que només semblen no utilitzades amb `--exclude '^errors\.'`.
+
+</Step>
+
+<Step title="Eliminar">
+
+Torneu-la a executar amb `--force`.
+
+</Step>
+
+</Steps>
+
+## Traduir les claus que falten {#translate-missing-keys}
+
+```bash
+i18n-micro translate --dryRun                     # keys and characters per locale, nothing sent
+export I18N_TRANSLATE_TOKEN=...                   # or put it in .env
+i18n-micro translate --service deepl --locale de,fr
+```
+
+- `translate` omple les claus que falten o estan buides; `--replace` ho torna a traduir tot.
+- Els marcadors de posició i les formes de plural estan protegits. Una traducció que ha perdut un marcador de posició no s'escriu: la clau es llista i l'ordre acaba amb `1`.
+- Cada lot es desa abans d'enviar la petició següent, de manera que una fallada només costa la petició que ha fallat.
+
+| `--service` | Servei | `--token` | `--options` útils |
+| --- | --- | --- | --- |
+| `ai` | Vercel AI Gateway, OpenAI, Anthropic o qualsevol servidor compatible amb OpenAI | Clau d'API, o `AI_GATEWAY_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` | `provider`, `model`, `baseUrl`, `maxTokens` |
+| `azure` | Azure Translator | Clau de subscripció | `region` |
+| `deepl` | DeepL, claus gratuïtes incloses | Clau d'autenticació | `formality`, `glossaryId`, `context` |
+| `google` | Google Cloud Translation v2 | Clau d'API | `model` |
+| `libretranslate` | LibreTranslate | Opcional | `baseUrl` |
+| `yandexcloud` | Yandex Cloud Translate | Clau d'API, o token IAM amb `authScheme:Bearer` | `folderId`, `model` |
+
+Les opcions són parells `key:value`: `--options provider:openai,model:gpt-4o-mini`. Tots els serveis també accepten `baseUrl`, `retries`, `retryDelayMs` i `timeoutMs`. Una petició de traducció pot haver estat facturada ja, així que només es repeteix després d'un `429` o `503`, i no quan el servei demana esperar més d'un minut.
+
+<Warning>
+
+Els indicadors són visibles a l'historial del shell i a les llistes de processos, així que passeu el token mitjançant la variable d'entorn. La CLI emmascara allò que sap que és secret allà on ho imprimeix, `--debug` inclòs: tokens, claus de proveïdor, credencials Basic, i la consulta i les credencials d'un URL que hàgiu configurat. Un servidor que reformata una clau abans de retornar-la queda fora del seu abast, així que tracteu amb cura els registres d'una execució fallida.
+
+</Warning>
+
+El servei `ai` segueix un glossari. Quan existeix `.i18n-glossary.json`, es fa servir sense cap indicador; `--glossaryFile` en tria un altre.
+
+```json .i18n-glossary.json
+{ "entries": [{ "source": "Cart", "target": "Warenkorb", "to": "de" }] }
+```
+
+## Convertir el text fix en claus {#turn-hardcoded-text-into-keys}
+
+```bash
+i18n-micro text-to-i18n --dryRun   # list what would change
+i18n-micro text-to-i18n            # rewrite the templates
+```
+
+```vue
+<!-- before -->
+<h1>Welcome to our site</h1>
+<!-- after -->
+<h1>{{ $t('pages.index.welcome-to-our') }}</h1>
+```
+
+Només es reescriuen les plantilles `.vue` del mateix projecte, no les d'una capa o d'un destí d'àlies. Cada fitxer reescrit es torna a analitzar abans d'escriure'l. Aquests casos es llisten i conserven el seu text:
+
+- el text de fitxers `.ts` i d'scripts, perquè `$t` no és accessible a tot arreu;
+- el text al costat de marcatge o d'una interpolació, com a `<p>Hello <b>world</b> today</p>`: mitja frase no es pot traduir per si sola;
+- una clau generada que col·lidiria amb una altra, com pot passar amb una pàgina pare i la seva filla;
+- una clau coneguda que no pot anar entre cometes.
+
+<Warning>
+
+Feu primer un commit i reviseu el diff.
+
+</Warning>
+
+## Canviar el nom d'una clau {#rename-a-key}
+
+```bash
+i18n-micro rename --from common.save --to actions.save
+i18n-micro rename --from settings --to account.settings   # a whole namespace
+```
+
+`rename` edita l'arbre sintàctic, de manera que els comentaris i les cadenes no relacionades queden com estan, i se segueixen els àlies i `:keypath`. El fitxer propi d'una capa no es canvia mai. Avisa del que no pot reescriure, i ho deixa estar:
+
+- una clau calculada sota el nom antic;
+- cada cadena simple que hi és igual;
+- una plantilla Pug;
+- un fitxer font en una capa o en una carpeta fora del projecte.
+
+`--to` ha de ser una clau que es pugui escriure en codi: sense cometes, sense barra inversa, sense segments buits, sense `__proto__`.
+
+## Intercanviar fitxers amb traductors {#exchange-files-with-translators}
+
+```bash
+i18n-micro export --format csv
+i18n-micro import --format csv --dryRun
+```
+
+**`export`** escriu totes les claus de tots els locales, incloses les no traduïdes, amb el text del locale per defecte com a origen: una columna `Source` en CSV, un comentari `#.` en PO.
+
+- Sense `--dir`, el PO va a `pots` i el CSV a `csv_exports`.
+- Registra el que ha escrit a `.i18n-export.json`, a la carpeta de sortida. S'atura quan un fitxer ha canviat des d'aleshores i conté traduccions que els fitxers de locale no tenen, entrades PO fuzzy incloses; `--force` les sobreescriu. Les edicions habituals dels fitxers de locale no l'aturen.
+
+**`import`** fusiona, omet les cel·les buides i omet les entrades PO marcades com a `fuzzy`.
+
+- Una clau que sobreescriuria un valor, o un valor sobre tot un grup de claus, es llista i es deixa fora, i l'ordre acaba amb `1`.
+- S'atura amb el codi `2` davant d'un catàleg en una ubicació inesperada, el catàleg d'una pàgina que l'última exportació no va escriure, una cometa fora de lloc en un CSV, o una entrada de pàgina amb `disablePageLocales`.
+
+Per a una plataforma de traducció, feu servir la seva pròpia CLI: la configuració de [Crowdin](/ca/guide/crowdin) sincronitza els fitxers JSON, fitxers de pàgina inclosos.
+
+## Sincronitzar amb el vostre propi endpoint {#sync-with-your-own-endpoint}
+
+`sync-remote` intercanvia els fitxers de locale globals amb un endpoint HTTP que gestioneu vosaltres. Els fitxers de pàgina es queden en local, i l'ordre ho indica. Descriviu l'endpoint a `.i18n-remote.json`:
+
+```json .i18n-remote.json
+{ "url": "https://translations.example.com", "path": "translations" }
+```
+
+L'endpoint respon a `GET` i `PUT` amb un objecte `{ locale: messages }`. Autentiqueu-vos amb `auth: { username, password }`, o poseu un token bearer a `I18N_REMOTE_TOKEN`.
+
+| | Pull | Push |
+| --- | --- | --- |
+| Què es mou | Omple el que no teniu i conserva les claus que només teniu vosaltres | Envia les claus pròpies del projecte, no les d'una capa, i deixa fora els vostres buits |
+| Conflictes | Una clau que difereix a les dues bandes: no s'escriu res, codi `1`; `--force` agafa el valor remot | Un PUT substitueix el document, així que un push primer llegeix l'endpoint i s'atura amb codi `1` quan conté text que no teniu; `--force` el sobreescriu. Un endpoint que respon `404` no té res a perdre |
+| `--dryRun` | Llegeix de l'endpoint, llista els canvis, no escriu res | Indica què s'enviaria, sense contactar amb l'endpoint |
+
+Un locale que no heu configurat s'omet, i un valor remot en blanc no esborra res.
+
+## Migrar des de nuxt-i18n-micro-cli {#moving-from-nuxt-i18n-micro-cli}
+
+| Ordre antiga | Ara |
+| --- | --- |
+| `validate` | `check` |
+| `diff` | `check --only missing` |
+| `check-duplicates` | `check --only duplicates` |
+| `export-csv`, `import-csv` | `export --format csv`, `import --format csv` |
+| `--potsDir`, `--csvDir` | `--dir` |
+| `estimate` | `translate --dryRun` |
+| `glossary` | Editeu `.i18n-glossary.json`; `translate` el llegeix per si sol |
+| `backup`, `restore` | Git, que ja conserva els vostres fitxers de locale |
+| `init` | `nuxi init`, i després afegiu `nuxt-i18n-micro` a `modules` |
+| `split` | Eliminada: el mòdul no llegeix fitxers dividits |
+| `optimize` | `check --only duplicates` |
+| `replace-values` | El vostre editor o `sed` |
+| `stats --full` | `stats`; [DevTools](/ca/guide/devtools) té els detalls |
+| `search --hardcodedOnly` | `text-to-i18n --dryRun` |
+| `search --preferUnused`, `--onlyVue` | Eliminades |
+| Regles de `lint` `no-html-tags`, `no-special-chars`, `no-mixed-case`, `no-missing-punctuation`, `no-inconsistent-pluralization` | Eliminades: marcaven text normal. Escriviu una entrada a `customRegexRules` si en necessiteu una |
+| `text-to-i18n --extractOnlyDirs`, `--extractOnlyPatterns`, `--verbose` | Eliminades: el codi no es reescriu mai |
+| `--logLevel verbose` | Eliminat: no feia res |
+
+**Serveis eliminats:** `googlefree`, `yandex` (feu servir `yandexcloud`), `ibm`, `lingvatranslate`, `modernmt`, `lilt`, `unbabel`, `reverso`, `baidu`, `papago`, `tencent`, `systran`, `mymemory`.
+
+**Tipus de `sync-remote` eliminats:** `github`, `gitlab`, `crowdin`, `lokalise`, `tolgee`, `weblate`. Feu servir la CLI pròpia de la plataforma, o `custom`, que ja no necessita `type`.
+
+### Canvis de comportament {#changed-behaviour}
+
+- `extract` i `sync` ja no escriuen `''`. Les claus continuen absents, i `check` n'informa. `extract` només escriu una clau quan el codi en dona el text.
+- `extract` escriu les claus de pàgina a `locales/pages/<route name>/`, on les llegeix el mòdul, i analitza `app/` a Nuxt 4. Moveu el contingut de directoris com `pages/_about` i `pages/blog_`, i elimineu qualsevol `locales/pages/<locale>.json` sobrant.
+- Es respecta `translationDir` de `nuxt.config`; abans, totes les ordres feien servir `locales` sense avisar.
+- Sense `defaultLocale`, el valor per defecte és `en`, com al mòdul, i es respecta `DEFAULT_LOCALE`. Abans era el primer locale.
+- `check` i `sync` fan servir el locale per defecte com a referència i comproven els fitxers de pàgina. `"a.b"` i `a: { b }` compten com una sola clau.
+- `clean` conserva una clau que es faci servir en qualsevol lloc, en qualsevol àmbit, i s'atura quan no es pot demostrar l'ús. `--include` i `--exclude` trien què es pot eliminar.
+- `sync` s'atura de la mateixa manera, i quan el locale per defecte no té claus amb què comparar. `--force` ho anul·la. També s'atura quan `DEFAULT_LOCALE` ha triat una referència diferent de la de `nuxt.config`.
+- Els indicadors llargs amb un sol guió i els arguments sobrants són errors: `clean -dryRun` ja no executa `clean`.
+- Un fitxer de només lectura, o un fitxer que no és UTF-8, no es pot desar: l'ordre s'atura abans de canviar res. Llegir aquest fitxer no és cap problema. Una clau repetida, una clau anomenada `__proto__` i un enter superior a 2^53 aturen una ordre, perquè en desar-se es perdrien.
+- Un indicador que necessita un valor i va seguit d'un altre indicador és un error; escriviu `--flag=--value` per a un valor que comença amb guió. Un indicador booleà només accepta `true` o `false`.
+- `export` s'atura en lloc de sobreescriure traduccions que no s'han importat mai.
+- Els codis de sortida són `0`, `1` i `2`; abans les fallades eren `1`, i `diff` i `check-duplicates` sempre `0`.
+- `lint --fix` ja no deixa fitxers `.bak`.
+- En desar, es conserven el sagnat, els finals de línia, el salt de línia final, l'enllaç simbòlic i l'enllaç dur d'un fitxer, i no es toquen els fitxers que no han canviat.
+- Un indicador mal escrit o eliminat ara és un error, no s'ignora sense avisar.
+- Els camins com `--dir` són relatius al projecte, no al shell.
+- `ai` ja no carrega paquets `@ai-sdk/*`: feu servir `provider` `gateway`, `openai` o `anthropic`, o `baseUrl` per a un servidor compatible amb OpenAI.
+
+## Relacionat {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Ordres de la CLI" icon="brackets-curly" href="/ca/api/cli">
+
+</Card>
+
+<Card title="Fitxers de traducció" icon="book-open" href="/ca/guide/translations">
+
+</Card>
+
+<Card title="Crowdin" icon="book-open" href="/ca/guide/crowdin">
+
+</Card>
+
+<Card title="DevTools" icon="book-open" href="/ca/guide/devtools">
+
+</Card>
+
+</CardGroup>

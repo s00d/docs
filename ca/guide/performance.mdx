@@ -1,0 +1,261 @@
+---
+title: "Ajust del rendiment"
+description: "Els paràmetres que canvien la memòria, la mida dels payloads i la memòria cau, i com mesurar el que envia la vostra aplicació."
+---
+
+Els valors per defecte estan ajustats per a una aplicació típica: un payload JSON per pàgina i idioma, traduccions fora de l'HTML i memòries cau limitades al servidor. Aquesta pàgina enumera els pocs paràmetres que val la pena canviar quan un catàleg és gran, el servidor té poca memòria o els payloads vénen d'un altre host. Per a xifres mesurades en comparació amb `@nuxtjs/i18n` i Nuxt sense mòdul, vegeu [Benchmarks](/ca/guide/performance-results).
+
+## Què fan ja els valors per defecte {#what-the-defaults-already-do}
+
+- **Un payload per pàgina.** La compilació fusiona les claus arrel, de pàgina i de l'idioma alternatiu a `/_locales/<page>/<locale>/data.json`, de manera que una pàgina carrega un sol fitxer i `$t` és una única cerca.
+- **Cap diccionari a l'HTML.** L'SSR manté les traduccions a la memòria del servidor; el navegador obté el payload en lloc d'analitzar-lo des de `__NUXT_DATA__`.
+- **Memòria cau del navegador.** `?v=` només canvia quan canvien les traduccions, de manera que un navegador conserva els seus payloads entre desplegaments que no els han tocat. La còpia estàtica d'un host és vigent durant 60 segons i després es revalida: una càrrega repetida espera un `304`. La ruta del servidor respon `immutable` durant un any ([Desplegament](/ca/guide/deployment#cache-headers-and-datebuild)).
+- **Memòria del servidor limitada.** Per defecte, el servidor desa a la memòria cau com a màxim 1000 payloads i descarta els utilitzats fa més temps.
+
+## Dividir les traduccions per pàgina {#split-translations-by-page}
+
+Les claus que es fan servir en una sola pàgina han d'anar a `locales/pages/<page>/<locale>.json`, no als fitxers arrel: les claus arrel formen part del payload de totes les pàgines. Vegeu [Fitxers de traducció](/ca/guide/translations).
+
+Dos paràmetres canvien aquesta divisió:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    // pages that show the same keys share one payload: /de/products/123 loads the products payload
+    routesLocaleLinks: { 'products-id': 'products' },
+    // or: no page files at all, every page loads only the root dictionary
+    // disablePageLocales: true,
+  },
+})
+```
+
+[`routesLocaleLinks`](/ca/api/module-options#routeslocalelinks) elimina payloads duplicats per a rutes relacionades. [`disablePageLocales`](/ca/api/module-options#disablepagelocales) és adequat per a aplicacions petites on un diccionari per idioma és més senzill.
+
+## Memòries cau del servidor {#server-caches}
+
+| Paràmetre | Per defecte | Efecte |
+| --- | --- | --- |
+| [`cacheMaxSize`](/ca/api/module-options#cachemaxsize) | `0` | Nombre màxim d'entrades a les memòries cau de payloads. `0` = sense límit al navegador, 1000 al servidor. |
+| [`cacheTtl`](/ca/api/module-options#cachettl) | `0` | Segons abans que una entrada de la memòria cau es torni a carregar. `0` = mai; definiu-lo quan els payloads vénen d'`apiBaseServerHost` i canvien sense un nou desplegament. |
+| `serverTranslationPreload` | `false` | Carrega el payload `index` al middleware de Nitro per a cada sol·licitud de pàgina, perquè els helpers del servidor i la pàgina d'inici el reutilitzin. |
+
+Reduïu `cacheMaxSize` en una instància petita amb moltes pàgines × idiomes. Les traduccions editades localment mai no necessiten TTL: en desenvolupament es llegeixen els fitxers en directe, i els payloads de producció només canvien amb un desplegament.
+
+## Memòria en un servidor Node {#memory-on-a-node-server}
+
+Sota una càrrega sostinguda, un servidor Node pot situar-se a unes 12 vegades el seu heap viu i quedar-s'hi. En una prova d'estrès de 100k claus per pàgina, un heap viu de 90 MB funcionava amb uns 1,1 GB de RSS. No és una fuita. Després d'un cicle de GC sobredimensionat, V8 augmenta el límit del heap i conserva les pàgines alliberades en un grup per reutilitzar-les mentre dura la càrrega. Uns 8 segons després que s'aturi la càrrega, el grup es buida i la RSS baixa a uns 160 MB. `global.gc()` no retorna aquesta memòria. Nuxt sense el mòdul fa el mateix, a escala del seu heap més petit.
+
+Costa marge: amb un límit de memòria per sota d'aquest nivell i sense límit de heap, el procés es pot matar. Definiu un límit que s'ajusti al vostre i que quedi ben per sobre del heap viu:
+
+```bash
+NODE_OPTIONS=--max-old-space-size=512 node .output/server/index.mjs
+```
+
+| 100k claus, 12 idiomes, de 5 a 30 minuts de càrrega | Per defecte | `--max-old-space-size=512` |
+| --- | --- | --- |
+| RSS sota càrrega | uns 1.150 MB | 254-287 MB |
+| Sol·licituds per segon | 624 | 517-572 |
+
+Així doncs, el límit intercanvia un 8-10 % del rendiment per la memòria. Un catàleg de mida normal té un heap més petit i un salt més petit. Aquestes execucions es van fer a macOS amb Node 22, no en un contenidor.
+
+## Temps d'anàlisi i `dir` {#parse-time-and-dir}
+
+`dir: 'auto'` en un idioma fa que el navegador dedueixi la direcció a partir del contingut mentre l'analitza. A Chromium, el DOMContentLoaded amb 20.000 elements era d'aproximadament 1,1 s amb `dir="auto"` i 0,1 s sense, i amb 5.000 elements d'uns 130 ms enfront de 45 ms. Deixeu `dir` sense definir o definiu-lo com a `ltr` o `rtl` ([Direcció del text](/ca/guide/seo#text-direction)).
+
+## Memòria cau compartida per a diverses instàncies {#shared-cache-for-several-instances}
+
+Amb diverses instàncies d'una mateixa compilació, [`cacheStorage`](/ca/api/module-options#other) els proporciona una única memòria cau de diccionaris en qualsevol emmagatzematge de Nitro, sobre la connexió que la vostra aplicació configura a `nitro.storage`. El mòdul no afegeix cap connector ni cap dependència.
+
+**És una memòria cau, no una font.** Les traduccions vénen dels payloads incrustats o públics, o d'`apiBaseServerHost`. Només s'escriu el que ha vingut de la font, i les claus porten la compilació, de manera que un magatzem que ompliu a mà no es llegeix. Per servir traduccions des de KV o una base de dades, poseu a `apiBaseServerHost` una petita ruta que les llegeixi.
+
+**Quan ajuda.** Només amb un `apiBaseServerHost` remot. Tres instàncies que recorrien 39 diccionaris feien 117 sol·licituds al host sense l'opció i 48 amb ella. Amb fitxers al disc, un encert al magatzem no és més ràpid que el fitxer, i una primera passada per 12 pàgines trigava 280-296 ms sense l'opció i 308-325 ms amb un Redis ple, així que deixeu-la sense definir. En un preset que incrusta diccionaris no fa res sense un host, i la compilació ho indica.
+
+Un diccionari en fred, un client, un recorregut cadascun, així que són xifres aproximades, i la major part és la distància fins al host:
+
+| Magatzem | Des del host | Des del magatzem |
+| --- | --- | --- |
+| Cloudflare KV | uns 300 ms | uns 110 ms |
+| D1 | uns 230 ms | uns 115 ms |
+| Deno KV | uns 430 ms | uns 100 ms |
+| Upstash, Vercel serverless | uns 445 ms | uns 245 ms |
+| Upstash, Vercel Edge | uns 505 ms | uns 235 ms |
+
+### Redis {#redis}
+
+Necessita `ioredis` al vostre projecte.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      redis: { driver: 'redis', url: process.env.REDIS_URL },
+    },
+  },
+  i18n: {
+    cacheStorage: 'redis', // the mount name
+    apiBaseServerHost: 'https://translations.internal',
+    cacheTtl: 300,
+  },
+})
+```
+
+### Upstash a Vercel i Vercel Edge {#upstash-on-vercel-and-vercel-edge}
+
+Feu servir el driver `upstash` en tots dos: es comunica per REST, mentre que el driver `redis` necessita TCP. Necessita `@upstash/redis` al vostre projecte i llegeix `UPSTASH_REDIS_REST_URL` i `UPSTASH_REDIS_REST_TOKEN` de l'entorn.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      upstash: { driver: 'upstash' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'upstash',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+### Cloudflare KV {#cloudflare-kv}
+
+Vinculeu un espai de noms al Worker com a `I18N_KV` (`kv_namespaces` a la seva configuració de wrangler).
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      kv: { driver: 'cloudflare-kv-binding', binding: 'I18N_KV' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'kv',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+Un host que sigui un altre Worker del mateix compte necessita el flag de compatibilitat `global_fetch_strictly_public`; si no, la sol·licitud no hi arriba.
+
+### Cloudflare D1 {#cloudflare-d1}
+
+`nitro.storage` no pot contenir un objecte de base de dades, així que un plugin de Nitro munta el driver. El muntatge es comprova en el primer ús, de manera que això és prou aviat. Vinculeu la base de dades com a `I18N_DB` (`d1_databases`) i tingueu `unstorage` al vostre projecte.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    experimental: { database: true },
+    database: {
+      default: { connector: 'cloudflare-d1', options: { bindingName: 'I18N_DB' } },
+    },
+  },
+  i18n: {
+    cacheStorage: 'd1',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+```ts
+// server/plugins/i18n-storage.ts
+import dbDriver from 'unstorage/drivers/db0'
+
+export default defineNitroPlugin(() => {
+  useStorage().mount('d1', dbDriver({ database: useDatabase() }))
+})
+```
+
+El driver `db0` està marcat com a experimental i ignora el TTL: les files de compilacions antigues es queden fins que les esborreu.
+
+### Deno KV {#deno-kv}
+
+A Deno Deploy, aprovisioneu una base de dades (`deno deploy database provision <name> --kind denokv`), assigneu-la a l'aplicació (`deno deploy database assign`) i feu servir el driver:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      kv: { driver: 'deno-kv' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'kv',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+### Com es comporta {#how-it-behaves}
+
+Un diccionari es busca a la memòria cau pròpia de la instància, després a l'emmagatzematge compartit i després a la seva font. La memòria cau pròpia de la instància es manté, perquè `$t` és síncron i necessita l'arbre a la memòria: això separa qui obté de qui serveix, no estalvia memòria.
+
+- **Qui obté.** Amb un host remot, una sol·licitud al backend per diccionari en lloc d'una per instància. Les instàncies que fallen la cerca al mateix moment l'obtenen cadascuna, perquè no hi ha bloqueig.
+- **Les pàgines sense diccionari propi** no s'emmagatzemen, perquè noms de pàgina inventats no puguin afegir claus. Cada instància obté una pàgina així del host una vegada, i als Workers, on els isolates van i vénen, això és un degoteig constant.
+- **El host està caigut.** Les pàgines amb un diccionari emmagatzemat funcionen. Una pàgina que no en té es renderitza a partir del diccionari arrel emmagatzemat, amb les seves pròpies claus en brut, amb [un `503` que cap memòria cau conserva](/ca/guide/deployment#when-a-dictionary-cannot-be-read), i `/_locales` respon `503` per a ella fins que el host torna. `useTranslationServerMiddleware` respon amb les claus per a un diccionari que no pot llegir.
+- **El host** és `NUXT_I18N_APP_BASE_SERVER_HOST` en temps d'execució o, si no, `apiBaseServerHost` de la compilació, igual que sense l'opció. En un preset que incrusta diccionaris (Cloudflare, Vercel, Netlify, vegeu [Desplegament](/ca/guide/deployment#serverless-and-edge)) la capa només s'aplica amb un host: les dades ja són al paquet, i una còpia a KV seria una lectura per xarxa del que ja té la memòria.
+- **Les claus** són `i18n-micro:<buildId>~<dateBuild>~<fallbackLocale>~<host>:<locale>:<page>`, de manera que dues compilacions en un desplegament progressiu mai no es llegeixen entre elles, ni tampoc dos backends d'un mateix artefacte. Cada instància ha de venir d'una mateixa compilació (un artefacte, o un [`buildId`](https://nuxt.com/docs/api/nuxt-config#buildid) de Nuxt fixat); les instàncies compilades per separat simplement no comparteixen. Amb un `buildId` fixat i `dateBuild: 0`, dues compilacions diferents sí que comparteixen claus. Només es busquen els idiomes activats, i els noms de pàgina de més de 200 caràcters se salten la capa.
+- **Què s'emmagatzema.** Un diccionari es compara amb l'arrel (`__root`) abans d'escriure'l, i només s'hi desa quan conté totes les claus arrel i és diferent de l'arrel. Així, una pàgina inventada que es respon amb l'arrel no afegeix cap clau, ni tampoc un cos d'error amb codi 200 en una pàgina. Cada instància llegeix una pàgina així de la font una vegada. Un host ha de respondre a les pàgines desconegudes amb l'arrel, un objecte buit o un 404, i servir `__root`. Un host sense `__root`, o un que serveix pàgines sense les claus arrel, no comparteix res. Si el host respon a `__root` mateix amb un error ben format, això s'emmagatzema: mantingueu `cacheTtl` curt quan el backend pugui fer-ho.
+- **Caducitat.** Una entrada caduca `cacheTtl` segons després d'escriure's, o al cap d'un dia quan `cacheTtl` és `0`, perquè les claus de compilacions antigues no s'acumulin. Un valor pot romandre a la memòria cau pròpia d'una instància durant un altre `cacheTtl`, i a la memòria cau de fragments del renderitzat durant un més: els canvis al backend es veuen en un màxim de tres vegades `cacheTtl`. Els drivers sense caducitat (`fs`) conserven les claus antigues fins que les elimineu.
+- **Quan l'emmagatzematge falla**, la pàgina no. Una lectura pot trigar 1 segon, cosa que cobreix l'establiment d'una connexió i una clau de Cloudflare KV freda en aquella ubicació. Després d'un error, el límit és de 250 ms fins que el magatzem torna a respondre. Tres errors seguits tanquen la capa durant 5 segons. Mentre està tancada, i mentre una lectura acaba de fallar, no s'escriu res. Una escriptura fallida no tanca res, de manera que una rèplica només de lectura continua servint lectures. Un magatzem les respostes del qual triguen més que aquests límits compta com a fallida: una cerca fallida, i el diccionari ve de la seva font. Amb ioredis això comença prop dels 400 ms per comanda, perquè el seu establiment de connexió requereix tres viatges d'anada i tornada. El mòdul registra un avís per minut; ioredis imprimeix els seus propis errors a més d'això. Un valor que no és un diccionari compta com a cerca fallida i se sobreescriu. Un nom de muntatge desconegut avisa una vegada en el primer ús; aleshores l'aplicació funciona sense la capa.
+- **Quan la font falla**, res no conserva l'error. Una sol·licitud fallida o un fitxer il·legible no arriba a cap memòria cau, ni a aquesta ni a la pròpia de la instància, i la sol·licitud següent torna a llegir. Vegeu [Desplegament](/ca/guide/deployment#when-a-dictionary-cannot-be-read).
+- **Desactivada en desenvolupament i en el prerenderitzat**, que llegeixen els seus fitxers i no han de necessitar el vostre Redis de producció.
+- **Invalidació.** No hi ha cap crida de purga: una compilació nova fa servir claus noves. Per refrescar immediatament una compilació en execució, elimineu les claus `i18n-micro:` de l'emmagatzematge i reinicieu les instàncies. `clearCache` i l'HMR només afecten l'estat del procés.
+- Els canvis en temps d'execució (`$mergeTranslations`, `$defineI18nRoute`) es queden al renderitzat o al navegador que els ha fet i mai no s'escriuen a l'emmagatzematge.
+
+## Mida dels payloads {#payload-size}
+
+La compilació avisa quan la sortida de payloads supera `translationPayloads.warnFileCount` (500 fitxers) o `warnSizeBytes` (10 MB). Quan passa:
+
+- traieu dels fitxers arrel les claus exclusives d'una pàgina;
+- enllaceu les rutes que mostren les mateixes claus (`routesLocaleLinks`);
+- en serverless o Edge, feu servir `translationPayloads.mode: 'source'` perquè el paquet del servidor incrusti fonts compactes en lloc de cada pàgina × idioma ([Desplegament](/ca/guide/deployment#serverless-and-edge)). Una compilació Edge avisa pel seu compte quan se supera el límit de la plataforma ([Límits del paquet](/ca/guide/deployment#bundle-limits-on-edge));
+- activeu `nitro.compressPublicAssets` per obtenir còpies `.gz` / `.br` dels payloads estàtics.
+
+## Mesurar {#measuring}
+
+El repositori fa un seguiment del que envia el playground amb `pnpm run budget:payload`; les xifres actuals:
+
+Mesurat a `playground` sobre `/`, `/de`:
+
+| Mesura | Mida |
+| --- | --- |
+| Fonts de traducció al disc | 7.8 MB |
+| Servit com a fitxers de payload separats | 23.9 MB |
+| `__NUXT_DATA__` en línia més gran | 0.4 KB |
+| Recursos del client | 624.4 KB |
+
+El playground és un banc de proves amb diccionaris generats de fins a 100k claus, de manera que no són xifres que es puguin esperar d'una aplicació
+real: són un punt fix per comparar. El pressupost falla quan creixen de manera inesperada,
+i és així com es detecta un canvi accidental en el que porta el payload.
+
+Executeu vosaltres mateixos la suite de benchmarks amb `pnpm test:performance`; com funciona s'explica a la [metodologia dels benchmarks](https://s00d.github.io/nuxt-i18n-micro/contributing/performance-methodology).
+
+## Relacionat {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Benchmarks" icon="book-open" href="/ca/guide/performance-results">
+
+</Card>
+
+<Card title="Desplegament" icon="book-open" href="/ca/guide/deployment">
+
+</Card>
+
+<Card title="Fitxers de traducció" icon="book-open" href="/ca/guide/translations">
+
+</Card>
+
+</CardGroup>

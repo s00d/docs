@@ -1,0 +1,291 @@
+---
+title: "React и Preact"
+description: "Переводы, переключение локали и интеграция с роутером для приложений React и Preact с @i18n-micro/react и @i18n-micro/preact."
+---
+
+`@i18n-micro/react` и `@i18n-micro/preact` оборачивают независимый от фреймворка [runtime](/ru/integrations/runtime-package) в провайдер, хук `useI18n()` и четыре компонента. Используйте их в приложении React или Preact, собранном без Nuxt. У обоих пакетов одинаковый API; в блоке [Preact](#preact) перечислены немногочисленные различия, а общая модель описана в разделе [Фреймворки](/ru/integrations/overview).
+
+## Установка {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add @i18n-micro/react
+```
+
+```bash npm
+npm install @i18n-micro/react
+```
+
+```bash yarn
+yarn add @i18n-micro/react
+```
+
+</CodeGroup>
+
+Peer-зависимости: `react` `^18.0.0 || ^19.0.0`; `react-dom` (необязательно, для рендеринга); `react-router-dom` `^6.0.0 || ^7.0.0` (необязательно, только для `@i18n-micro/react/router`). Протестировано на React 19.3 и 18.3, React Router 7.18 и 6.30.
+
+## Настройка {#setup}
+
+```tsx
+// src/main.tsx
+import { createRoot } from 'react-dom/client'
+import { createI18n, I18nProvider } from '@i18n-micro/react'
+import App from './App'
+import en from './locales/en.json'
+
+const locales = [
+  { code: 'en', iso: 'en-US', displayName: 'English' },
+  { code: 'de', iso: 'de-DE', displayName: 'Deutsch' },
+]
+
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', messages: { en } })
+
+createRoot(document.getElementById('root')!).render(
+  <I18nProvider i18n={i18n} locales={locales} defaultLocale="en">
+    <App />
+  </I18nProvider>,
+)
+```
+
+<Warning>
+
+Создавайте экземпляр один раз — на уровне модуля или в инициализаторе `useState`, но никогда в теле компонента.
+
+</Warning>
+
+`<I18nProvider>` принимает `i18n`, `locales`, `defaultLocale` и `routingStrategy`:
+
+- Опущенное свойство сохраняет значение внешнего провайдера, включая экземпляр.
+- Если экземпляра нет вовсе, провайдер создаёт его из переданных рядом опций `createI18n`, так что свойства остаются простыми данными: `<I18nProvider locale="de" messages={messages}>`.
+- Новое свойство `locale` создаёт новый экземпляр с `messages` этого рендера. Такой экземпляр живёт в компоненте: если что-то выше него приостанавливается во время монтирования, React выбрасывает его вместе со всем, что в него было добавлено.
+
+Все опции `createI18n`, включая `routeMessages`, описаны в разделе [экземпляр](/ru/integrations/overview#the-instance).
+
+## Перевод {#translate}
+
+```tsx
+import { useI18n } from '@i18n-micro/react'
+
+export function Greeting() {
+  const { t, tc, tn } = useI18n()
+  return (
+    <>
+      <h1>{t('greeting', { name: 'Ada' })}</h1> {/* Hello, Ada! */}
+      <p>{tc('apples', 3)}</p> {/* 3 apples */}
+      <p>{tn(1234.5)}</p>
+    </>
+  )
+}
+```
+
+`useI18n()` возвращает:
+
+| Группа | Члены |
+| --- | --- |
+| Перевод | `t`, `ts`, `tc`, `tn`, `td`, `tdr`, `has` |
+| Локаль и маршрут | `locale`, `fallbackLocale`, `currentRoute`, `setLocale`, `setRoute`, `getRoute`, `getLocales`, `defaultLocale()`, `getLocaleName` |
+| Маршрутизация | `switchLocale`, `localePath`, `localeRoute` |
+| Словари | `addTranslations`, `addRouteTranslations`, `clearCache` |
+
+- Компонент перерисовывается при изменении локали, маршрута или доступного для чтения словаря, а также когда провайдер получает новый объект `locales` или `routingStrategy`. Словарь локали, которая не является ни активной, ни резервной, ничего не перерисовывает.
+- `t` и другие методы перевода меняются только вместе с хранилищем, поэтому их безопасно использовать в `memo` и зависимостях эффектов.
+
+`useT` — это одна строка в виде значения. Компонент рендерится, только когда эта строка меняется, что бы ни происходило с другими свойствами провайдера; `<I18nT>` от них тоже не зависит:
+
+```tsx
+const title = useT('page.title')
+```
+
+Загружайте дополнительные словари в любой момент:
+
+```tsx
+const { addTranslations, addRouteTranslations, setRoute } = useI18n()
+
+useEffect(() => {
+  import('./locales/de.json').then((m) => addTranslations('de', m.default))
+  addRouteTranslations('en', 'about', { title: 'About us' })
+  setRoute('about') // t('title') now reads the 'about' dictionary first
+}, [])
+```
+
+У самого экземпляра также есть `loadFromUrl(url, { locale, routeName })` для загрузки JSON через `fetch`.
+
+## Переключение локали {#switch-locale}
+
+```tsx
+const { setLocale, switchLocale } = useI18n()
+
+setLocale('de') // only the locale
+switchLocale('de') // the locale, then the adapter's push to the localized current path
+```
+
+Переключение ничего не загружает; сначала добавьте словарь локали. Запись в хранилище для React синхронна даже внутри `startTransition`, поэтому компонент, приостанавливающийся из-за отсутствующего словаря, показал бы свой fallback. `useLocaleSwitch` сначала загружает словарь и сохраняет старый интерфейс, пока словарь не загрузится:
+
+```tsx
+const [switchTo, pending] = useLocaleSwitch((locale) => i18n.loadFromUrl(`/locales/${locale}.json`, { locale }))
+
+<button disabled={pending} onClick={() => switchTo('de')}>Deutsch</button>
+```
+
+Побеждает последний вызов. Неудачная загрузка отклоняет промис и оставляет локаль прежней.
+
+`<I18nGroup>` передаёт `t` с префиксом дочернему render-prop. `<I18nT>` и `t()` внутри него префикс не получают:
+
+```tsx
+<I18nGroup prefix="profile">{({ t }) => <h2>{t('title')}</h2> /* profile.title */}</I18nGroup>
+```
+
+## Маршрутизация {#routing}
+
+Адаптер для React Router находится в отдельном подпути, чтобы основная точка входа никогда не импортировала `react-router-dom`. Ему нужны `useLocation()` и `useNavigate()`, поэтому создавайте его внутри компонента под роутером:
+
+```tsx
+// src/App.tsx
+import { useMemo } from 'react'
+import { BrowserRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
+import { I18nLink, I18nProvider, I18nSwitcher } from '@i18n-micro/react'
+import { createReactRouterAdapter } from '@i18n-micro/react/router'
+import { i18n, locales } from './i18n'
+import { About, Home } from './pages'
+
+function Localized() {
+  const location = useLocation()
+  const navigate = useNavigate()
+  // memoized: a new object on every render re-renders every `useI18n()` consumer
+  const routingStrategy = useMemo(() => createReactRouterAdapter(locales, 'en', location, navigate), [location, navigate])
+  return (
+    <I18nProvider i18n={i18n} locales={locales} defaultLocale="en" routingStrategy={routingStrategy}>
+      <I18nLink to="/about">About</I18nLink>
+      <I18nSwitcher />
+      <Routes>
+        <Route path="/:locale?" element={<Home />} />
+        <Route path="/:locale?/about" element={<About />} />
+      </Routes>
+    </I18nProvider>
+  )
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <Localized />
+    </BrowserRouter>
+  )
+}
+```
+
+Адаптер добавляет префикс ко всем локалям, кроме локали по умолчанию (`/about`, `/de/about`), и рендерит `<I18nLink>` как `<Link>` из React Router. Устанавливайте локаль из URL самостоятельно (например, из `useParams().locale` в эффекте). Для любого другого роутера напишите адаптер с `getCurrentPath`, `push` и `replace` (все обязательны) — см. [Адаптер роутера](/ru/integrations/overview#router-adapter).
+
+## SSR {#ssr}
+
+`renderToString` работает: у `useI18n()` есть серверный снимок. Создавайте по одному экземпляру на запрос и добавляйте его словари до рендеринга, чтобы запросы на разных локалях не разделяли состояние, или передавайте провайдеру простые данные.
+
+### Гидратация {#hydration}
+
+Числа, формы множественного числа и текст гидратируются как есть. Дата зависит от часового пояса, а относительная дата — от часов: задайте `timeZone` на сервере и в браузере, а для `tdr` передайте браузеру время сервера через `now`. `<I18nT>` с `date` или `relativeDate` устанавливает `suppressHydrationWarning`, поэтому расхождение не ломает гидратацию, но текст сервера остаётся, пока текст не изменится. Это действует только на один уровень: `children`, оборачивающие перевод в элемент, всё равно падают при расхождении, поэтому задайте им тот же `timeZone`.
+
+### Серверные компоненты {#server-components}
+
+Пакет помечает свой клиентский код директивой `'use client'`. `@i18n-micro/react/server` содержит `createI18n` и `I18nT` без хуков, принимающий экземпляр как свойство, поэтому текст не попадает в клиентский бандл. При условии `react-server`, как в app router Next.js, основная точка входа тоже разрешается в него, но TypeScript по умолчанию этого не знает: импортируйте из `/server`. `@i18n-micro/react/client` всегда даёт клиентскую точку входа.
+
+```tsx
+// app/[locale]/layout.tsx: a server component
+import { cache } from 'react'
+import { createI18n, I18nT } from '@i18n-micro/react/server'
+import { I18nProvider } from '@i18n-micro/react/client'
+import { loadMessages } from './messages'
+
+const getI18n = cache(async (locale: string) => createI18n({ locale, messages: await loadMessages(locale) }))
+
+export default async function Layout({ params, children }) {
+  const { locale } = await params
+  const i18n = await getI18n(locale)
+  return (
+    <I18nProvider locale={locale} messages={{ [locale]: i18n.resolveTranslations() }}>
+      <h1>
+        <I18nT i18n={i18n} keypath="title" />
+      </h1>
+      {children}
+    </I18nProvider>
+  )
+}
+```
+
+Рендеринг проверен через `react-server-dom-webpack`; на самом приложении Next.js это не запускалось.
+
+## API {#api}
+
+| Экспорт | Точка входа |
+| --- | --- |
+| `createI18n`, `ReactI18n`, `I18nProvider`, `useI18n`, `useT`, `useLocaleSwitch` | `@i18n-micro/react` |
+| `I18nT`, `I18nLink`, `I18nSwitcher`, `I18nGroup` | `@i18n-micro/react` |
+| `I18nContext`, `I18nConfigContext`, `useI18nContext`, `useI18nLocales`, `useI18nDefaultLocale`, `useI18nRouter` | `@i18n-micro/react` |
+| `defaultPlural`, `FormatService`, `interpolate` | `@i18n-micro/react` |
+| Типы: `I18nRoutingStrategy`, `ReactI18nOptions`, `I18nProviderProps`, `UseI18nReturn`, свойства компонентов, `TranslationKey`, `Locale`, `Translations`, `PluralFunc` | `@i18n-micro/react` |
+| `createReactRouterAdapter` | `@i18n-micro/react/router` |
+| `createI18n`, `ReactI18n`, `I18nT` (принимает `i18n`) | `@i18n-micro/react/server` |
+
+Полные сигнатуры: [справочник React](/ru/api/packages/react).
+
+## Preact {#preact}
+
+`@i18n-micro/preact` собирается из тех же исходников на самом Preact, без `preact/compat`: тот же экземпляр, провайдер, хуки и компоненты. Различия:
+
+| | React | Preact |
+| --- | --- | --- |
+| Peer-зависимость | `react` (+ необязательно `react-router-dom`) | `preact` `^10.0.0 \|\| ^11.0.0`, протестировано на 10.29 и 11.1 |
+| Класс экземпляра | `ReactI18n` | `PreactI18n` |
+| Адаптер роутера | `createReactRouterAdapter` из `/router` | `createBrowserHistoryAdapter(locales, defaultLocale, ssrUrl?)` из `/router` |
+| Перерисовка | `useSyncExternalStore` | подписка в layout-эффекте, которая перепроверяет хранилище |
+| Серверные компоненты | `/server`, `/client` | нет |
+
+`createBrowserHistoryAdapter` работает с любым роутером на History API (wouter, preact-router): `push` и `replace` вызывают `history.pushState` / `replaceState` и отправляют событие `popstate`, а `<I18nLink>` рендерит обычный `<a>`, который выполняет навигацию через `push`. У сервера нет адресной строки: передайте URL запроса как `ssrUrl`, иначе ссылки и переключатель отрендерятся как на `/`. В браузере приоритет у адресной строки.
+
+```tsx
+// src/main.tsx
+import { render } from 'preact'
+import { createI18n, I18nProvider } from '@i18n-micro/preact'
+import { createBrowserHistoryAdapter } from '@i18n-micro/preact/router'
+import { App } from './App'
+import en from './locales/en.json'
+
+const locales = [
+  { code: 'en', iso: 'en-US', displayName: 'English' },
+  { code: 'de', iso: 'de-DE', displayName: 'Deutsch' },
+]
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', messages: { en } })
+
+render(
+  <I18nProvider i18n={i18n} locales={locales} defaultLocale="en" routingStrategy={createBrowserHistoryAdapter(locales, 'en')}>
+    <App />
+  </I18nProvider>,
+  document.getElementById('app')!,
+)
+```
+
+Полные сигнатуры: [справочник Preact](/ru/api/packages/preact).
+
+## См. также {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Фреймворки" icon="book-open" href="/ru/integrations/overview">
+
+Опции экземпляра, адаптер роутера, свойства компонентов
+
+</Card>
+
+<Card title="Runtime" icon="book-open" href="/ru/integrations/runtime-package">
+
+Экземпляр, на котором построены эти пакеты
+
+</Card>
+
+<Card title="Генератор типов" icon="book-open" href="/ru/integrations/types-generator">
+
+Автодополнение ключей
+
+</Card>
+
+</CardGroup>

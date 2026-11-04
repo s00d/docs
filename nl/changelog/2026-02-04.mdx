@@ -1,0 +1,115 @@
+---
+title: "v3.0.0 — Prestatieoptimalisatie, Route & Path Strategy-pakketten"
+description: "Release notes: v3.0.0 — Prestatieoptimalisatie, Route & Path Strategy-pakketten"
+---
+
+**Datum**: 2026-02-04
+
+**Versie**: `v3.0.0`
+
+![v3.0.0 release](/images/3.0.0.png)
+
+We kondigen **v3.0.0** aan met een **grote architecturale herziening**: een volledige herschrijving van het opslagsysteem voor vertalingen voor maximale prestaties, routegeneratie en runtime-padlogica zijn nu opgesplitst in eigen pakketten, en de redirectflow is opnieuw ontworpen voor betere betrouwbaarheid en compatibiliteit met Serverless.
+
+## Wat is er nieuw? {#what’s-new}
+
+### Prestatieoptimalisatie — nieuwe opslagarchitectuur voor vertalingen {#performance-optimization-—-new-translation-storage-architecture}
+
+Het systeem voor het laden en cachen van vertalingen is volledig herschreven voor maximale prestaties:
+
+- **Gecentraliseerde TranslationStorage-klasse** — Een nieuwe `TranslationStorage`-klasse (`src/runtime/utils/storage.ts`) biedt een uniforme opslag voor zowel client als server. Gebruikt `globalThis` met `Symbol.for` om een echte singleton binnen het hele Node.js-proces te garanderen, waardoor dubbele caches over gebundelde modules worden voorkomen.
+
+- **Geoptimaliseerde `$t()`-functie (tFast)** — De vertaalfunctie gebruikt een directe lookup in één actief woordenboek:
+  1. Alle vertalingen (root + paginaspecifiek + fallback) worden tijdens de build vooraf samengevoegd tot één bestand per pagina
+  2. Bij navigatie binnen dezelfde locale worden nieuwe paginavertalingen cumulatief samengevoegd in het actieve woordenboek (voorkomt flikkerende keys tijdens overgangsanimaties)
+  3. Ondersteunt geneste keys (`key.subkey.subsubkey`) met geoptimaliseerde padresolutie
+  4. Geen Map-lookups of locale-/routeberekeningen bij elke aanroep — gebruikt vooraf berekende context
+
+- **Server-side injectie via `window.__I18N__`** — Vertalingen die tijdens SSR worden geladen, worden als scripttag in de HTML geïnjecteerd. De client leest bij het eerste laden direct uit `window.__I18N__`, waardoor dubbele fetches worden vermeden.
+
+- **Lokale chunkcache in de plugin** — De plugin houdt een lokale `loadedChunks`-Map bij die alle geladen vertaalchunks opslaat. Eenmaal geladen worden vertalingen tijdens de levenscyclus van de pagina nooit opnieuw opgehaald.
+
+- **Vooraf samenvoegen tijdens de build** — Een `preMergeLocales`-stap in `module.ts` voegt alle layers, fallback-localeketens en vertalingen op rootniveau tijdens de build samen in elk paginabestand. De server-loader leest simpelweg één vooraf gebouwd bestand — samenvoegen tijdens runtime is niet nodig.
+
+**Prestatieverbeteringen:**
+
+- Minder geheugenallocatie per verzoek (geen objecten opnieuw aanmaken bij elke `$t()`-aanroep)
+- Lagere druk op garbage collection
+- Snellere responstijden onder belasting
+- Stabiel geheugengebruikspatroon (geen "springende" grafieken)
+
+### Route & Path Strategy-pakketten {#route-&-path-strategy-packages}
+
+- **@i18n-micro/route-strategy** — Routegeneratie tijdens de build: breidt Nuxt-pagina's uit met gelokaliseerde routes en verwerkt aliassen, geneste routes en aangepaste paden per strategie. Eén toegangspunt: `new RouteGenerator(options)` en `extendPages(pages)`. Strategieën (`no_prefix`, `prefix`, `prefix_except_default`, `prefix_and_default`) zijn geïmplementeerd als afzonderlijke klassen en worden via een factory geselecteerd.
+- **@i18n-micro/path-strategy** — Afhandeling van paden en locales tijdens runtime: biedt `PathStrategy` voor het bouwen van gelokaliseerde paden, het oplossen van redirects en het wisselen van locale. Tree-shakeable subpath-exports (`/prefix`, `/no-prefix`, enz.) zodat alleen de gekozen strategie wordt gebundeld. Gebruikt pure functies voor routeresolutie en vooraf berekende contextvlaggen voor minimale allocaties.
+- **Gestructureerde pakketindeling** — Routelogica in `@i18n-micro/route-strategy` met `core/`, `strategies/`. Path strategy in `@i18n-micro/path-strategy` met een platte `src/`-structuur: `types.ts`, `path.ts`, `resolver.ts`, `helpers.ts` en `strategies/`.
+- **Consistent gedrag** — Afhandeling van aliassen, het samenvoegen van ouder- en kindpaden, aangepaste `globalLocaleRoutes` / `filesLocaleRoutes` / `routeLocales` en onveranderlijkheidsgaranties worden gedekt door een eigen testsuite.
+
+### Herziening van de redirectarchitectuur {#redirect-architecture-overhaul}
+
+- **Server-middleware** — Redirects en 404-afhandeling draaien in Nitro-middleware (`i18n.global.ts`). Dit wordt uitgevoerd vóór de Nuxt-render, zodat redirects van `/` naar `/<locale>/` plaatsvinden zonder foutflits wanneer er een locale-cookie aanwezig is.
+- **Clientplugin (client-side)** — Een plugin die alleen op de client draait (`06.client-redirect.client.ts`) wordt na hydratatie uitgevoerd en handelt redirects af wanneer `useI18nLocale()` of een cookie een niet-standaard locale instelt. Nitro draait vóór Nuxt, dus de server ziet geen cookie-/statewijzigingen van gebruikersplugins; de clientplugin dekt dit geval af.
+- **Geen fallbackcomponent** — De fallbackcomponent `locale-redirect.vue` en de optie `fallbackRedirectComponentPath` zijn verwijderd. De redirectlogica wordt volledig afgehandeld door de server-middleware en de clientplugin.
+- **Ondersteuning voor aangepaste paden** — Paden zoals `/kontakt` voor Duits (via `globalLocaleRoutes`) worden correct herkend als geldig zonder localeprefix, waardoor onterechte 404's tijdens prerender worden vermeden.
+- **Fix voor customRegexMatcher** — Bij gebruik van `customRegexMatcher` matcht het patroon nu het **volledige** eerste padsegment (met de ankers `^` en `$`). Dit voorkomt onterechte 404's voor routes zoals `/locale-test` waar het patroon `[a-z]{2}-[a-z]{2}` voorheen deelstrings zou matchen.
+- **Fix voor autoDetectPath** — De optie `autoDetectPath` vergelijkt nu correct met het oorspronkelijke URL-pad, waardoor ongewenste redirects worden voorkomen bij expliciete navigatie naar URL's met een localeprefix.
+
+### useI18nLocale-composable {#usei18nlocale-composable}
+
+- **Gecentraliseerd localebeheer** — De nieuwe composable `useI18nLocale()` vervangt `useLocaleCookies` en biedt één toegangspunt voor localestate, cookies en synchronisatiehulpmiddelen.
+- **API** — `locale`, `localeCookie`, `hashCookie`, `getLocale()`, `getPreferredLocale()`, `setLocale()`, `syncLocale()`, `isValidLocale()`, `getEffectiveLocale()`, `resolveInitialLocale()`.
+- **Programmatische locale** — Gebruik `useI18nLocale().setLocale(locale)` in serverplugins in plaats van `useState('i18n-locale')` voor overzichtelijkere, gecentraliseerde localeafhandeling.
+
+### Aangepaste automatische detectie & configuratie {#custom-auto-detection-&-configuration}
+
+- **`getI18nConfig()`** — Aangepaste plugins (bijv. voor localedetectie) moeten `getI18nConfig()` uit `#build/i18n.strategy.mjs` gebruiken in plaats van `useRuntimeConfig().public.i18nConfig`. Dit geeft directe toegang tot de opgeloste i18n-configuratie (bijv. `localeCookie`) zonder afhankelijk te zijn van de runtimeconfiguratie.
+- **Cookienaam** — Gebruik `getI18nConfig().localeCookie ?? 'user-locale'` bij het implementeren van aangepaste detectielogica.
+
+### Vereenvoudigde integratiepakketten {#simplified-integration-packages}
+
+Alle integratiepakketten (`@i18n-micro/vue`, `@i18n-micro/astro`, `@i18n-micro/node`, `@i18n-micro/react`, `@i18n-micro/preact`, `@i18n-micro/solid`) zijn vereenvoudigd en geoptimaliseerd en delen dezelfde kernlogica voor vertalingen.
+
+### Configuratiewijzigingen {#configuration-changes}
+
+- **`previousPageFallback` verwijderd** — Deze optie is niet meer nodig. De nieuwe cumulatieve samenvoegstrategie houdt vertalingen van de vorige pagina automatisch beschikbaar tijdens overgangsanimaties en ruimt ze daarna op via de hook `page:transition:finish`.
+- **`hmr`** — Verplaatst van `experimental.hmr` naar een optie op het hoogste niveau. Regelt server-side HMR voor vertaalbestanden (standaard ingeschakeld in development).
+
+```typescript
+// Before (v2.x)
+export default defineNuxtConfig({
+  i18n: {
+    experimental: {
+      hmr: true,
+    },
+  },
+})
+
+// After (v3.0.0)
+export default defineNuxtConfig({
+  i18n: {
+    hmr: true,
+  },
+})
+```
+
+## Brekende wijzigingen {#breaking-changes}
+
+- **`fallbackRedirectComponentPath`** — Verwijderd. De module gebruikt geen fallback-routecomponent meer voor redirects. Als je een aangepast componentpad had geconfigureerd, verwijder het dan uit je configuratie.
+- **`useLocaleCookies`** — Verwijderd. Gebruik in plaats daarvan `useI18nLocale()`. De nieuwe composable biedt `locale`, `localeCookie`, `hashCookie`, `setLocale()`, `syncLocale()` en meer.
+- **`experimental.i18nPreviousPageFallback` / `previousPageFallback`** — Volledig verwijderd. De cumulatieve samenvoegstrategie voorkomt flikkeren tijdens overgangen automatisch. Verwijder deze optie uit je configuratie.
+- **`experimental.hmr`** — Verplaatst naar `hmr`. Werk je configuratie bij als je deze optie gebruikte.
+- **Aangepaste plugins** — Als je aangepaste plugin voor localedetectie `useRuntimeConfig().public.i18nConfig` gebruikte, stap dan over op `getI18nConfig()` uit `#build/i18n.strategy.mjs`. Geef de voorkeur aan `useI18nLocale().setLocale()` boven `useState('i18n-locale')`. Zie [Aangepaste taaldetectie](/nl/guide/custom-auto-detect) voor bijgewerkte voorbeelden.
+- **Interne bestandswijzigingen** — `load-from-storage.ts` en `translation-loader.ts` zijn verwijderd en vervangen door `storage.ts` en `server-loader.ts`. Als je rechtstreeks uit deze bestanden importeerde (niet aanbevolen), werk dan je imports bij.
+
+## Waarom het ertoe doet {#why-it-matters}
+
+- **Prestaties**: Een gecentraliseerde singleton-cache elimineert het aanmaken van objecten per verzoek en vermindert de GC-druk.
+- **Onderhoudbaarheid**: Route- en padlogica staan in eigen pakketten met duidelijke grenzen en types.
+- **Testen**: Strategiegedrag en randgevallen worden geïsoleerd getest.
+- **Betrouwbaarheid**: Gescheiden redirectlogica voor server (Nitro) en client voorkomt timingproblemen wanneer cookie/useState door gebruikersplugins worden ingesteld.
+- **Klaar voor Serverless**: De Nitro-plugin draait in dezelfde context als Nitro-handlers en is compatibel met Edge/Workers.
+- **Documentatie**: Het routinggedrag is gedocumenteerd in de [Strategy-gids](/nl/guide/strategy) en in de pakketten [path-strategy](https://github.com/s00d/nuxt-i18n-micro/tree/main/packages/path-strategy) en [route-strategy](https://github.com/s00d/nuxt-i18n-micro/tree/main/packages/route-strategy).
+
+Zie de [changelog](https://github.com/s00d/nuxt-i18n-micro/blob/main/CHANGELOG.md) voor upgrade-opmerkingen en een volledige lijst met wijzigingen.
+
+---

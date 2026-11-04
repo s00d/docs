@@ -1,0 +1,115 @@
+---
+title: "v3.0.0 — 성능 최적화, Route 및 Path Strategy 패키지"
+description: "릴리스 노트: v3.0.0 — 성능 최적화, Route 및 Path Strategy 패키지"
+---
+
+**날짜**: 2026-02-04
+
+**버전**: `v3.0.0`
+
+![v3.0.0 릴리스](/images/3.0.0.png)
+
+**주요 아키텍처 개편**을 담은 **v3.0.0**을 발표합니다. 최대 성능을 위해 번역 저장소 시스템을 완전히 다시 작성했고, 라우트 생성과 런타임 경로 로직을 전용 패키지로 분리했으며, 안정성과 Serverless 호환성을 높이기 위해 리디렉션 흐름을 재설계했습니다.
+
+## 새로운 기능 {#what’s-new}
+
+### 성능 최적화 — 새로운 번역 저장소 아키텍처 {#performance-optimization-—-new-translation-storage-architecture}
+
+번역 로딩 및 캐싱 시스템을 최대 성능을 위해 완전히 다시 작성했습니다.
+
+- **중앙화된 TranslationStorage 클래스** — 새로운 `TranslationStorage` 클래스(`src/runtime/utils/storage.ts`)가 클라이언트와 서버 모두를 위한 통합 저장소를 제공합니다. `globalThis`와 `Symbol.for`를 사용하여 Node.js 프로세스 전체에서 진정한 싱글턴을 보장하고, 번들된 모듈 간의 캐시 중복을 방지합니다.
+
+- **최적화된 `$t()` 함수 (tFast)** — 번역 함수는 단일 활성 사전에 대해 직접 조회를 수행합니다.
+  1. 모든 번역(루트 + 페이지별 + 폴백)은 빌드 시점에 페이지당 하나의 파일로 미리 병합됩니다
+  2. 같은 로케일 내에서 이동할 때 새 페이지 번역은 활성 사전에 누적 병합됩니다(전환 애니메이션 중 키 깜빡임 방지)
+  3. 최적화된 경로 해석으로 중첩 키(`key.subkey.subsubkey`)를 지원합니다
+  4. 호출할 때마다 Map 조회나 로케일/라우트 계산을 하지 않고, 미리 계산된 컨텍스트를 사용합니다
+
+- **`window.__I18N__`을 통한 서버 측 주입** — SSR 중에 로드된 번역은 스크립트 태그로 HTML에 주입됩니다. 클라이언트는 초기 로드 시 `window.__I18N__`에서 직접 읽어 중복 요청을 피합니다.
+
+- **플러그인 내 로컬 청크 캐시** — 플러그인은 로드된 모든 번역 청크를 저장하는 로컬 `loadedChunks` Map을 유지합니다. 한 번 로드된 번역은 페이지 수명 주기 동안 다시 요청되지 않습니다.
+
+- **빌드 시점 사전 병합** — `module.ts`의 `preMergeLocales` 단계가 모든 레이어, 폴백 로케일 체인, 루트 수준 번역을 빌드 시점에 모든 페이지 파일로 병합합니다. server-loader는 미리 빌드된 단일 파일을 읽기만 하면 되므로 런타임 병합이 필요 없습니다.
+
+**성능 개선:**
+
+- 요청당 메모리 할당 감소(`$t()` 호출마다 객체를 다시 생성하지 않음)
+- 가비지 컬렉션 부담 감소
+- 부하 상태에서 더 빠른 응답 시간
+- 안정적인 메모리 사용 패턴("널뛰는" 그래프 없음)
+
+### Route 및 Path Strategy 패키지 {#route-&-path-strategy-packages}
+
+- **@i18n-micro/route-strategy** — 빌드 시점 라우트 생성: Nuxt 페이지를 로컬라이즈된 라우트로 확장하고, 전략별로 별칭, 중첩 라우트, 사용자 정의 경로를 처리합니다. 단일 진입점: `new RouteGenerator(options)` 및 `extendPages(pages)`. 전략(`no_prefix`, `prefix`, `prefix_except_default`, `prefix_and_default`)은 별도의 클래스로 구현되며 팩토리를 통해 선택됩니다.
+- **@i18n-micro/path-strategy** — 런타임 경로 및 로케일 처리: 로컬라이즈된 경로 생성, 리디렉션 해석, 로케일 전환을 위한 `PathStrategy`를 제공합니다. 트리 셰이킹 가능한 서브패스 내보내기(`/prefix`, `/no-prefix` 등)로 선택한 전략만 번들됩니다. 라우트 해석에는 순수 함수를, 할당을 최소화하기 위해 미리 계산된 컨텍스트 플래그를 사용합니다.
+- **구조화된 패키지 레이아웃** — 라우트 로직은 `core/`, `strategies/`를 갖춘 `@i18n-micro/route-strategy`에 있습니다. 경로 전략은 평평한 `src/` 구조(`types.ts`, `path.ts`, `resolver.ts`, `helpers.ts`, `strategies/`)를 갖춘 `@i18n-micro/path-strategy`에 있습니다.
+- **일관된 동작** — 별칭 처리, 부모–자식 경로 결합, 사용자 정의 `globalLocaleRoutes` / `filesLocaleRoutes` / `routeLocales`, 불변성 보장이 전용 테스트 스위트로 검증됩니다.
+
+### 리디렉션 아키텍처 개편 {#redirect-architecture-overhaul}
+
+- **서버 미들웨어** — 리디렉션과 404 처리는 Nitro 미들웨어(`i18n.global.ts`)에서 실행됩니다. Nuxt 렌더링 전에 실행되므로, 로케일 쿠키가 있을 때 `/`에서 `/<locale>/`로의 리디렉션이 오류 깜빡임 없이 이루어집니다.
+- **클라이언트 플러그인 (클라이언트 측)** — 클라이언트 전용 플러그인(`06.client-redirect.client.ts`)이 하이드레이션 후 실행되어, `useI18nLocale()` 또는 쿠키가 기본값이 아닌 로케일을 설정한 경우의 리디렉션을 처리합니다. Nitro는 Nuxt보다 먼저 실행되므로 서버는 사용자 플러그인에서 일어난 쿠키/상태 변경을 볼 수 없으며, 클라이언트 플러그인이 이 경우를 처리합니다.
+- **폴백 컴포넌트 없음** — `locale-redirect.vue` 폴백 컴포넌트와 `fallbackRedirectComponentPath` 옵션이 제거되었습니다. 리디렉션 로직은 서버 미들웨어와 클라이언트 플러그인이 전적으로 처리합니다.
+- **사용자 정의 경로 지원** — 독일어용 `/kontakt` 같은 경로(`globalLocaleRoutes`를 통해)가 로케일 접두사 없이도 유효한 것으로 올바르게 인식되어, 사전 렌더링 중 잘못된 404를 방지합니다.
+- **customRegexMatcher 수정** — `customRegexMatcher`를 사용할 때 패턴이 이제 첫 번째 경로 세그먼트 **전체**(`^` 및 `$` 앵커 사용)와 일치합니다. 이전에는 `[a-z]{2}-[a-z]{2}` 패턴이 부분 문자열과 일치하던 `/locale-test` 같은 라우트에서 잘못된 404가 발생하지 않습니다.
+- **autoDetectPath 수정** — `autoDetectPath` 옵션이 이제 원래 URL 경로와 올바르게 비교하여, 로케일 접두사가 붙은 URL로 명시적으로 이동할 때 원치 않는 리디렉션을 방지합니다.
+
+### useI18nLocale 컴포저블 {#usei18nlocale-composable}
+
+- **중앙화된 로케일 관리** — 새로운 `useI18nLocale()` 컴포저블이 `useLocaleCookies`를 대체하며, 로케일 상태, 쿠키, 동기화 유틸리티를 위한 단일 진입점을 제공합니다.
+- **API** — `locale`, `localeCookie`, `hashCookie`, `getLocale()`, `getPreferredLocale()`, `setLocale()`, `syncLocale()`, `isValidLocale()`, `getEffectiveLocale()`, `resolveInitialLocale()`.
+- **프로그래밍 방식의 로케일** — 더 깔끔하고 중앙화된 로케일 처리를 위해 서버 플러그인에서 `useState('i18n-locale')` 대신 `useI18nLocale().setLocale(locale)`을 사용하세요.
+
+### 사용자 정의 자동 감지 및 구성 {#custom-auto-detection-&-configuration}
+
+- **`getI18nConfig()`** — 사용자 정의 플러그인(예: 로케일 감지용)은 `useRuntimeConfig().public.i18nConfig` 대신 `#build/i18n.strategy.mjs`의 `getI18nConfig()`를 사용해야 합니다. 이를 통해 런타임 구성에 의존하지 않고 확인된 i18n 구성(예: `localeCookie`)에 직접 접근할 수 있습니다.
+- **쿠키 이름** — 사용자 정의 감지 로직을 구현할 때 `getI18nConfig().localeCookie ?? 'user-locale'`을 사용하세요.
+
+### 간소화된 통합 패키지 {#simplified-integration-packages}
+
+모든 통합 패키지(`@i18n-micro/vue`, `@i18n-micro/astro`, `@i18n-micro/node`, `@i18n-micro/react`, `@i18n-micro/preact`, `@i18n-micro/solid`)가 간소화 및 최적화되었으며, 동일한 핵심 번역 로직을 공유합니다.
+
+### 구성 변경 사항 {#configuration-changes}
+
+- **`previousPageFallback` 제거** — 이 옵션은 더 이상 필요하지 않습니다. 새로운 누적 병합 전략은 전환 애니메이션 중 이전 페이지 번역을 자동으로 유지한 다음, `page:transition:finish` 훅을 통해 정리합니다.
+- **`hmr`** — `experimental.hmr`에서 최상위 옵션으로 이동했습니다. 번역 파일에 대한 서버 측 HMR을 제어합니다(개발 환경에서 기본적으로 활성화).
+
+```typescript
+// Before (v2.x)
+export default defineNuxtConfig({
+  i18n: {
+    experimental: {
+      hmr: true,
+    },
+  },
+})
+
+// After (v3.0.0)
+export default defineNuxtConfig({
+  i18n: {
+    hmr: true,
+  },
+})
+```
+
+## 호환성을 깨는 변경 사항 {#breaking-changes}
+
+- **`fallbackRedirectComponentPath`** — 제거되었습니다. 모듈은 더 이상 리디렉션에 폴백 라우트 컴포넌트를 사용하지 않습니다. 사용자 정의 컴포넌트 경로를 구성했다면 구성에서 제거하세요.
+- **`useLocaleCookies`** — 제거되었습니다. 대신 `useI18nLocale()`을 사용하세요. 새 컴포저블은 `locale`, `localeCookie`, `hashCookie`, `setLocale()`, `syncLocale()` 등을 제공합니다.
+- **`experimental.i18nPreviousPageFallback` / `previousPageFallback`** — 완전히 제거되었습니다. 누적 병합 전략이 전환 시 깜빡임을 자동으로 처리합니다. 구성에서 이 옵션을 제거하세요.
+- **`experimental.hmr`** — `hmr`로 이동했습니다. 이 옵션을 사용하고 있었다면 구성을 업데이트하세요.
+- **사용자 정의 플러그인** — 사용자 정의 로케일 감지 플러그인에서 `useRuntimeConfig().public.i18nConfig`를 사용했다면 `#build/i18n.strategy.mjs`의 `getI18nConfig()`로 전환하세요. `useState('i18n-locale')`보다 `useI18nLocale().setLocale()`을 권장합니다. 업데이트된 예제는 [사용자 정의 언어 감지](/ko/guide/custom-auto-detect)를 참고하세요.
+- **내부 파일 변경** — `load-from-storage.ts`와 `translation-loader.ts`가 제거되고 `storage.ts`와 `server-loader.ts`로 대체되었습니다. 이 파일들에서 직접 import하고 있었다면(권장하지 않음) import를 업데이트하세요.
+
+## 중요한 이유 {#why-it-matters}
+
+- **성능**: 중앙화된 싱글턴 캐시가 요청별 객체 생성을 없애고 GC 부담을 줄입니다.
+- **유지보수성**: 라우트 및 경로 로직이 명확한 경계와 타입을 갖춘 전용 패키지에 있습니다.
+- **테스트**: 전략 동작과 엣지 케이스를 독립적으로 테스트합니다.
+- **안정성**: 서버(Nitro)와 클라이언트 리디렉션 로직을 분리하여, 사용자 플러그인이 cookie/useState를 설정할 때의 타이밍 문제를 방지합니다.
+- **Serverless 대응**: Nitro 플러그인이 Nitro 핸들러와 동일한 컨텍스트에서 실행되어 Edge/Workers와 호환됩니다.
+- **문서**: 라우팅 동작은 [전략 가이드](/ko/guide/strategy)와 [path-strategy](https://github.com/s00d/nuxt-i18n-micro/tree/main/packages/path-strategy) 및 [route-strategy](https://github.com/s00d/nuxt-i18n-micro/tree/main/packages/route-strategy) 패키지에 문서화되어 있습니다.
+
+업그레이드 참고 사항과 전체 변경 목록은 [변경 로그](https://github.com/s00d/nuxt-i18n-micro/blob/main/CHANGELOG.md)를 참고하세요.
+
+---

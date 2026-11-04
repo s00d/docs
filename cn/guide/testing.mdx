@@ -1,0 +1,147 @@
+---
+title: "测试你的应用"
+description: "使用 @i18n-micro/test-utils 和 Vitest 对使用 $t 的组件进行单元测试，并对本地化页面进行端到端检查。"
+---
+
+调用 `useI18n()` 的组件在单元测试中需要一个 i18n 实例。`@i18n-micro/test-utils` 提供了一个伪造的 `useI18n()`，带有真实的翻译、复数和格式化逻辑，因此你可以使用自己的字典挂载组件，而无需 Nuxt 服务器。对于路由和重定向，请使用 `@nuxt/test-utils` 端到端地运行真实模块。
+
+本页介绍如何测试你的应用。本仓库如何测试模块本身，请参见[测试模块](https://s00d.github.io/nuxt-i18n-micro/contributing/testing)。
+
+## 安装 {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add -D @i18n-micro/test-utils @nuxt/test-utils vitest @vue/test-utils happy-dom
+```
+
+```bash npm
+npm install -D @i18n-micro/test-utils @nuxt/test-utils vitest @vue/test-utils happy-dom
+```
+
+</CodeGroup>
+
+## 模拟 useI18n {#mock-usei18n}
+
+```ts
+// tests/unit-setup.ts
+import { setupNuxtI18nMock } from '@i18n-micro/test-utils'
+import { mockNuxtImport } from '@nuxt/test-utils/runtime'
+import { beforeEach, vi } from 'vitest'
+
+export const { i18n, useI18n, setTranslationsFromJson } = setupNuxtI18nMock({
+  spy: vi.fn, // every method becomes a vi.fn, so you can assert calls
+  beforeEach, // reset state and reseed `translations` before each test
+  translations: { welcome: 'Welcome' },
+})
+
+mockNuxtImport('useI18n', () => useI18n)
+```
+
+```ts
+// vitest.config.ts
+import { defineVitestConfig } from '@nuxt/test-utils/config'
+
+export default defineVitestConfig({
+  test: {
+    environment: 'nuxt',
+    setupFiles: ['./tests/unit-setup.ts'],
+  },
+})
+```
+
+请将 `mockNuxtImport` 保留在 setup 文件中：`@nuxt/test-utils` 需要对其进行转换。`setupNuxtI18nMock` 使用私有的翻译缓存，因此并行运行的测试文件不会共享状态。
+
+## 编写测试 {#write-a-test}
+
+```vue
+<!-- components/Greeting.vue -->
+<script setup lang="ts">
+const { $t } = useI18n()
+</script>
+
+<template>
+  <p>{{ $t('welcome') }}</p>
+</template>
+```
+
+```ts
+// tests/greeting.spec.ts
+import { mountSuspended } from '@nuxt/test-utils/runtime'
+import { expect, it } from 'vitest'
+import Greeting from '~/components/Greeting.vue'
+import de from '~/locales/de.json'
+import { i18n, setTranslationsFromJson } from './unit-setup'
+
+it('renders the German greeting', async () => {
+  await setTranslationsFromJson('de', de)
+  i18n.setLocale('de')
+
+  const wrapper = await mountSuspended(Greeting)
+  expect(wrapper.text()).toBe('Willkommen') // de.json: { "welcome": "Willkommen" }
+})
+```
+
+该伪造实现暴露了与真实 `useI18n()` 相同的方法（`$t`、`$tc`、`$tn`、`$td`、`$has`、`$localePath`……，带或不带 `$` 前缀），以及用于测试的设置方法：`setLocale`、`setLocales`、`setDefaultLocale`、`setRouteName`、`setTranslationsFromJson`、`loadPageTranslations`、`mergeTranslations`、`setMissingHandler`。
+
+`$localePath` 和 `$switchLocalePath` 是桩实现，会根据 `strategy` 选项为路径添加前缀（没有真实的路由器）。真实的链接和重定向请通过端到端测试验证。
+
+## 底层辅助函数 {#lower-level-helpers}
+
+| 辅助函数 | 用途 |
+| --- | --- |
+| `createIsolatedFakeI18n(options)` | 不带 Nuxt `useI18n` 接线的隔离伪造实现，例如用于配合 `global.mocks` 的普通 `@vue/test-utils` `mount`。 |
+| `createFakeI18n(options)` | 基于共享模块缓存的伪造实现（在 `beforeEach` 中调用 `resetI18n()`），或通过 `isolated: true` 实现隔离。 |
+| `createI18nTestContext(options)` | 上述两者背后的上下文，适用于需要多个伪造实现的场景。 |
+| `t`, `tc`, `ts`, `tn`, `td`, `tdr`, `has` | 直接在共享上下文上调用，用于测试普通函数。 |
+
+该模拟对象是一个 `BaseI18n`：`t`、`tc`、`tn`、`td`、`tdr` 和 `has` 都是真实实现，作用于真实字典，因此测试看到的就是应用实际显示的内容。
+
+上述工厂辅助函数接受 `locale`、`defaultLocale`、`locales`、`routeName`、`strategy`、`translations` 和 `messages`（按 locale 划分的字典）。完整的示例项目位于 [`packages/test-utils/example`](https://github.com/s00d/nuxt-i18n-micro/tree/main/packages/test-utils/example)。
+
+## 端到端测试 {#end-to-end-tests}
+
+路由、重定向、SEO 标签和负载加载需要真实模块。使用 `@nuxt/test-utils/e2e` 启动你的应用：
+
+```ts
+// tests/e2e/locales.test.ts
+import { $fetch, fetch, setup } from '@nuxt/test-utils/e2e'
+import { describe, expect, it } from 'vitest'
+
+describe('locales', async () => {
+  await setup({ server: true })
+
+  it('serves the German page', async () => {
+    expect(await $fetch('/de')).toContain('lang="de-DE"')
+  })
+
+  it('redirects / for a German browser', async () => {
+    const res = await fetch('/', { headers: { 'accept-language': 'de' }, redirect: 'manual' })
+    expect(res.headers.get('location')).toBe('/de')
+  })
+})
+```
+
+第二个测试假定使用 `prefix`（或默认 locale 不同的 `prefix_except_default`）；关于 `/` 何时重定向，请参见 [Locale 检测](/cn/guide/locale-detection)。
+
+## 相关内容 {#related}
+
+<CardGroup cols={2}>
+
+<Card title="测试模块" icon="code-pull-request" href="https://s00d.github.io/nuxt-i18n-micro/contributing/testing">
+
+</Card>
+
+<Card title="useI18n" icon="brackets-curly" href="/cn/composables/useI18n">
+
+</Card>
+
+<Card title="Locale 检测" icon="book-open" href="/cn/guide/locale-detection">
+
+</Card>
+
+<Card title="Storybook" icon="book-open" href="/cn/guide/storybook">
+
+</Card>
+
+</CardGroup>

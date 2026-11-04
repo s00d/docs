@@ -1,0 +1,327 @@
+---
+title: "CLI"
+description: "Fordítások ellenőrzése CI-ban, nem használt kulcsok keresése, hiányok kitöltése fordítószolgáltatással és fájlcsere fordítókkal a parancssorból."
+---
+
+Az `@i18n-micro/cli` egy Nuxt-projekt locale-fájljait kezeli. A `nuxt.config` fájlból olvassa a `locales`, `defaultLocale`, `translationDir` értékeket és a rétegeidet, így nincs szüksége saját konfigurációra.
+
+![Egy terminál, amelyben fut az i18n-micro check, amely egy hiányzó, egy nem definiált és négy nem használt kulcsot listáz és hibával zárul, majd az extract, amely hozzáadja a nem definiált kulcsot, majd a clean --dryRun, amely felsorolja a négy kulcsot, amelyet eltávolítana](/images/cli/demo.gif)
+
+| Parancs | Mire használd |
+| --- | --- |
+| `check` | Megbuktatja a buildet, ha bármi hibás a locale-fájlokkal |
+| `translate` | Kitölti a hiányzó kulcsokat egy fordítószolgáltatással |
+| `clean` | Eltávolítja a sehol nem használt kulcsokat |
+| `rename` | Egy kulcsot vagy egy teljes névteret egyszerre mindenhol áthelyez |
+
+```bash
+npm install -D @i18n-micro/cli
+npx i18n-micro --help
+```
+
+Az alkalmazás gyökeréből futtasd, vagy a `--cwd` kapcsolóval mutass rá. Minden parancs minden kapcsolója megtalálható a [parancsreferenciában](/hu/api/cli).
+
+<Tip>
+
+**A nuxt-i18n-micro-cli csomagról váltasz?** Az `@i18n-micro/cli` helyettesíti; az `i18n-micro` és az `i18n-micro-cli` binárisok megmaradnak. Lásd a [régi parancsok táblázatát](#moving-from-nuxt-i18n-micro-cli).
+
+</Tip>
+
+## Használat CI-ban {#use-it-in-ci}
+
+```bash
+i18n-micro check
+```
+
+A `check` a kapu. Ezeket jelenti:
+
+| Ellenőrzés | Jelentés |
+| --- | --- |
+| `missing` | Az alapértelmezett locale egy kulcsa hiányzik egy locale-ból |
+| `empty` | Egy érték `''`. Az alkalmazás üres helyet mutat, nem a tartalékot |
+| `extra` | Egy locale-ban olyan kulcs van, amely az alapértelmezett locale-ban nincs |
+| `placeholders` | Egy `{name}` elveszett vagy hozzáadódott, vagy egy többes számú szöveg elvesztette az alakjait |
+| `undefined` | A kód olyan kulcsot használ, amely az alapértelmezett locale-ban nincs meg |
+| `unused` | A projektben semmi sem használ egy kulcsot |
+| `duplicates` | Ugyanaz a szöveg különböző kulcsok alatt. Alapértelmezés szerint ki van kapcsolva: add meg a `--duplicates` kapcsolót |
+
+- A `--only missing,placeholders` csak néhány ellenőrzést futtat; a `--only` kapcsolóban megnevezett, de le nem futtatható ellenőrzés hibát ad.
+- A `--json` eszközök számára készít jelentést.
+- Az `--ignore` forrásfájlokat hagy ki.
+- Amíg kulcsok futásidőben számítódnak ki, az `unused` kimarad, és a jelentés megmondja, miért.
+
+Minden parancs három kód egyikével lép ki, így egy pipeline meg tudja különböztetni a fordításaid problémáját az eszköz problémájától:
+
+| Kilépési kód | Jelentés |
+| --- | --- |
+| `0` | Nincs mit jelenteni |
+| `1` | Találatok |
+| `2` | A parancs nem tudott lefutni: használati hiba, sérült fájl, sikertelen kérés |
+
+Más parancsok, amelyek megérnek egy CI-lépést:
+
+```bash
+i18n-micro format --check      # fails if a file is not formatted
+i18n-micro lint                # stray spaces, empty values, your own regex rules
+i18n-micro stats --baseRef main
+```
+
+## A locale-ok szinkronban tartása {#keep-locales-in-step}
+
+| Parancs | Mit csinál |
+| --- | --- |
+| `extract` | Felsorolja azokat a kódban használt kulcsokat, amelyeknek még nincs szövegük. Az alapértelmezett szöveg, mint a `$t('key', {}, 'Welcome')` esetében, az alapértelmezett locale-ba kerül. |
+| `sync` | Eltávolítja azokat a kulcsokat, amelyek az alapértelmezett locale-ban nincsenek meg. Először próbáld ki a `--dryRun` kapcsolóval. |
+| `clean` | Eltávolítja a sehol nem használt kulcsokat. Először próbáld ki a `--dryRun` kapcsolóval. |
+| `search` | Kulcsokat és értékeket keres, és megmutatja, hol használják az egyes kulcsokat. |
+| `stats` | Locale-onkénti készültség; a `--baseRef main` egy git-referenciával vet össze. |
+
+A `sync` ugyanúgy leáll, mint a `clean`, ha olyan kulcsot távolítana el, amelyről nem tudja bizonyítani, hogy nem használt, valamint akkor is, ha az alapértelmezett locale-ban nincs mivel összevetni. Ha nincs mit eltávolítani, soha nem áll le, így önmagában a `$t(item.label)` nem ok a `--force` használatára.
+
+<Note>
+
+Az `extract` és a `sync` soha nem ír `''` értéket egy fordítás nélküli kulcshoz. A kulcs hiányzó marad, így futásidőben a `fallbackLocale` érvényesül, és a `check` jelenti. Egy üres karakterlánc definiált érték lenne, és üres helyet mutatna.
+
+</Note>
+
+### Mit olvasnak a parancsok {#what-the-commands-read}
+
+A `check`, `extract`, `sync`, `clean`, `search` és `rename` a teljes projekt forráskódját olvassa, nem egy rögzített mappalistát:
+
+- **Beolvasva:** sablonok és szkriptek egy parseren keresztül, `.html` és Pug szövegként, minden réteg, valamint a gyökéren kívüli mappák, amelyekre egy alias vagy a `components` mutat.
+- **Kihagyva:** `node_modules`, a build kimenete és a locale-fájlok. A sajátjaidat így add hozzá: `--ignore 'legacy/**,*.stories.ts'`.
+- **A tesztkód** használatnak számít, így a `clean` és a `check --only unused` megtart egy kulcsot, amelyet csak egy teszt olvas. Kulcsot soha nem ad hozzá: az `extract` kihagyja az ilyen kulcsokat, és a `check` nem jelenti őket nem definiáltként.
+
+Tesztkódnak számítanak a `tests`, `test`, `__tests__`, `e2e`, `cypress` és `playwright` gyökérmappák, valamint bárhol a `.spec` és `.test` JavaScript- és TypeScript-fájlok (`.ts`, `.tsx`, `.mts`, `.js`, `.jsx`, `.mjs` és hasonlók). Csak a gyökérmappák mentesülnek az alábbi kételyek alól: a `pages/tests/[id].vue` ugyanolyan oldal, mint bármely más, és ugyanígy a `public/` és a minifikált fájlok is, amelyek kódja nem része az alkalmazásnak.
+
+A parancsok felismerik:
+
+- a `$t`, `$ts`, `$tc`, `$has` és `$_t(route)` hívásokat;
+- a `useI18n()` és a `useTranslationServerMiddleware()` által adott `t()` függvényt;
+- az `<i18n-t keypath>` elemet sablonokban és JSX-ben, valamint az `<i18n-group prefix>` elemet;
+- az olyan aliasokat, mint a `const { t: tr } = useI18n()`.
+
+### Hogyan dönt a `clean` {#how-clean-decides}
+
+A `clean` inkább meghagy egy halott kulcsot, mint hogy eltávolítson egy élőt. Egy kulcs megmarad, ha az alábbiak bármelyike igaz:
+
+- egy hívás használja, vagy egy alatta vagy felette lévő kulcsot;
+- egy karakterlánc a kódban megegyezik vele: `const key = 'menu.home'`, `<Item label="menu.home" />`;
+- a projekt egy JSON-, YAML- vagy Markdown-fájlja tartalmazza;
+- egy kiszámított kulcs statikus eleje lefedi: a `` $t(`status.${state}`) `` mindent megtart a `status.` alatt;
+- egy réteg definiálja.
+
+A `clean` változtatás nélkül leáll, ha nem tudhatja biztosan, és felsorolja, miért:
+
+- egy kulcs teljesen kiszámított, mint a `$t(name)`, `<i18n-t :keypath="name" />` vagy `<i18n-t v-bind="props" />` esetében;
+- a `$t` értékként adódik tovább, mint az `items.map($t)` esetében;
+- egy `t` nevű függvény kiszámított argumentumot kap, és paraméterből, importból vagy hívásból származik: lehet, hogy a valódi körüli burkoló. Az ugyanabban a fájlban definiált függvény nem számít, mert egy burkolónak saját hívása lenne benne;
+- egy forrásfájl nem értelmezhető;
+- egyetlen fájl sem használ egyetlen kulcsot sem, ami általában azt jelenti, hogy rossz helyen keres;
+- egy locale-fájl a projekten kívülre mutató szimbolikus link, így egy másik alkalmazás is olvashatja.
+
+<Steps>
+
+<Step title="Előnézet">
+
+Futtasd az `i18n-micro clean --dryRun` parancsot, és nézd át, mit listáz.
+
+</Step>
+
+<Step title="Kulcsok védelme">
+
+A csak látszólag nem használt kulcsokat tartsd meg a `--exclude '^errors\.'` kapcsolóval.
+
+</Step>
+
+<Step title="Eltávolítás">
+
+Futtasd újra a `--force` kapcsolóval.
+
+</Step>
+
+</Steps>
+
+## Hiányzó kulcsok fordítása {#translate-missing-keys}
+
+```bash
+i18n-micro translate --dryRun                     # keys and characters per locale, nothing sent
+export I18N_TRANSLATE_TOKEN=...                   # or put it in .env
+i18n-micro translate --service deepl --locale de,fr
+```
+
+- A `translate` a hiányzó vagy üres kulcsokat tölti ki; a `--replace` mindent újrafordít.
+- A helyőrzők és a többes számú alakok védettek. Az a fordítás, amely elvesztett egy helyőrzőt, nem kerül kiírásra: a kulcs listázásra kerül, és a parancs `1` kóddal lép ki.
+- Minden köteg mentésre kerül, mielőtt a következő kérés elindul, így egy hiba csak a sikertelen kérésbe kerül.
+
+| `--service` | Szolgáltatás | `--token` | Hasznos `--options` |
+| --- | --- | --- | --- |
+| `ai` | Vercel AI Gateway, OpenAI, Anthropic vagy bármely OpenAI-kompatibilis szerver | API-kulcs, vagy `AI_GATEWAY_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` | `provider`, `model`, `baseUrl`, `maxTokens` |
+| `azure` | Azure Translator | Előfizetési kulcs | `region` |
+| `deepl` | DeepL, az ingyenes kulcsokat is beleértve | Hitelesítési kulcs | `formality`, `glossaryId`, `context` |
+| `google` | Google Cloud Translation v2 | API-kulcs | `model` |
+| `libretranslate` | LibreTranslate | Opcionális | `baseUrl` |
+| `yandexcloud` | Yandex Cloud Translate | API-kulcs, vagy IAM-token `authScheme:Bearer` értékkel | `folderId`, `model` |
+
+Az opciók `key:value` párok: `--options provider:openai,model:gpt-4o-mini`. Minden szolgáltatás elfogadja a `baseUrl`, `retries`, `retryDelayMs` és `timeoutMs` opciókat is. Egy fordítási kérés már számlázásra kerülhetett, ezért csak `429` vagy `503` után ismétlődik meg, és akkor sem, ha a szolgáltatás egy percnél hosszabb várakozást kér.
+
+<Warning>
+
+A kapcsolók láthatók a shell előzményeiben és a folyamatlistákban, ezért a tokent környezeti változón keresztül add át. A CLI elfedi, amiről tudja, hogy titkos, bárhol is írja ki, a `--debug` kimenetet is beleértve: tokeneket, szolgáltatói kulcsokat, Basic hitelesítő adatokat, valamint az általad konfigurált URL query-részét és hitelesítő adatait. Egy olyan szerver, amely visszaküldés előtt átformázza a kulcsot, kívül esik a hatókörén, ezért egy sikertelen futás naplóit kezeld óvatosan.
+
+</Warning>
+
+Az `ai` szolgáltatás egy glosszáriumot követ. Ha létezik `.i18n-glossary.json`, kapcsoló nélkül is használatba kerül; a `--glossaryFile` másik fájlt választ.
+
+```json .i18n-glossary.json
+{ "entries": [{ "source": "Cart", "target": "Warenkorb", "to": "de" }] }
+```
+
+## Beégetett szöveg kulcsokká alakítása {#turn-hardcoded-text-into-keys}
+
+```bash
+i18n-micro text-to-i18n --dryRun   # list what would change
+i18n-micro text-to-i18n            # rewrite the templates
+```
+
+```vue
+<!-- before -->
+<h1>Welcome to our site</h1>
+<!-- after -->
+<h1>{{ $t('pages.index.welcome-to-our') }}</h1>
+```
+
+Csak magának a projektnek a `.vue` sablonjai íródnak át, egy réteg vagy egy alias-cél sablonjai nem. Minden átírt fájl kiírás előtt újra feldolgozásra kerül. Ezek listázásra kerülnek, és megtartják a szövegüket:
+
+- a `.ts` fájlokban és szkriptekben lévő szöveg, mert a `$t` nem mindenhol érhető el;
+- a jelölés vagy interpoláció melletti szöveg, például `<p>Hello <b>world</b> today</p>`: egy fél mondat önmagában nem fordítható le;
+- egy generált kulcs, amely ütközne egy másikkal, ahogy egy szülőoldal és a gyermeke esetében előfordulhat;
+- egy ismert kulcs, amely nem tehető idézőjelek közé.
+
+<Warning>
+
+Előbb commitolj, és nézd át a diffet.
+
+</Warning>
+
+## Kulcs átnevezése {#rename-a-key}
+
+```bash
+i18n-micro rename --from common.save --to actions.save
+i18n-micro rename --from settings --to account.settings   # a whole namespace
+```
+
+A `rename` a szintaxisfát szerkeszti, így a megjegyzések és a nem kapcsolódó karakterláncok változatlanok maradnak, az aliasokat és a `:keypath` értéket pedig követi. Egy réteg saját fájlja soha nem módosul. Figyelmeztet arra, amit nem tud átírni, és érintetlenül hagyja:
+
+- a régi név alatti kiszámított kulcsot;
+- minden vele megegyező egyszerű karakterláncot;
+- a Pug-sablonokat;
+- a rétegben vagy a projekten kívüli mappában lévő forrást.
+
+A `--to` értéknek kódban leírható kulcsnak kell lennie: nincs benne idézőjel, backslash, üres szegmens vagy `__proto__`.
+
+## Fájlcsere fordítókkal {#exchange-files-with-translators}
+
+```bash
+i18n-micro export --format csv
+i18n-micro import --format csv --dryRun
+```
+
+Az **`export`** minden locale minden kulcsát kiírja, a lefordítatlanokat is, forrásként az alapértelmezett locale szövegével: CSV-ben egy `Source` oszlopban, PO-ban egy `#.` megjegyzésben.
+
+- `--dir` nélkül a PO a `pots`, a CSV a `csv_exports` mappába kerül.
+- A kimeneti mappában a `.i18n-export.json` fájlban rögzíti, mit írt ki. Leáll, ha egy fájl azóta megváltozott, és olyan fordításokat tartalmaz, amelyek a locale-fájlokban nincsenek meg, a fuzzy PO-bejegyzéseket is beleértve; a `--force` felülírja őket. A locale-fájlok szokásos szerkesztései nem állítják le.
+
+Az **`import`** összefésül, kihagyja az üres cellákat, és kihagyja a `fuzzy` jelölésű PO-bejegyzéseket.
+
+- Az a kulcs, amely felülírna egy értéket, vagy egy érték, amely egy teljes kulcscsoportot írna felül, listázásra kerül és kimarad, a parancs pedig `1` kóddal lép ki.
+- `2` kóddal áll le, ha egy katalógus váratlan helyen van, ha egy oldal katalógusát nem az utolsó export írta, ha egy CSV-ben rossz helyen van egy idézőjel, vagy ha egy oldalbejegyzés `disablePageLocales` alatt van.
+
+Fordítóplatformhoz annak saját CLI-jét használd: a [Crowdin](/hu/guide/crowdin) beállítás szinkronizálja a JSON-fájlokat, az oldalfájlokat is.
+
+## Szinkronizálás saját végponttal {#sync-with-your-own-endpoint}
+
+A `sync-remote` a globális locale-fájlokat egy általad futtatott HTTP-végponttal cseréli. Az oldalfájlok helyben maradnak, és a parancs ezt jelzi is. A végpontot a `.i18n-remote.json` fájlban írd le:
+
+```json .i18n-remote.json
+{ "url": "https://translations.example.com", "path": "translations" }
+```
+
+A végpont `GET` és `PUT` kérésekre egy `{ locale: messages }` objektummal válaszol. Hitelesíts az `auth: { username, password }` beállítással, vagy tegyél egy bearer tokent az `I18N_REMOTE_TOKEN` változóba.
+
+| | Pull | Push |
+| --- | --- | --- |
+| Mi mozog | Kitölti, ami nálad nincs meg, és megtartja a csak nálad lévő kulcsokat | A projekt saját kulcsait küldi, egy réteg kulcsait nem, és kihagyja az üres értékeidet |
+| Ütközések | Mindkét oldalon eltérő kulcs: semmi sem íródik ki, kilépési kód `1`; a `--force` a távoli értéket veszi át | Egy PUT lecseréli a dokumentumot, ezért a push először beolvassa a végpontot, és `1` kóddal leáll, ha az olyan szöveget tartalmaz, amely nálad nincs meg; a `--force` felülírja. Egy `404` választ adó végpontnak nincs mit veszítenie |
+| `--dryRun` | Olvas a végpontról, listázza a változásokat, semmit sem ír | Megmondja, mi kerülne elküldésre, a végpont megkeresése nélkül |
+
+A nem konfigurált locale kimarad, és egy üres távoli érték semmit sem töröl.
+
+## Váltás a nuxt-i18n-micro-cli csomagról {#moving-from-nuxt-i18n-micro-cli}
+
+| Régi parancs | Most |
+| --- | --- |
+| `validate` | `check` |
+| `diff` | `check --only missing` |
+| `check-duplicates` | `check --only duplicates` |
+| `export-csv`, `import-csv` | `export --format csv`, `import --format csv` |
+| `--potsDir`, `--csvDir` | `--dir` |
+| `estimate` | `translate --dryRun` |
+| `glossary` | Szerkeszd a `.i18n-glossary.json` fájlt; a `translate` magától beolvassa |
+| `backup`, `restore` | Git, amely már tárolja a locale-fájljaidat |
+| `init` | `nuxi init`, majd add hozzá a `nuxt-i18n-micro` modult a `modules` listához |
+| `split` | Eltávolítva: a modul nem olvassa a felosztott fájlokat |
+| `optimize` | `check --only duplicates` |
+| `replace-values` | A szerkesztőd vagy a `sed` |
+| `stats --full` | `stats`; a részletek a [DevTools](/hu/guide/devtools) felületen vannak |
+| `search --hardcodedOnly` | `text-to-i18n --dryRun` |
+| `search --preferUnused`, `--onlyVue` | Eltávolítva |
+| `lint` szabályok: `no-html-tags`, `no-special-chars`, `no-mixed-case`, `no-missing-punctuation`, `no-inconsistent-pluralization` | Eltávolítva: normál szöveget jelöltek meg. Ha szükséged van ilyenre, írj egy `customRegexRules` bejegyzést |
+| `text-to-i18n --extractOnlyDirs`, `--extractOnlyPatterns`, `--verbose` | Eltávolítva: a kód soha nem íródik át |
+| `--logLevel verbose` | Eltávolítva: nem csinált semmit |
+
+**Eltávolított szolgáltatások:** `googlefree`, `yandex` (használd a `yandexcloud` szolgáltatást), `ibm`, `lingvatranslate`, `modernmt`, `lilt`, `unbabel`, `reverso`, `baidu`, `papago`, `tencent`, `systran`, `mymemory`.
+
+**Eltávolított `sync-remote` típusok:** `github`, `gitlab`, `crowdin`, `lokalise`, `tolgee`, `weblate`. Használd a platform saját CLI-jét, vagy a `custom` típust, amelyhez már nem kell `type`.
+
+### Megváltozott viselkedés {#changed-behaviour}
+
+- Az `extract` és a `sync` már nem ír `''` értéket. A kulcsok hiányzók maradnak, és a `check` jelenti őket. Az `extract` csak akkor ír ki egy kulcsot, ha a kód megadja a szövegét.
+- Az `extract` az oldalkulcsokat a `locales/pages/<route name>/` mappába írja, ahonnan a modul olvassa őket, és Nuxt 4 alatt az `app/` mappát is átvizsgálja. Helyezz át mindent az olyan könyvtárakból, mint a `pages/_about` és a `pages/blog_`, és töröld az elkóborolt `locales/pages/<locale>.json` fájlt.
+- A `nuxt.config` `translationDir` értéke figyelembe vételre kerül; korábban minden parancs csendben a `locales` mappát használta.
+- `defaultLocale` nélkül az alapértelmezett az `en`, ahogy a modulban, és a `DEFAULT_LOCALE` figyelembe vételre kerül. Korábban ez az első locale volt.
+- A `check` és a `sync` az alapértelmezett locale-t használja referenciaként, és ellenőrzi az oldalfájlokat. Az `"a.b"` és az `a: { b }` egy kulcsnak számít.
+- A `clean` megtart egy bárhol, bármilyen hatókörben használt kulcsot, és leáll, ha a használat nem bizonyítható. Az `--include` és az `--exclude` választja ki, mi távolítható el.
+- A `sync` ugyanígy leáll, valamint akkor is, ha az alapértelmezett locale-ban nincsenek összevethető kulcsok. A `--force` felülbírálja. Akkor is leáll, ha a `DEFAULT_LOCALE` más referenciát választott, mint a `nuxt.config`.
+- Az egy kötőjeles hosszú kapcsolók és a felesleges argumentumok hibának számítanak: a `clean -dryRun` már nem futtatja a `clean` parancsot.
+- Egy csak olvasható vagy nem UTF-8 kódolású fájl nem menthető: a parancs leáll, mielőtt bármit is megváltoztatna. Egy ilyen fájl olvasása rendben van. Egy ismétlődő kulcs, egy `__proto__` nevű kulcs és egy 2^53 feletti egész szám leállítja a parancsot, mert a mentés elveszítené őket.
+- Hibának számít, ha egy értéket igénylő kapcsolót egy másik kapcsoló követ; kötőjellel kezdődő értékhez írd így: `--flag=--value`. A logikai kapcsoló csak `true` vagy `false` értéket fogad el.
+- Az `export` inkább leáll, mint hogy felülírja a soha nem importált fordításokat.
+- A kilépési kódok `0`, `1` és `2`; korábban a hibák `1` kódot adtak, a `diff` és a `check-duplicates` pedig mindig `0` kódot.
+- A `lint --fix` már nem hagy hátra `.bak` fájlokat.
+- A mentés megőrzi a fájl behúzását, sorvégeit, záró újsorát, szimbolikus és kemény linkjét, és érintetlenül hagyja azokat a fájlokat, amelyeket nem módosított.
+- Egy elgépelt vagy eltávolított kapcsoló most hibát ad, ahelyett hogy csendben figyelmen kívül maradna.
+- Az olyan útvonalak, mint a `--dir`, a projekthez viszonyítva értendők, nem a shellhez.
+- Az `ai` már nem tölti be az `@ai-sdk/*` csomagokat: használd a `gateway`, `openai` vagy `anthropic` `provider` értéket, illetve OpenAI-kompatibilis szerverhez a `baseUrl` opciót.
+
+## Kapcsolódó {#related}
+
+<CardGroup cols={2}>
+
+<Card title="CLI-parancsok" icon="brackets-curly" href="/hu/api/cli">
+
+</Card>
+
+<Card title="Fordítási fájlok" icon="book-open" href="/hu/guide/translations">
+
+</Card>
+
+<Card title="Crowdin" icon="book-open" href="/hu/guide/crowdin">
+
+</Card>
+
+<Card title="DevTools" icon="book-open" href="/hu/guide/devtools">
+
+</Card>
+
+</CardGroup>

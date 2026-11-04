@@ -1,0 +1,441 @@
+---
+title: "डिप्लॉयमेंट"
+description: "Node सर्वर, serverless या Edge पर, या स्टैटिक साइट के रूप में डिप्लॉय करें — अनुवाद payloads कहाँ जाते हैं, हर प्लेटफ़ॉर्म को क्या चाहिए, प्रॉक्सी, और कैशिंग।"
+---
+
+मॉड्यूल किसी भी Nitro preset के साथ बिना अतिरिक्त कॉन्फ़िग के काम करता है: अनुवाद फ़ाइलें कहाँ रहेंगी, यह वह उस preset से तय करता है जिसके लिए आप बिल्ड करते हैं। अधिकांश ऐप्स के लिए डिफ़ॉल्ट सही हैं; अपने प्लेटफ़ॉर्म का सेक्शन पढ़ें। यह पेज समझाता है:
+
+- `.output/` में क्या पहुँचता है और payloads को कौन-से हेडर मिलते हैं;
+- स्टैटिक होस्टिंग, बड़े कैटलॉग, सब-पाथ, प्रॉक्सी या CDN के लिए क्या बदलना है।
+
+<Note>
+
+वास्तविक होस्ट पर डिप्लॉय और जाँचा गया: Cloudflare Workers और Pages, Vercel और Vercel Edge, Netlify और Netlify Edge, Cloud Run और Deno Deploy, हर एक [प्लेटफ़ॉर्म](#platforms) में सूचीबद्ध सेटअप के साथ। अन्य presets को स्थानीय रूप से बिल्ड करके चलाया गया।
+
+</Note>
+
+## अनुवाद कैसे डिलीवर होते हैं {#how-translations-are-delivered}
+
+बिल्ड के समय मॉड्यूल `locales/` (सभी लेयर मर्ज करके) को **payloads** में बदल देता है: प्रति पेज और लोकेल एक JSON फ़ाइल। इन्हें दो उपभोक्ता पढ़ते हैं:
+
+- **SSR** रेंडर किए गए पेज का payload in-process लोड करता है — कोई HTTP रिक्वेस्ट नहीं, और डिक्शनरी HTML में एम्बेड नहीं होती।
+- **ब्राउज़र** hydration और नेविगेशन पर `/_locales/<page>/<locale>/data.json?v=<dateBuild>` fetch करता है।
+
+`_locales` [`apiBaseUrl`](/hi/api/module-options#apibaseurl) है। बिल्ट-इन सर्वर रूट उस URL का उत्तर देता है; `public/` में स्टैटिक कॉपी सर्वर के बिना उसका उत्तर देती है।
+
+## Node सर्वर {#node-server}
+
+```bash
+npx nuxi build
+node .output/server/index.mjs
+```
+
+`node-server` (डिफ़ॉल्ट preset), `node-cluster`, `bun`, `deno-server` या किसी भी अन्य preset के साथ जो `public/` को डिस्क से सर्व करता है, जहाँ `public/` `server/` फ़ोल्डर के बगल में हो:
+
+- payloads `.output/public/_locales/<page>/<locale>/data.json` में कॉपी किए जाते हैं;
+- SSR उन्हें उस फ़ोल्डर से `fs` के साथ पढ़ता है (सर्वर में कुछ भी बंडल नहीं होता);
+- ब्राउज़र उन्हें स्टैटिक फ़ाइलों के रूप में, या सर्वर रूट से प्राप्त करता है।
+
+पूरी `.output/` डायरेक्टरी डिप्लॉय करें। मॉड्यूल को Node 20 या नया चाहिए, और Nuxt का अपना न्यूनतम है: Nuxt 4.5 `^22.19.0 || ^24.11.0 || >=26.0.0` घोषित करता है।
+
+स्थिर लोड के तहत एक प्रोसेस अपने live heap से कहीं अधिक मेमोरी रख सकता है। कंटेनर सीमा सेट करने से पहले [Node सर्वर पर मेमोरी](/hi/guide/performance#memory-on-a-node-server) देखें।
+
+किसी अन्य लेआउट के साथ, मॉड्यूल payloads को अगले सेक्शन में बताए अनुसार एम्बेड करता है। इसमें शामिल है:
+
+- एक कस्टम `nitro.output.publicDir`, जिसे बिल्ड एक बार पढ़ता है;
+- ऐसे preset पर `serveStatic: true` जो स्टैटिक फ़ाइलें कहीं और रखता है।
+
+<Warning>
+
+यदि कोई बिल्ड `public/` पढ़ता है और फ़ोल्डर सर्वर तक नहीं पहुँचता, जैसा कि `aws-lambda` और `serveStatic: true` के साथ होता है, तो सर्वर एक त्रुटि लॉग करता है और पेज कच्ची कुंजियाँ दिखाते हैं। payloads एम्बेड करने के लिए `nitro.serveStatic: false` सेट करें।
+
+</Warning>
+
+## Serverless और Edge {#serverless-and-edge}
+
+ये presets रनटाइम पर `public/` नहीं पढ़ सकते:
+
+- फ़ंक्शन presets जो `public/` को CDN पर भेजते हैं या उसे सर्व नहीं करते: `vercel`, `netlify`, `aws-lambda`, `aws-amplify`, `azure-swa`, `firebase`, `stormkit`, `zeabur`, `node-listener`;
+- बिना फ़ाइल सिस्टम वाले Edge presets: `cloudflare-module`, `cloudflare-pages`, `vercel-edge`, `netlify-edge`, `deno_deploy`;
+- `serveStatic: 'inline'`, जैसे `winterjs`।
+
+वहाँ मॉड्यूल payloads को Nitro server assets (`assets:i18n`) के रूप में सर्वर बंडल में एम्बेड करता है और फिर भी ब्राउज़र के लिए public कॉपी लिखता है।
+
+पूरी पेज × लोकेल मैट्रिक्स को एम्बेड करने से बंडल बड़ा हो जाता है। किसी Edge प्लेटफ़ॉर्म की सीमा पार होने पर बिल्ड चेतावनी देता है और उसका नाम बताता है, देखें [बंडल सीमाएँ](#bundle-limits-on-edge)। बड़े कैटलॉग के लिए `source` मोड पर स्विच करें, जो compact स्रोत फ़ाइलें एम्बेड करता है और रनटाइम पर root, page और fallback अनुवाद मर्ज करता है:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    translationPayloads: {
+      mode: 'source',
+    },
+  },
+})
+```
+
+`source` मोड में ब्राउज़र हमेशा सर्वर रूट से payloads fetch करता है, जो उन्हें रिक्वेस्ट पर मर्ज करता है (कोई भी public कॉपी compact स्रोत ट्री रखती है जिसे केवल सर्वर पढ़ता है)। इसके लिए एक चलता हुआ सर्वर चाहिए, इसलिए शुद्ध स्टैटिक साइट के लिए `source` का उपयोग न करें।
+
+### Edge पर बंडल सीमाएँ {#bundle-limits-on-edge}
+
+| प्लेटफ़ॉर्म           | सीमा                                                                                  |
+| ------------------ | -------------------------------------------------------------------------------------- |
+| Cloudflare Workers | 64 MiB uncompressed, Free और Paid पर। कोई compressed सीमा नहीं। 1 s स्टार्टअप, 128 MB मेमोरी |
+| Vercel Edge        | Hobby पर 1 MB gzip, Pro पर 2 MB, Enterprise पर 4 MB                                    |
+| Netlify Edge       | 20 MB compressed                                                                       |
+
+बिल्ड अपने द्वारा एम्बेड की गई डिक्शनरी का योग करता है और केवल प्लेटफ़ॉर्म की सबसे कम सीमा पार होने पर चेतावनी देता है। यह केवल डिक्शनरी गिनता है, इसलिए ऐप उसके ऊपर आता है। उदाहरण के लिए, 60 KB root फ़ाइल के साथ 120 पेज × 4 लोकेल एम्बेड करते हैं:
+
+| मोड | एम्बेड किया गया | फ़िट होता है |
+| --- | --- | --- |
+| `premerged` | 34.9 MiB | Cloudflare; Vercel Edge या Netlify Edge नहीं |
+| `source` | 5.7 MiB | Vercel Edge पर फिर भी 3 MB gzip |
+
+Vercel Edge पर उस आकार के कैटलॉग को एक [payload होस्ट](#app-baseurl-and-payload-hosts) चाहिए।
+
+`source` हर isolate में प्रति पेज और लोकेल एक मर्ज की कीमत चुकाता है, उस उदाहरण में लगभग 1 ms और cold isolate में 7 ms CPU। यह fallback chain के आकार के साथ बढ़ता है: chain फ़ाइलों के 4 MB के लिए लगभग 43 ms। Netlify Edge प्रति रिक्वेस्ट 50 ms CPU की अनुमति देता है और Cloudflare का Free प्लान 10 ms।
+
+### Edge रनटाइम पर तारीखें {#dates-on-edge-runtimes}
+
+`$td` रनटाइम के `Intl` का उपयोग करता है, और उसका ICU डेटा ब्राउज़र से भिन्न हो सकता है। Netlify Edge पर एक फ़ॉर्मैट की गई तारीख में U+202F (narrow no-break space) हो सकता है जहाँ Chrome में सामान्य स्पेस होता है, इसलिए Vue एक hydration mismatch लॉग करता है और hydration पर टेक्स्ट स्वयं ठीक हो जाता है। सादे `Intl` के साथ सादा Nuxt वहाँ भी यही करता है; Deno Deploy नहीं करता।
+
+<Tip>
+
+`date` या `relativeDate` के साथ `<i18n-t>` पहले से ही mismatch की अनुमति देता है। टेम्पलेट में `$td` के लिए, एलिमेंट पर `data-allow-mismatch="text"` लगाएँ।
+
+</Tip>
+
+## स्टैटिक साइट (nuxi generate) {#static-site-nuxi-generate}
+
+```bash
+npx nuxi generate
+```
+
+`nuxi build --preset <static preset>` भी यही करता है।
+
+- डिफ़ॉल्ट `premerged` मोड हर payload को `.output/public/_locales/` में लिखता है, इसलिए कोई भी स्टैटिक होस्ट उन्हें सर्व कर सकता है।
+- पेज हर लोकेल के लिए prerender किए जाते हैं: `prefix` के तहत मॉड्यूल हर स्थानीयकृत root (`/en`, `/de`) को seed करता है, और `/` को रीडायरेक्ट stub के रूप में रखा जाता है।
+- [`prerenderRoutes`](/hi/api/module-options#translationpayloads) को बंद रहने दें: public कॉपी में पहले से ही payload फ़ाइलें हैं।
+- `source` मोड या `publicAssets: false` के साथ ब्राउज़र के पढ़ने के लिए कुछ नहीं होता, और बिल्ड चेतावनी देता है।
+
+<Note>
+
+कुकी या `Accept-Language` पढ़ने के लिए कोई सर्वर नहीं है, इसलिए सहेजा गया लोकेल पहली लोड पर `/` को रीडायरेक्ट नहीं करता। `no_prefix` के तहत HTML में डिफ़ॉल्ट लोकेल होता है, और सहेजी गई कुकी लोड पर लागू नहीं होती: `$switchLocale` खुले पेज में फिर भी काम करता है।
+
+</Note>
+
+Cloudflare Pages के लिए देखें [Cloudflare Pages](#cloudflare-pages)।
+
+[लोकेल डोमेन](/hi/guide/layers#multiple-domains) वाले बिल्ड के लिए, प्रति डोमेन एक बार generate चलाएँ, `NUXT_I18N_DOMAIN` को उस रन के होस्ट के रूप में रखते हुए। तब हर ट्री में उस डोमेन के पेज और payloads होते हैं। Nitro में आउटपुट फ़ोल्डर के लिए कोई वेरिएबल नहीं है, इसलिए कॉन्फ़िग से अपना स्वयं का पढ़ें:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: { output: { publicDir: process.env.PUBLIC_DIR } },
+})
+```
+
+```bash
+NUXT_I18N_DOMAIN=example.de PUBLIC_DIR=sites/example.de npx nuxi generate
+NUXT_I18N_DOMAIN=example.com PUBLIC_DIR=sites/example.com npx nuxi generate
+```
+
+- फ़ोल्डरों को `.output` के बाहर रखें: हर रन उसे खाली कर देता है।
+- अन्य डोमेन के absolute लिंक crawl नहीं किए जाते।
+- वेरिएबल के बिना, `baseUrl` लोकेल वाला बिल्ड चेतावनी देता है और बिल्ड कॉन्फ़िग जनरेट करता है, जहाँ वे लोकेल लिंक होते हैं और उन्हें कोई पेज नहीं मिलता।
+- Node सर्वर पर वही वेरिएबल प्रोसेस को एक डोमेन पर पिन करता है, `Host` चाहे जो कहे।
+
+एक स्टैटिक होस्ट इन फ़ाइलों पर अपने स्वयं के हेडर लागू करता है; कैशिंग होस्ट के कॉन्फ़िग में सेट करें। मॉड्यूल का `/_locales/*` नियम `_headers` के माध्यम से Cloudflare Pages तक और `config.json` के माध्यम से Vercel तक `public, max-age=60` के रूप में पहुँचता है। `.gz` / `.br` sibling फ़ाइलें भेजने के लिए, `nitro.compressPublicAssets` चालू करें: मॉड्यूल उन्हीं सेटिंग्स के साथ payload कॉपी को compress करता है।
+
+
+## कैश हेडर और dateBuild {#cache-headers-and-datebuild}
+
+| रिक्वेस्ट                                                                                  | `Cache-Control`                                                                                                 |
+| ---------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Node सर्वर या रूट, `?v=` वर्तमान `dateBuild` के बराबर, एक गैर-रिक्त डिक्शनरी     | `private, max-age=<httpCacheDuration>, immutable`                                                               |
+| Node सर्वर या रूट, `?v=` के बिना, पुराने के साथ, या एक रिक्त डिक्शनरी             | `public, max-age=0, must-revalidate`                                                                            |
+| होस्ट की `public/` की कॉपी, कोई भी `?v=`                                                    | `public, max-age=60` ([`httpCacheControl`](/hi/api/module-options#other)) |
+| `source` मोड, `cacheTtl`, या `apiBaseServerHost`: डिक्शनरी बिना बिल्ड के बदल सकती है | `httpCacheControl` हेडर, हमेशा                                                                           |
+| सर्वर रूट, डिक्शनरी पढ़ी नहीं जा सकी                                           | `503`, `no-store`                                                                                               |
+| dev सर्वर                                                                               | कोई नहीं                                                                                                            |
+
+तालिका ऐसी क्यों दिखती है:
+
+- वर्तमान `v` वाला URL एक hashed asset की तरह पिन किया जाता है, और केवल वही यह कह सकता है जो query देखता है: सर्वर रूट, और एक Node सर्वर, जो अपनी स्टैटिक फ़ाइलों पर हेडर सेट करता है।
+- यह `private` है, इसलिए query को अनदेखा करने वाला CDN इस रिस्पॉन्स से अगले `v` का उत्तर नहीं दे सकता।
+- होस्ट की स्टैटिक फ़ाइलें `/_locales/**` route rule से पाथ-व्यापी हेडर लेती हैं, जो query नहीं देख सकता, इसलिए यह छोटा रहता है; दोबारा लोड फिर भी किसी चीज़ पर block नहीं होता।
+- पुराना `v` सर्व करने योग्य रहता है, क्योंकि कैश किया गया HTML उसका नाम लेता है।
+
+`httpCacheControl: false` हर स्टैटिक फ़ाइल को `max-age=0, must-revalidate` पर रखता है। [`httpCacheDuration`](/hi/api/module-options#httpcacheduration) का डिफ़ॉल्ट एक वर्ष है; `0` कोई हेडर नहीं भेजता। `$clearCache()` आगे जो भी लोड करता है उसे revalidate करता है।
+
+Safari एक preload किए गए payload का फिर से अनुरोध करता है जब वह रिस्पॉन्स का पुन: उपयोग नहीं कर सकता: `no-cache` और `ETag` के साथ दूसरी रिक्वेस्ट `304` होती है, न कैश हेडर और न validator होने पर यह दूसरा पूर्ण डाउनलोड होता है। `0` से ऊपर का `max-age` एक रिक्वेस्ट देता है। केवल ऐसे होस्ट पर `httpCacheDuration: 0` जो कोई validator नहीं जोड़ता, यह कीमत चुकाता है।
+
+[`dateBuild`](/hi/api/module-options#datebuild) `?v=` का मान है। डिफ़ॉल्ट रूप से यह आपकी अनुवाद फ़ाइलों का hash है, इसलिए यह केवल तभी बदलता है जब अनुवाद बदलते हैं, और ब्राउज़र उन डिप्लॉय के पार अपने कैश किए गए payloads रखते हैं जिन्होंने उन्हें नहीं छुआ। यह fallback chain के साथ भी बदलता है।
+
+- किसी मान को पिन करने के लिए इसे स्वयं सेट करें।
+- `?v=` को पूरी तरह हटाने के लिए `0` या `''` सेट करें; तब payloads कभी `immutable` नहीं होते।
+
+<Tip>
+
+Node सर्वर पर किसी डिक्शनरी को उसी स्थान पर बदलने के बाद, `NUXT_I18N_DATE_BUILD=<new value>` के साथ रीस्टार्ट करें: रीबिल्ड के बिना और कुछ भी `v` को नहीं बदलता।
+
+</Tip>
+
+### Root और delta फ़ाइलें {#root-and-delta-files}
+
+`premerged` प्रति लोकेल एक root लिखता है, `__root/<locale>/data.json`, और हर पेज की फ़ाइल में केवल वही जो उससे भिन्न है।
+
+- पेज फ़ाइल उस root को जिसके विरुद्ध वह बनाई गई थी `__i18n_root` कुंजी से चिह्नित करती है।
+- ब्राउज़र दोनों fetch करता है, दोनों आने तक पेज कुछ नहीं दिखाता, और SSR उन्हें प्रति chunk एक बार मर्ज करता है।
+- बिना चिह्न वाली फ़ाइल एक पूर्ण डिक्शनरी है और अकेले काम करती है: dev, `source` मोड, सर्वर रूट, और पुरानी फ़ाइलें रखने वाला होस्ट, सभी बिना किसी सेटिंग के ऐसी ही फ़ाइल से उत्तर देते हैं।
+
+इसलिए `_locales/*/data.json` को सीधे पढ़ने वाला कोई भी व्यक्ति एक delta पढ़ता है। पूरी फ़ाइलें रखने के लिए `translationPayloads.rootDelta: false` सेट करें।
+
+किसी डिप्लॉय के दौरान खुला टैब जो नया delta माँगता है, देखता है कि वह किसी अन्य root के विरुद्ध बनाया गया था, और उसे दिखाने से पहले वह root fetch करता है।
+
+### जब कोई डिक्शनरी पढ़ी नहीं जा सकती {#when-a-dictionary-cannot-be-read}
+
+होस्ट से विफल fetch (404 के अलावा कुछ भी), अपठनीय या दूषित फ़ाइल, या ऐसा 200 जो JSON ऑब्जेक्ट नहीं है, किसी कैश तक नहीं पहुँचता, और अगली रिक्वेस्ट फिर से पढ़ती है:
+
+- पेज रेंडर एक चेतावनी लॉग करता है, उस डिक्शनरी के लिए कच्ची कुंजियाँ दिखाता है और `Cache-Control: no-store` के साथ `503` उत्तर देता है, हर CDN हेडर में वही (`CDN-Cache-Control`, `Cloudflare-CDN-Cache-Control`, `Netlify-CDN-Cache-Control`, `Vercel-CDN-Cache-Control`, `Surrogate-Control`, किसी route rule के हेडर के ऊपर) और `Retry-After: 60`;
+- `/_locales/...` `no-store` के साथ `503` उत्तर देता है;
+- `useTranslationServerMiddleware` एक ऐसा `t` देता है जो कुंजी या डिफ़ॉल्ट मान से उत्तर देता है।
+
+आउटेज के दौरान क्या होता है:
+
+- **विज़िटर:** उस 503 का body स्वयं पेज है। Hydration पर ब्राउज़र डिक्शनरी फिर से पढ़ता है, और होस्ट वापस आने पर टेक्स्ट दिखाई देता है, hydration mismatch के बारे में Vue की एक console त्रुटि के साथ, क्योंकि सर्वर के HTML में कुंजियाँ थीं।
+- **Crawlers** को बाद में वापस आने के लिए कहा जाता है।
+- **कैश:** `swr` या `cache` route rule 400 या अधिक स्टेटस के साथ कुछ भी संग्रहीत नहीं करता, और CDN को `no-store` मिलता है, इसलिए कोई कैश कच्ची कुंजियाँ नहीं रखता और रिकवरी के बाद पहली रिक्वेस्ट वास्तविक टेक्स्ट रेंडर करती है।
+- **किसी rule द्वारा पहले से कैश किए गए पेज** जैसे हैं वैसे ही रहते हैं: revalidation विफल होता है और कुछ संग्रहीत नहीं करता। Vercel पर विफल `isr` revalidation इसी तरह अंतिम पेज बनाए रखता है।
+
+यह उन सभी chunks को कवर करता है जिन्हें एक रेंडर लोड करता है, जिसमें root उपलब्ध होने के बावजूद विफल पेज chunk, और रेंडर में बाद में मर्ज किया गया chunk शामिल है। स्वस्थ डिक्शनरी वाला पेज, रीडायरेक्ट और error पेज अपना स्टेटस बनाए रखते हैं। एक [component island](/hi/guide/server-side-translations) अपवाद है: यह 200 ही रहता है, क्योंकि 503 उसे पेज से हटा देगा, इसलिए जिस पेज की अपनी डिक्शनरी लोड होती है वह island की कच्ची कुंजियों के साथ रखा जा सकता है। आउटेज के दौरान हर रिक्वेस्ट होस्ट तक पहुँचती है, रिस्पॉन्स हेडर के लिए 60 सेकंड के अलावा मॉड्यूल का अपना कोई टाइमआउट नहीं होता।
+
+होस्ट से 404 का अर्थ है कि उसके पास ऐसी कोई फ़ाइल नहीं है, जो विफलता नहीं है। पेज रेंडर root डिक्शनरी दिखाता है, जैसा ब्राउज़र करता है, और `/_locales/...` वही 404 उत्तर देता है। कोई कैश इनमें से किसी को नहीं रखता, इसलिए जो फ़ाइल प्रकट होती है वह अगली रिक्वेस्ट पर पढ़ी जाती है, ऐसे पेज के प्रति रेंडर होस्ट को एक रिक्वेस्ट की कीमत पर। root फ़ाइल भी न होने पर डिक्शनरी रिक्त होती है, और एक [prerender](/hi/guide/upgrade#server,-build-and-deployment) विफल होता है।
+
+सर्वर लोड किए गए payloads को `cacheMaxSize` प्रविष्टियों (डिफ़ॉल्ट रूप से 1000) तक के in-process LRU कैश में रखता है जो सेट होने पर `cacheTtl` के बाद प्रविष्टि को फिर से लोड करता है; [प्रदर्शन ट्यूनिंग](/hi/guide/performance) दोनों को कवर करता है, और [`cacheStorage`](/hi/guide/performance#shared-cache-for-several-instances) इंस्टेंस द्वारा साझा कैश जोड़ता है। इसके ऊपर `/_locales/**` पर Nitro `cache` route rule न जोड़ें: यह query सहित पूरे URL से key करता है, और तीसरी कॉपी संग्रहीत करता है।
+
+## App baseURL और payload होस्ट {#app-baseurl-and-payload-hosts}
+
+**`app.baseURL`** को और कुछ नहीं चाहिए। `app.baseURL: '/shop/'` के साथ ब्राउज़र `/shop/_locales/...` fetch करता है; कॉपी `.output/public/_locales/` में रहती है, जिसे Nitro base के तहत सर्व करता है (स्टैटिक होस्ट को आउटपुट `/shop/` पर माउंट करना होगा)। लोकेल प्रीफ़िक्स और [बाहर रखे गए पाथ](/hi/guide/excluding-static-files) base के बिना मिलाए जाते हैं।
+
+**`app.cdnURL`** payloads को भी स्थानांतरित करता है, जब वे `public/` में फ़ाइलें हों: ब्राउज़र `<cdnURL>/_locales/...` fetch और preload करता है।
+
+- CDN को `_locales/` को `_nuxt/` के बगल में, उसी पाथ पर रखना होगा।
+- इसे आपकी साइट के origin (CORS) की अनुमति देनी होगी, क्योंकि फ़ाइल `fetch` द्वारा आती है।
+- जिस डिक्शनरी का उत्तर केवल सर्वर रूट देता है (`source` मोड, कोई public कॉपी नहीं) वह ऐप के origin पर रहती है।
+
+`cloudflare-module` पर रनटाइम `NUXT_APP_BASE_URL` को Node compatibility (`nodejs_compat`) चाहिए। `nitro.cloudflare.nodeCompat` बंद होने पर, जिस पर Nitro बिना फ़्लैग वाली पुरानी तारीख पर भी चला जाता है, यह वेरिएबल नहीं देखता और `/` सर्व करता है, सादा Nuxt भी, जबकि लोकेल रीडायरेक्ट फिर भी base पर जाता है। वहाँ बिल्ड के समय `app.baseURL` सेट करें।
+
+किसी अन्य origin से payloads सर्व करने के लिए, क्लाइंट और सर्वर को उसकी ओर इंगित करें और स्थानीय आउटपुट बंद करें:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    apiBaseClientHost: 'https://cdn.example.com',
+    apiBaseServerHost: 'https://cdn.example.com',
+    translationPayloads: {
+      serverHandler: false,
+      publicAssets: false,
+      serverAssets: false,
+    },
+  },
+})
+```
+
+- Node पर, `serverAssets` सर्वर के अपने पढ़ने के लिए वही कॉपी लिखता है, और वह फ़ाइल `/_locales` का उत्तर देती है: इसे भी बंद होना चाहिए, भले ही आप ब्राउज़र के लिए सर्वर रूट रखें, जिस तक वह कभी नहीं पहुँचेगा।
+- होस्ट को वही `<apiBaseUrl>/<page>/<locale>/data.json` लेआउट सर्व करना होगा।
+- जब हर स्थानीय आउटपुट बंद हो और होस्ट न हो तो बिल्ड चेतावनी देता है।
+
+वही मान बिल्ड के समय `NUXT_I18N_APP_BASE_URL`, `NUXT_I18N_APP_BASE_CLIENT_HOST` और `NUXT_I18N_APP_BASE_SERVER_HOST` से आ सकते हैं। `NUXT_I18N_APP_BASE_SERVER_HOST` रनटाइम पर भी काम करता है और बिल्ड मान पर प्राथमिकता पाता है। विवरण के लिए [`apiBaseServerHost`](/hi/api/module-options#apibaseserverhost) देखें।
+
+## प्लेटफ़ॉर्म {#platforms}
+
+केवल वही जो मॉड्यूल या उसके आउटपुट को चाहिए। अकाउंट, रीजन और CLI लॉगिन प्लेटफ़ॉर्म के दस्तावेज़ में हैं।
+
+### Cloudflare Workers {#cloudflare-workers}
+
+Preset `cloudflare_module`। `wrangler deploy` Nitro के आउटपुट को esbuild के साथ दूसरी बार बंडल करता है, और उसके बाद एक कच्चा `defineAsyncComponent(() => import('./X.vue'))` सर्वर पर खाली रेंडर होता है। Nuxt का डिफ़ॉल्ट error पेज ऐसा ही एक है, इसलिए 404 का body खाली होता है और ब्राउज़र एक hydration mismatch लॉग करता है। तब क्लाइंट पेज रेंडर करता है और स्टेटस 404 रहता है, लेकिन JavaScript के बिना पेज खाली रहता है। यह [nuxt#33270](https://github.com/nuxt/nuxt/issues/33270) है: मॉड्यूल के बिना सादा Nuxt भी यही करता है। पेज रूट प्रभावित नहीं होते।
+
+दूसरा बंडल बंद करें:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: {
+    preset: 'cloudflare_module',
+    cloudflare: {
+      deployConfig: true, // `wrangler` below applies only with it
+      wrangler: {
+        no_bundle: true,
+        find_additional_modules: true,
+        rules: [{ type: 'ESModule', globs: ['**/*.mjs'] }],
+      },
+    },
+  },
+})
+```
+
+```bash
+npx nuxi build
+cd .output/server && npx wrangler deploy -c wrangler.json
+```
+
+`compatibilityDate` को `2024-09-19` या बाद की तारीख पर सेट करें: पुरानी तारीख legacy preset चुनती है, जो कोई `wrangler.json` नहीं लिखता और कोई त्रुटि नहीं देता। तब 404 रेंडर होता है, और अपलोड छोटा हो जाता है: टेस्ट ऐप पर 246 KiB के मुकाबले 190 KiB gzip। आपका अपना `error.vue` दूसरा रास्ता है, लेकिन यह केवल error पेज को कवर करता है।
+
+मॉड्यूल को स्वयं `nodejs_compat` की आवश्यकता नहीं है। सीमाओं के लिए देखें [बंडल सीमाएँ](#bundle-limits-on-edge)।
+
+### Cloudflare Pages {#cloudflare-pages}
+
+`cloudflare-pages-static` preset का उपयोग करें। `nuxi generate --preset cloudflare-pages` बिना `index.html` वाला सर्वर बिल्ड है।
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: {
+    preset: 'cloudflare-pages-static',
+    prerender: { autoSubfolderIndex: false },
+  },
+})
+```
+
+```bash
+npx nuxi generate
+npx wrangler pages project create my-site --production-branch main --force
+npx wrangler pages deploy dist --project-name my-site --branch main
+```
+
+- **आउटपुट।** preset `dist/` में लिखता है, `.output/public` में नहीं।
+- **`--force`।** इसके बिना नया wrangler (यहाँ 4.156) `pages project create` को Workers को सौंप देता है। इसके साथ आपको एक classic Pages प्रोजेक्ट मिलता है। इसकी आवश्यकता एक बार, create के लिए होती है।
+- **`autoSubfolderIndex: false`।** Pages `/de` का उत्तर `/de/` पर 308 से देता है जबकि canonical और `hreflang` `/de` का नाम लेते हैं, इसलिए वे एक रीडायरेक्ट की ओर इशारा करते हैं। इस विकल्प के साथ फ़ाइल `de.html` होती है, और रीडायरेक्ट हट जाता है।
+- **404 पर console में `NUXT_E1005`** एक सामान्य 404 है। Nuxt इसे इस तरह रिपोर्ट करता है क्योंकि `404.html` ऐप माउंट होने से पहले क्लाइंट पर शुरू होता है। पेज काम करता है, और सादा Nuxt भी वही पंक्ति प्रिंट करता है।
+
+### Vercel और Vercel Edge {#vercel-and-vercel-edge}
+
+Presets `vercel` और `vercel_edge`, ऐप में बिना किसी बदलाव के। टैग प्लेटफ़ॉर्म के forwarded हेडर से `metaBaseUrl` के बिना काम करते हैं। Vercel Edge की बंडल सीमा छोटी है: देखें [बंडल सीमाएँ](#bundle-limits-on-edge)। साझा कैश के लिए [`upstash` driver](/hi/guide/performance#upstash-on-vercel-and-vercel-edge) का उपयोग करें।
+
+### Netlify {#netlify}
+
+Presets `netlify` और `netlify_edge`।
+
+```bash
+npx nuxi build --preset netlify
+npx netlify deploy --prod --no-build --dir dist --functions .netlify/functions-internal
+```
+
+- **`nitro.output` को unset रहने दें।** preset स्वयं `.netlify/` और `dist/` लिखता है।
+- **जिस फ़ोल्डर से आप डिप्लॉय करते हैं उसमें एक `package.json` रखें।** इसके बिना CLI parent फ़ोल्डर देखता है और कोई फ़ंक्शन डिप्लॉय नहीं करता, बिना किसी त्रुटि के।
+- **Netlify Edge** केवल `--dir dist` के साथ डिप्लॉय होता है। देखें [Edge रनटाइम पर तारीखें](#dates-on-edge-runtimes)।
+
+### Cloud Run {#cloud-run}
+
+डिफ़ॉल्ट `node-server` बिल्ड का उपयोग करें। जब docker स्थानीय रूप से नहीं चल रहा हो, तो `gcloud run deploy --source` को आउटपुट फ़ोल्डर में एक `Dockerfile` चाहिए:
+
+```dockerfile
+# .output/Dockerfile
+FROM node:22-slim
+WORKDIR /app
+COPY . .
+ENV NODE_ENV=production
+CMD ["node", "server/index.mjs"]
+```
+
+```bash
+cd .output && gcloud run deploy my-app --source .
+```
+
+टैग प्लेटफ़ॉर्म के forwarded हेडर से `metaBaseUrl` के बिना काम करते हैं।
+
+### Deno Deploy {#deno-deploy}
+
+Preset `deno_deploy`। `deno deploy` `deployctl` की जगह लेता है। entrypoint `server/index.ts` के साथ एक डायनेमिक ऐप बनाएँ, और आउटपुट फ़ोल्डर से डिप्लॉय करें।
+
+### Firebase {#firebase}
+
+| प्रोडक्ट | सेटअप |
+| --- | --- |
+| App Hosting | Node बिल्ड चलाता है: डिफ़ॉल्ट preset या `firebase-app-hosting`, और Node 20+ का उपयोग करें |
+| Cloud Functions | `firebase` preset payloads एम्बेड करता है और इसे `firebase-functions` चाहिए |
+| Hosting (स्टैटिक) | `.output/public` को फ़ाइलों के रूप में सर्व करता है, इसलिए `/_locales/**` को Hosting के हेडर मिलते हैं |
+
+स्टैटिक Hosting पर, यदि JSON गलत `Content-Type` या कैशिंग के साथ वापस आता है, तो `firebase.json` में `/_locales/**` के लिए एक `headers` प्रविष्टि जोड़ें। Nuxt `routeRules` हेडर उन फ़ाइलों पर लागू नहीं होते जिन्हें Hosting स्वयं सर्व करता है; payload रूट उन रिस्पॉन्स पर अपना `Content-Type` और `Cache-Control` सेट करता है जो सर्वर तक पहुँचते हैं।
+
+### AWS Amplify {#aws-amplify}
+
+`aws-amplify` स्टैटिक फ़ाइलों को अपने compute फ़ोल्डर के बगल में रखता है, सर्वर के बगल में नहीं, इसलिए payloads फ़ंक्शन प्लेटफ़ॉर्म की तरह एम्बेड किए जाते हैं।
+
+### एक बिल्ड के कई इंस्टेंस {#several-instances-of-one-build}
+
+एक आर्टिफ़ैक्ट environment variables के माध्यम से प्रति इंस्टेंस अलग डिफ़ॉल्ट या अक्षम लोकेल के साथ चल सकता है: देखें [रनटाइम ओवरराइड](/hi/guide/runtime-overrides)। केवल रनटाइम पर अक्षम किए गए लोकेल की स्टैटिक फ़ाइलें फिर भी `public/` में होती हैं; यदि वे पहुँच योग्य नहीं होनी चाहिए तो उसे बिल्ड के समय अक्षम करें।
+
+रिमोट होस्ट से डिक्शनरी लोड करने वाले इंस्टेंस उन्हें Redis, Upstash, Cloudflare KV या D1, Deno KV या किसी अन्य Nitro storage में साझा कर सकते हैं, ताकि backend को प्रति इंस्टेंस एक के बजाय एक ही रिक्वेस्ट मिले। यह एक कैश है, अनुवादों का स्रोत नहीं: देखें [कई इंस्टेंस के लिए साझा कैश](/hi/guide/performance#shared-cache-for-several-instances)।
+
+## प्रॉक्सी या CDN के पीछे {#behind-a-proxy-or-cdn}
+
+ऐप को रिक्वेस्ट से public होस्ट और scheme जानना होता है।
+
+| प्रॉक्सी भेजता है                              | सादा बिल्ड                                      | लोकेल पर `baseUrl` वाला बिल्ड                                                   |
+| -------------------------------------------- | ------------------------------------------------ | --------------------------------------------------------------------------------- |
+| वास्तविक `Host`                              | कुछ सेट नहीं करना                                   | कुछ सेट नहीं करना                                                                    |
+| origin का `Host`, साथ में `X-Forwarded-Host` | कुछ सेट नहीं करना                                   | [`trustForwardedHost: true`](/hi/api/module-options#trustforwardedhost)              |
+| दोनों में से कोई नहीं                                      | [`metaBaseUrl`](/hi/api/module-options#metabaseurl) | कोई सेटिंग मदद नहीं करती: हर रिक्वेस्ट origin के होस्ट जैसी दिखती है, इसलिए प्रॉक्सी बदलें |
+
+- **`swr` या `cache` के तहत रूट।** वहाँ तालिका लागू नहीं होती: देखें [HTML कैशिंग](#caching-html)। `metaBaseUrl` या `site.url` सेट करें।
+- **`X-Forwarded-Proto`।** इसे भेजें, अन्यथा HTTPS प्रॉक्सी के पीछे canonical URL `http://` पढ़ते हैं। `metaBaseUrl` भी इसे ठीक करता है।
+- **डोमेन बिल्ड में** डोमेन टैग का base URL चुनता है। वहाँ `metaTrustForwardedHost` डोमेन नहीं चुनता, केवल `trustForwardedHost` चुनता है।
+- **रीडायरेक्ट सापेक्ष होते हैं और लोकेल कुकी का कोई `Domain` नहीं होता,** इसलिए दोनों public होस्ट पर रहते हैं।
+
+<Warning>
+
+**जब origin पहुँच योग्य रहता है तो `metaBaseUrl` पिन करें** — `metaBaseUrl` या `site.url` के बिना सादे बिल्ड पर, canonical, `hreflang` और `og:url` अपना होस्ट रिक्वेस्ट से लेते हैं। [`metaTrustForwardedHost`](/hi/api/module-options#metatrustforwardedhost) डिफ़ॉल्ट रूप से चालू है, इसलिए `X-Forwarded-Host: evil.example` वाली सीधी रिक्वेस्ट को उन टैग में `https://evil.example` मिलता है, और सामने का कैश उस पेज को फैला देता है। `*.workers.dev` जैसा प्लेटफ़ॉर्म होस्ट ठीक ऐसा ही origin है। `metaBaseUrl` इसे `Host` के लिए भी बंद करता है। डोमेन बिल्ड का ज्ञात होस्ट अपना `baseUrl` बनाए रखता है। `trustForwardedHost: true` के साथ एक सीधा क्लाइंट किसी अन्य डोमेन का पेज चुन सकता है, इसलिए इसे केवल ऐसे प्रॉक्सी के पीछे चालू करें जो हेडर को ओवरराइट करता है।
+
+</Warning>
+
+## HTML कैशिंग {#caching-html}
+
+अधिकांश URL कैश करने के लिए सुरक्षित हैं, क्योंकि वे अपने लोकेल का नाम लेते हैं। ये विज़िटर पर निर्भर करते हैं:
+
+| सेटअप                          | URL                                              |
+| ------------------------------ | ------------------------------------------------- |
+| डिफ़ॉल्ट, `autoDetectPath: '/'` | `/`                                               |
+| `prefix`                       | `/` और हर बिना प्रीफ़िक्स वाला URL, जो केवल रीडायरेक्ट करता है |
+| `autoDetectPath: '*'`          | हर URL                                         |
+| `no_prefix`                    | हर पेज                                        |
+
+- **`Vary`।** उन रिस्पॉन्स में `Vary` होता है, `Cookie` के साथ जब [`localeCookie`](/hi/api/module-options#localecookie) सेट हो और `Accept-Language` के साथ जब `autoDetectLanguage` चालू हो। इसका सम्मान करने वाला कैश उत्तरों को अलग रखता है।
+- **`Vary` को अनदेखा करने वाला कैश,** जैसे "URL के आधार पर सब कुछ कैश करें", उन URL को छोड़ना चाहिए। अन्यथा एक विज़िटर का `302 /de` अगले विज़िटर तक पहुँचता है, और संग्रहीत डिफ़ॉल्ट पेज सभी के लिए रीडायरेक्ट हटा देता है। `/` पर आप `redirects: false` भी सेट कर सकते हैं। Nitro का route cache पाथ और उसकी `varies` सूची से key करता है, इसलिए `/` को `swr` और `cache` rules से भी बाहर रखें।
+- **`Set-Cookie`।** `localeCookie` सेट होने पर, प्रीफ़िक्स के तहत हर सर्वर-रेंडर किए गए पेज में `Set-Cookie` होता है, और एक सही CDN उसे संग्रहीत नहीं करेगा। कैश किए गए HTML के लिए `localeCookie` बंद रखें, या edge पर हेडर हटा दें।
+- **`swr` और `cache` rules को `metaBaseUrl` या `site.url` चाहिए।** Nitro ऐसे रूट को केवल `cache.varies` के हेडर के साथ रेंडर करता है, इसलिए `Host`, `X-Forwarded-Host` और `X-Forwarded-Proto` चले जाते हैं और रिक्वेस्ट URL `http://localhost` पढ़ता है। निश्चित origin के बिना, उन रूट पर canonical, `hreflang` और `og:url` हर प्लेटफ़ॉर्म पर `http://localhost` की ओर इशारा करते हैं। सादे Nuxt का `useRequestURL()` भी वहाँ वही पढ़ता है। इसके बजाय विज़िटर से होस्ट लेने से एक विज़िटर का `X-Forwarded-Host` उस पेज में चला जाएगा जो हर विज़िटर को मिलता है। डोमेन बिल्ड प्रभावित नहीं होता: उसके टैग लोकेल के `baseUrl` का उपयोग करते हैं।
+
+  यदि एक बिल्ड कई होस्ट सर्व करता है और कोई एक origin फ़िट नहीं होता, तो rule को हेडर देखने दें और प्रति मान एक कॉपी रखें: `'/blog/**': { swr: 60, cache: { varies: ['host', 'x-forwarded-host', 'x-forwarded-proto'] } }`। हर विशिष्ट मान एक नई कैश प्रविष्टि है, इसलिए मनगढ़ंत हेडर भेजने वाला क्लाइंट कैश भर देता है: origin को ऐसे प्रॉक्सी के पीछे रखें जो उन्हें सेट करता है।
+- **डोमेन बिल्ड पर `swr` और `cache` rules।** मॉड्यूल ऐसे हर rule के `cache.varies` में `host` जोड़ता है, और `trustForwardedHost` के साथ `x-forwarded-host`, ताकि एक डोमेन दूसरे को अपना पेज सर्व न करे। `cache: false` वाला rule जैसा लिखा है वैसा ही रहता है। `isr` प्लेटफ़ॉर्म का कैश है: जाँचें कि यह होस्ट से key करता है। key में होस्ट होने पर, मनगढ़ंत होस्ट भेजने वाला क्लाइंट कैश प्रविष्टियाँ जोड़ता है।
+
+payload फ़ाइलों के लिए देखें [कैश हेडर और dateBuild](#cache-headers-and-datebuild)।
+
+## संबंधित {#related}
+
+<CardGroup cols={2}>
+
+<Card title="प्रदर्शन ट्यूनिंग" icon="book-open" href="/hi/guide/performance">
+
+</Card>
+
+<Card title="रनटाइम ओवरराइड" icon="book-open" href="/hi/guide/runtime-overrides">
+
+</Card>
+
+<Card title="translationPayloads संदर्भ" icon="brackets-curly" href="/hi/api/module-options#translationpayloads">
+
+</Card>
+
+<Card title="लेयर्स और डोमेन" icon="book-open" href="/hi/guide/layers">
+
+</Card>
+
+<Card title="SEO" icon="book-open" href="/hi/guide/seo">
+
+</Card>
+
+</CardGroup>

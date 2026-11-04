@@ -1,0 +1,261 @@
+---
+title: "Unumdorlikni sozlash"
+description: "Xotira, payload hajmi va keshlashni o'zgartiradigan sozlamalar hamda ilovangiz nimani yetkazib berishini qanday o'lchash."
+---
+
+Standart sozlamalar odatiy ilova uchun moslashtirilgan: har bir sahifa va locale uchun bitta JSON payload, tarjimalar HTML'dan tashqarida saqlanadi, serverda cheklangan keshlar. Bu sahifada katalog katta bo'lganda, server xotirasi cheklanganda yoki payload'lar boshqa hostdan kelganda o'zgartirishga arziydigan bir nechta sozlamalar keltirilgan. `@nuxtjs/i18n` va oddiy Nuxt bilan solishtirilgan o'lchov natijalari uchun [Benchmarklar](/uz/guide/performance-results) sahifasiga qarang.
+
+## Standart sozlamalar allaqachon nima qiladi {#what-the-defaults-already-do}
+
+- **Har bir sahifa uchun bitta payload.** Yig'ish ildiz, sahifa va zaxira locale kalitlarini `/_locales/<page>/<locale>/data.json` ga birlashtiradi, shuning uchun sahifa bitta faylni yuklaydi va `$t` bitta qidiruvdan iborat.
+- **HTML'da lug'at yo'q.** SSR tarjimalarni server xotirasida saqlaydi; brauzer payload'ni `__NUXT_DATA__` dan tahlil qilish o'rniga yuklab oladi.
+- **Brauzer keshi.** `?v=` faqat tarjimalar o'zgarganda o'zgaradi, shuning uchun brauzer ularga tegmagan deploy'lar davomida o'z payload'larini saqlab qoladi. Hostning statik nusxasi 60 soniya davomida yangi hisoblanadi va undan keyin qayta tekshiriladi: takroriy yuklash bitta `304` ni kutadi. Server marshruti bir yil uchun `immutable` bilan javob beradi ([Deploy](/uz/guide/deployment#cache-headers-and-datebuild)).
+- **Cheklangan server xotirasi.** Server standart holatda ko'pi bilan 1000 ta payload'ni keshlaydi va eng uzoq vaqt ishlatilmaganini o'chiradi.
+
+## Tarjimalarni sahifalar bo'yicha ajratish {#split-translations-by-page}
+
+Bitta sahifada ishlatiladigan kalitlar ildiz fayllarda emas, `locales/pages/<page>/<locale>.json` da bo'lishi kerak: ildiz kalitlari har bir sahifa payload'ining bir qismi. [Tarjima fayllari](/uz/guide/translations) sahifasiga qarang.
+
+Ikkita sozlama bu bo'linishni o'zgartiradi:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    // pages that show the same keys share one payload: /de/products/123 loads the products payload
+    routesLocaleLinks: { 'products-id': 'products' },
+    // or: no page files at all, every page loads only the root dictionary
+    // disablePageLocales: true,
+  },
+})
+```
+
+[`routesLocaleLinks`](/uz/api/module-options#routeslocalelinks) bog'liq marshrutlar uchun takroriy payload'larni qisqartiradi. [`disablePageLocales`](/uz/api/module-options#disablepagelocales) har bir locale uchun bitta lug'at soddaroq bo'lgan kichik ilovalarga mos keladi.
+
+## Server keshlari {#server-caches}
+
+| Sozlama | Standart | Ta'siri |
+| --- | --- | --- |
+| [`cacheMaxSize`](/uz/api/module-options#cachemaxsize) | `0` | Payload keshlaridagi maksimal yozuvlar soni. `0` = brauzerda cheklovsiz, serverda 1000. |
+| [`cacheTtl`](/uz/api/module-options#cachettl) | `0` | Keshlangan yozuv qayta yuklanishidan oldingi soniyalar. `0` = hech qachon; payload'lar `apiBaseServerHost` dan kelsa va qayta deploy qilmasdan o'zgarsa o'rnating. |
+| `serverTranslationPreload` | `false` | Har bir sahifa so'rovi uchun Nitro middleware'da `index` payload'ini yuklaydi, shunda server yordamchilari va bosh sahifa undan qayta foydalanadi. |
+
+Ko'p sahifa × locale ga ega kichik nusxada `cacheMaxSize` ni kamaytiring. Lokal tahrirlangan tarjimalarga TTL hech qachon kerak emas: dev fayllarni jonli o'qiydi, production payload'lari faqat deploy bilan o'zgaradi.
+
+## Node serverida xotira {#memory-on-a-node-server}
+
+Barqaror yuklama ostida Node serveri jonli heap'idan taxminan 12 baravar ko'p xotirada turib qolishi mumkin. Har bir sahifada 100k kalitli stress testda 90 MB jonli heap taxminan 1.1 GB RSS bilan ishladi. Bu xotira oqishi emas. Bitta haddan tashqari katta GC siklidan keyin V8 heap chegarasini oshiradi va yuklama davom etar ekan, bo'shatilgan sahifalarni qayta foydalanish uchun pulda saqlaydi. Yuklama to'xtaganidan taxminan 8 soniya o'tib pul bo'shaydi va RSS taxminan 160 MB gacha tushadi. `global.gc()` bu xotirani qaytarmaydi. Modulsiz oddiy Nuxt ham xuddi shunday qiladi, faqat kichikroq heap'iga mos ravishda.
+
+Bu zaxira joyni egallaydi: xotira chegarasi shu darajadan past bo'lsa va heap chegarasi bo'lmasa, jarayon o'ldirilishi mumkin. Chegarangizga mos va jonli heap'dan ancha yuqori bo'lgan cheklov o'rnating:
+
+```bash
+NODE_OPTIONS=--max-old-space-size=512 node .output/server/index.mjs
+```
+
+| 100k kalit, 12 locale, 5 dan 30 daqiqagacha yuklama | Standart | `--max-old-space-size=512` |
+| --- | --- | --- |
+| Yuklama ostidagi RSS | taxminan 1,150 MB | 254-287 MB |
+| Soniyasiga so'rovlar | 624 | 517-572 |
+
+Demak, cheklov xotira evaziga o'tkazuvchanlikning 8–10 % ini qurbon qiladi. Oddiy hajmdagi katalogda heap ham, sakrash ham kichikroq. Bu sinovlar konteynerda emas, macOS'da Node 22 bilan o'tkazilgan.
+
+## Tahlil vaqti va `dir` {#parse-time-and-dir}
+
+Locale'dagi `dir: 'auto'` brauzerni tahlil qilish vaqtida yo'nalishni kontentdan aniqlashga majbur qiladi. Chromium'da 20,000 elementda DOMContentLoaded `dir="auto"` bilan taxminan 1.1 s, usiz 0.1 s, 5,000 elementda esa taxminan 130 ms ga qarshi 45 ms bo'ldi. `dir` ni o'rnatmang yoki uni `ltr` yoki `rtl` ga o'rnating ([Matn yo'nalishi](/uz/guide/seo#text-direction)).
+
+## Bir nechta nusxa uchun umumiy kesh {#shared-cache-for-several-instances}
+
+Bitta yig'ishning bir nechta nusxasi bo'lganda, [`cacheStorage`](/uz/api/module-options#other) ularga ilovangiz `nitro.storage` da sozlagan ulanish orqali istalgan Nitro storage'da bitta umumiy lug'at keshini beradi. Modul hech qanday konnektor yoki bog'liqlik qo'shmaydi.
+
+**Bu manba emas, kesh.** Tarjimalar ichiga joylashtirilgan yoki public payload'lardan yoki `apiBaseServerHost` dan keladi. Faqat manbadan kelgan narsa yoziladi va kalitlar yig'ish ma'lumotini o'z ichiga oladi, shuning uchun qo'lda to'ldirilgan ombor o'qilmaydi. Tarjimalarni KV yoki ma'lumotlar bazasidan berish uchun `apiBaseServerHost` da uni o'qiydigan kichik marshrut joylashtiring.
+
+**Qachon foydali.** Faqat masofaviy `apiBaseServerHost` bilan. 39 ta lug'atni aylanib chiqqan uchta nusxa usiz hostga 117 ta, u bilan 48 ta so'rov yubordi. Diskdagi fayllar bilan ombordan topish fayldan tezroq emas, 12 sahifani birinchi aylanib chiqish sozlamasiz 280-296 ms, to'ldirilgan Redis bilan esa 308-325 ms davom etdi, shuning uchun uni o'rnatmang. Lug'atlarni ichiga joylashtiradigan presetda u hostsiz hech narsa qilmaydi va yig'ish buni ma'lum qiladi.
+
+Sovuq lug'at, bitta mijoz, har biri bir marta aylanib chiqilgan, shuning uchun taxminiy, va asosiy qismi hostgacha bo'lgan masofa:
+
+| Ombor | Hostdan | Ombordan |
+| --- | --- | --- |
+| Cloudflare KV | taxminan 300 ms | taxminan 110 ms |
+| D1 | taxminan 230 ms | taxminan 115 ms |
+| Deno KV | taxminan 430 ms | taxminan 100 ms |
+| Upstash, Vercel serverless | taxminan 445 ms | taxminan 245 ms |
+| Upstash, Vercel Edge | taxminan 505 ms | taxminan 235 ms |
+
+### Redis {#redis}
+
+Loyihangizda `ioredis` bo'lishi kerak.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      redis: { driver: 'redis', url: process.env.REDIS_URL },
+    },
+  },
+  i18n: {
+    cacheStorage: 'redis', // the mount name
+    apiBaseServerHost: 'https://translations.internal',
+    cacheTtl: 300,
+  },
+})
+```
+
+### Vercel va Vercel Edge'da Upstash {#upstash-on-vercel-and-vercel-edge}
+
+Ikkalasida ham `upstash` drayveridan foydalaning: u REST orqali ishlaydi, `redis` drayveriga esa TCP kerak. Loyihangizda `@upstash/redis` bo'lishi kerak va u `UPSTASH_REDIS_REST_URL` hamda `UPSTASH_REDIS_REST_TOKEN` ni muhitdan o'qiydi.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      upstash: { driver: 'upstash' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'upstash',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+### Cloudflare KV {#cloudflare-kv}
+
+Worker'ga namespace'ni `I18N_KV` sifatida bog'lang (uning wrangler konfiguratsiyasidagi `kv_namespaces`).
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      kv: { driver: 'cloudflare-kv-binding', binding: 'I18N_KV' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'kv',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+Agar host o'sha akkauntdagi boshqa Worker bo'lsa, unga `global_fetch_strictly_public` moslik bayrog'i kerak, aks holda fetch unga yetib bormaydi.
+
+### Cloudflare D1 {#cloudflare-d1}
+
+`nitro.storage` ma'lumotlar bazasi obyektini saqlay olmaydi, shuning uchun drayverni Nitro plagini mount qiladi. Mount birinchi foydalanishda tekshiriladi, shuning uchun bu yetarlicha erta. Ma'lumotlar bazasini `I18N_DB` (`d1_databases`) sifatida bog'lang va loyihangizda `unstorage` bo'lsin.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    experimental: { database: true },
+    database: {
+      default: { connector: 'cloudflare-d1', options: { bindingName: 'I18N_DB' } },
+    },
+  },
+  i18n: {
+    cacheStorage: 'd1',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+```ts
+// server/plugins/i18n-storage.ts
+import dbDriver from 'unstorage/drivers/db0'
+
+export default defineNitroPlugin(() => {
+  useStorage().mount('d1', dbDriver({ database: useDatabase() }))
+})
+```
+
+`db0` drayveri eksperimental deb belgilangan va TTL'ni e'tiborsiz qoldiradi: eski yig'ishlarning qatorlari siz ularni o'chirmaguningizcha qoladi.
+
+### Deno KV {#deno-kv}
+
+Deno Deploy'da ma'lumotlar bazasini yarating (`deno deploy database provision <name> --kind denokv`), uni ilovaga biriktiring (`deno deploy database assign`) va drayverdan foydalaning:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      kv: { driver: 'deno-kv' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'kv',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+### U qanday ishlaydi {#how-it-behaves}
+
+Lug'at avval nusxaning o'z keshida, keyin umumiy storage'da, keyin o'z manbasida qidiriladi. Nusxaning o'z keshi saqlanib qoladi, chunki `$t` sinxron va daraxt xotirada bo'lishini talab qiladi: bu kim yuklab olishini kim xizmat qilishidan ajratadi, xotirani tejamaydi.
+
+- **Kim yuklab oladi.** Masofaviy host bilan har bir nusxa uchun emas, har bir lug'at uchun backend'dan bitta yuklab olish. Bir vaqtda keshda topmagan nusxalarning har biri uni yuklab oladi, chunki qulf yo'q.
+- **O'z lug'atiga ega bo'lmagan sahifalar** saqlanmaydi, shunda to'qib chiqarilgan sahifa nomlari kalit qo'sha olmaydi. Har bir nusxa bunday sahifani hostdan bir marta yuklab oladi, izolyatlar paydo bo'lib yo'qoladigan Workers'da esa bu doimiy oz-ozdan oqim bo'ladi.
+- **Host ishlamayapti.** Saqlangan lug'atga ega sahifalar ishlaydi. Lug'ati yo'q sahifa saqlangan ildiz lug'atidan render qilinadi, o'z kalitlari xom holda, [hech bir kesh saqlamaydigan `503`](/uz/guide/deployment#when-a-dictionary-cannot-be-read) bilan, va host qaytguncha `/_locales` u uchun `503` bilan javob beradi. `useTranslationServerMiddleware` o'qiy olmagan lug'at uchun kalitlarni qaytaradi.
+- **Host** — runtime'dagi `NUXT_I18N_APP_BASE_SERVER_HOST` yoki aks holda yig'ishdagi `apiBaseServerHost`, xuddi sozlamasiz holatdagidek. Lug'atlarni ichiga joylashtiradigan presetda (Cloudflare, Vercel, Netlify, [Deploy](/uz/guide/deployment#serverless-and-edge) ga qarang) qatlam faqat host bilan qo'llaniladi: ma'lumotlar allaqachon bundle'da va KV'dagi nusxa xotirada turgan narsa uchun tarmoq orqali o'qish bo'lardi.
+- **Kalitlar** `i18n-micro:<buildId>~<dateBuild>~<fallbackLocale>~<host>:<locale>:<page>` ko'rinishida, shuning uchun bosqichma-bosqich deploy'dagi ikki yig'ish hech qachon bir-birini o'qimaydi, bitta artefaktning ikki backend'i ham. Har bir nusxa bitta yig'ishdan bo'lishi kerak (bitta artefakt yoki qat'iy belgilangan Nuxt [`buildId`](https://nuxt.com/docs/api/nuxt-config#buildid)); alohida yig'ilgan nusxalar shunchaki bo'lishmaydi. Qat'iy `buildId` va `dateBuild: 0` bilan ikki xil yig'ish kalitlarni bo'lishadi. Faqat yoqilgan locale'lar qidiriladi, 200 belgidan uzun sahifa nomlari esa qatlamni chetlab o'tadi.
+- **Nima saqlanadi.** Lug'at yozilishidan oldin ildiz lug'ati (`__root`) bilan solishtiriladi va faqat barcha ildiz kalitlarini o'z ichiga olsa hamda ildizdan farq qilsa yoziladi. Shunday qilib, ildiz bilan javob berilgan to'qib chiqarilgan sahifa hech qanday kalit qo'shmaydi, sahifadagi 200 xato tanasi ham. Har bir nusxa bunday sahifani manbadan bir marta o'qiydi. Host noma'lum sahifalarga ildiz, bo'sh obyekt yoki 404 bilan javob berishi va `__root` ni berishi kerak. `__root` siz yoki sahifalarni ildiz kalitlarisiz beradigan host hech narsani bo'lishmaydi. Agar host `__root` ning o'ziga to'g'ri shakllangan xato bilan javob bersa, u saqlanadi: backend buni qila olsa, `cacheTtl` ni qisqa saqlang.
+- **Muddati tugashi.** Yozuv yozilganidan `cacheTtl` soniya o'tib, `cacheTtl` `0` bo'lganda esa bir kundan keyin eskiradi, shuning uchun eski yig'ishlarning kalitlari to'planib qolmaydi. Qiymat nusxaning o'z keshida yana bir `cacheTtl`, render'ning bo'laklar keshida esa yana bittasi davomida qolishi mumkin: backend o'zgarishlari uch `cacheTtl` ichida ko'rinadi. Muddatsiz drayverlar (`fs`) eski kalitlarni siz o'chirmaguningizcha saqlaydi.
+- **Storage ishdan chiqqanda** sahifa ishdan chiqmaydi. O'qish 1 soniya davom etishi mumkin, bu ulanish handshake'i va shu joylashuvda sovuq bo'lgan Cloudflare KV kalitini qamraydi. Nosozlikdan keyin ombor yana javob bermaguncha chegara 250 ms. Ketma-ket uchta nosozlik qatlamni 5 soniyaga yopadi. U yopiq bo'lganda va o'qish endigina muvaffaqiyatsiz bo'lganda hech narsa yozilmaydi. Muvaffaqiyatsiz yozish hech narsani yopmaydi, shuning uchun faqat o'qish uchun replika o'qishlarga xizmat qilishda davom etadi. Javoblari bu chegaralardan uzoq davom etadigan ombor nosoz deb hisoblanadi: topilmadi, va lug'at o'z manbasidan keladi. ioredis bilan bu har bir buyruq uchun taxminan 400 ms dan boshlanadi, chunki uning handshake'i uchta borib-kelishni oladi. Modul daqiqasiga bitta ogohlantirish yozadi; ioredis bunga qo'shimcha ravishda o'z xatolarini chiqaradi. Lug'at bo'lmagan qiymat topilmagan deb hisoblanadi va qayta yoziladi. Noma'lum mount nomi birinchi foydalanishda bir marta ogohlantiradi; keyin ilova qatlamsiz ishlaydi.
+- **Manba ishdan chiqqanda** hech narsa nosozlikni saqlamaydi. Muvaffaqiyatsiz fetch yoki o'qib bo'lmaydigan fayl hech qaysi keshga — na bunga, na nusxaning o'ziniki — tushmaydi va keyingi so'rov qaytadan o'qiydi. [Deploy](/uz/guide/deployment#when-a-dictionary-cannot-be-read) sahifasiga qarang.
+- **Dev va prerender'da o'chirilgan**, ular o'z fayllarini o'qiydi va production Redis'ingizga muhtoj bo'lmasligi kerak.
+- **Bekor qilish.** Tozalash chaqiruvi yo'q: yangi yig'ish yangi kalitlardan foydalanadi. Ishlayotgan yig'ishni darhol yangilash uchun storage'dan `i18n-micro:` kalitlarini o'chiring va nusxalarni qayta ishga tushiring. `clearCache` va HMR faqat jarayon holatiga ta'sir qiladi.
+- Runtime o'zgarishlari (`$mergeTranslations`, `$defineI18nRoute`) ularni amalga oshirgan render yoki brauzerda qoladi va hech qachon storage'ga yozilmaydi.
+
+## Payload hajmi {#payload-size}
+
+Payload chiqishi `translationPayloads.warnFileCount` (500 fayl) yoki `warnSizeBytes` (10 MB) dan oshganda yig'ish ogohlantiradi. Shunday bo'lganda:
+
+- faqat sahifaga tegishli kalitlarni ildiz fayllardan chiqaring;
+- bir xil kalitlarni ko'rsatadigan marshrutlarni bog'lang (`routesLocaleLinks`);
+- serverless yoki Edge'da `translationPayloads.mode: 'source'` dan foydalaning, shunda server bundle'i har bir sahifa × locale o'rniga ixcham manbalarni joylashtiradi ([Deploy](/uz/guide/deployment#serverless-and-edge)). Edge yig'ishi platforma chegarasidan oshganda o'zi ogohlantiradi ([Bundle chegaralari](/uz/guide/deployment#bundle-limits-on-edge));
+- statik payload'larning `.gz` / `.br` nusxalari uchun `nitro.compressPublicAssets` ni yoqing.
+
+## O'lchash {#measuring}
+
+Repozitoriy playground nimani yetkazib berishini `pnpm run budget:payload` bilan kuzatib boradi; joriy raqamlar:
+
+`playground` da `/`, `/de` bo'yicha o'lchangan:
+
+| O'lchov | Hajmi |
+| --- | --- |
+| Diskdagi tarjima manbalari | 7.8 MB |
+| Alohida payload fayllari sifatida berilgan | 23.9 MB |
+| Eng katta inline `__NUXT_DATA__` | 0.4 KB |
+| Mijoz resurslari | 624.4 KB |
+
+Playground — 100k gacha kalitli generatsiya qilingan lug'atlarga ega test stendi, shuning uchun bu real
+ilovadan kutiladigan raqamlar emas — ular solishtirish uchun qat'iy nuqtadir. Ular kutilmaganda o'sganda budjet muvaffaqiyatsiz bo'ladi,
+payload tarkibidagi tasodifiy o'zgarish shu tarzda aniqlanadi.
+
+Benchmark to'plamini o'zingiz `pnpm test:performance` bilan ishga tushiring; u qanday ishlashi [benchmark metodologiyasida](https://s00d.github.io/nuxt-i18n-micro/contributing/performance-methodology) tushuntirilgan.
+
+## Tegishli {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Benchmarklar" icon="book-open" href="/uz/guide/performance-results">
+
+</Card>
+
+<Card title="Deploy" icon="book-open" href="/uz/guide/deployment">
+
+</Card>
+
+<Card title="Tarjima fayllari" icon="book-open" href="/uz/guide/translations">
+
+</Card>
+
+</CardGroup>

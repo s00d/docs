@@ -1,0 +1,128 @@
+---
+title: "Layers och domäner"
+description: "Dela i18n-konfiguration och översättningsfiler via Nuxt-layers, och servera locales på egna domäner."
+---
+
+Ett Nuxt-layer kan bära i18n-konfigurationen och mappen `locales/` för flera appar, och varje app lägger till eller åsidosätter det den behöver. Den här sidan visar det, och hur ett bygge serverar flera domäner.
+
+## Dela konfiguration och översättningar {#share-config-and-translations}
+
+```ts
+// base/nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    locales: [
+      { code: 'en', iso: 'en-US' },
+      { code: 'de', iso: 'de-DE' },
+      { code: 'fr', iso: 'fr-FR' },
+    ],
+    defaultLocale: 'en',
+  },
+})
+```
+
+```ts
+// shop/nuxt.config.ts
+export default defineNuxtConfig({
+  extends: ['../base'], // a layer directory or package, not a nuxt.config file
+  i18n: {
+    locales: [
+      { code: 'es', iso: 'es-ES' }, // added
+      { code: 'fr', disabled: true }, // the base layer's fr, switched off here
+    ],
+  },
+})
+```
+
+- **Konfiguration:** skalära alternativ i appen ersätter layerns. `locales`-arrayer från alla layers kombineras, och poster med samma `code` slås samman till en där appens fält vinner, så en app kan lägga till en locale eller sätta fält som `disabled: true` på en ärvd.
+- **Översättningar:** `locales/` från varje layer slås samman nyckel för nyckel, layer först och app sist, så en nyckel i `shop/locales/en.json` åsidosätter samma nyckel i `base/locales/en.json`. Sidfiler (`locales/pages/<page>/`) slås samman på samma sätt.
+- **Sidor:** `$defineI18nRoute` läses från sidorna i varje layer.
+
+För att slå samman mappar som inte ingår i ett layer, lista dem i [`additionalTranslationDirs`](/sv/api/module-options#additionaltranslationdirs).
+
+## Flera domäner {#multiple-domains}
+
+Ett bygge serverar alla domäner. Lista varje locale med sin domän; `baseDefault` gör den till standard för den värden:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    strategy: 'prefix_except_default',
+    defaultLocale: 'en',
+    locales: [
+      { code: 'en', iso: 'en-US', baseUrl: 'https://example.com', baseDefault: true },
+      { code: 'de', iso: 'de-DE', baseUrl: 'https://example.de', baseDefault: true },
+      { code: 'nl', iso: 'nl-NL', baseUrl: 'https://example.de' },
+      { code: 'fr', iso: 'fr-FR' },
+    ],
+  },
+})
+```
+
+Peka båda domänerna mot samma server. Förfrågans värd avgör resten:
+
+- **Standard:** värdens `baseDefault`-locale. Utan en sådan används byggets standard om värden serverar den, annars värdens första locale.
+- **Serverade locales:** den värdens locales, plus varje locale utan `baseUrl`. På `example.de` är det `de`, `nl` och `fr`.
+- **Locales på andra domäner** är länkmål. `$localePath`, `$localeRoute`, `$switchLocalePath`, `<i18n-switcher>` och `hreflang` ger absoluta URL:er på deras `baseUrl`, och `$switchLocale` navigerar dit. På den här värden ger deras URL:er 404, och en cookie eller `Accept-Language` kan inte välja dem.
+- **En länk till en annan domän** går via `$localePath` eller `<i18n-link>`: `<NuxtLink :to="$localePath('/contact', 'de')">`, `<i18n-link :to="$localeRoute('/contact', 'de')">`. Routern tar inget absolut objekt, så `<NuxtLink :to="$localeRoute(...)">` och `router.push($localeRoute(...))` stannar på detta origin. På `localhost` eller en förhandsgranskningsvärd är varje locale med `baseUrl` en sådan länk, även den aktuella. I kod, använd `navigateTo($localePath('/contact', 'de'), { external: true })` eller `$switchRoute`.
+- **Alla andra värdar** får byggkonfigurationen, med varje `baseUrl`-locale som länkmål. Inget från förfrågan ekas tillbaka: canonical och `hreflang` använder `metaBaseUrl`, annars byggstandardens `baseUrl` (en standard utan `baseUrl` behöver `metaBaseUrl` eller `site.url`, se [SEO](/sv/guide/seo#set-the-public-origin)).
+- **Payload-filer** i `public/` är statiska: vilken värd som helst returnerar vilken locales fil som helst. [Generate](/sv/guide/deployment#static-site-(nuxi-generate)) per domän publicerar bara den domänens.
+
+`example.de` under varje strategi, med `de: '/kontakt'` som anpassad sökväg för `contact`:
+
+| Strategi | `/` | Standard-locales sida | Andra URL:er |
+| --- | --- | --- | --- |
+| `prefix_except_default` | `de` | `/kontakt` | `/de/kontakt` och `/en/contact` ger 404, `/contact` omdirigerar till `/kontakt` |
+| `prefix_and_default` | `de` | `/kontakt` och `/de/kontakt`, länkar använder `/kontakt` | `/en/contact` och `/contact` ger 404 |
+| `prefix` | omdirigerar till `/de` | `/de/kontakt` | `/kontakt` omdirigerar till `/de/kontakt`, `/en/contact` ger 404 |
+| `no_prefix` | `de` | `/kontakt` | en anpassad sökväg för en locale på en annan domän ger 404 |
+
+Under `prefix` behåller en länk från en annan domän prefixet, eftersom URL:en utan prefix bara skulle omdirigera. Under `no_prefix` hamnar en länk till en annan domän på den värdens standard-locale: URL:en kan inte namnge en andra.
+
+Bra att veta:
+
+- **Bakom en proxy** kommer värden från `Host`. Om proxyn i stället lägger den publika värden i `X-Forwarded-Host`, sätt [`trustForwardedHost`](/sv/api/module-options#trustforwardedhost), och bara när proxyn skriver över den headern. En proxy som inte skickar någon av dem kan inte servera ett domänbygge. Se [Bakom en proxy eller CDN](/sv/guide/deployment#behind-a-proxy-or-cdn).
+- **`app.baseURL`** hör också hemma i `baseUrl`: `baseUrl: 'https://example.de/shop'` med `app.baseURL: '/shop'`.
+- **Värdar matchas exakt.** `www.example.de` är en annan värd: omdirigera den vid edge, eller sätt den `baseUrl` på locale. Endast en värd per locale.
+- **Cachar måste nyckla på värden.** Ett CDN gör det normalt. Nitros route-cache nycklar på sökvägen, så i ett domänbygge lägger modulen till `host` i `cache.varies` för varje `swr`- och `cache`-regel, och `x-forwarded-host` med `trustForwardedHost`. En regel med `cache: false` förblir som den är skriven. `isr` är plattformens cache: kontrollera att den nycklar på värden.
+- **Anpassade sökvägar för två värdstandarder får inte kollidera.** Posterna utan prefix delar en router, så `/x` kan inte vara en sida på `example.de` och en annan på `example.com`.
+- **Förrenderade sidor:** en `prerender: true`-route-regel i `nuxt build` renderas en gång, utan värd, och filen svarar för alla domäner. Lämna sidor som skiljer sig per domän åt servern, eller [generera per domän](/sv/guide/deployment#static-site-(nuxi-generate)).
+- **`noPrefixRedirect`** går efter värdens och besökarens locale, på varje värd.
+- **`hashMode`:** värden väljer rendering enligt ovan, länkar till en annan domän bär routen i hashen (`https://example.com/#/contact`).
+- **`ssr: false`:** webbläsaren läser domänen från `location.host`, så en värd utan server löses ändå.
+- **[Runtime-åsidosättningar](/sv/guide/runtime-overrides)** tillämpas först. En runtime-`disabledLocales` gäller på varje värd, med ett undantag: under `prefix_except_default` och `prefix_and_default` förblir en värds standard aktiverad på sin värd, eftersom dess sidor är posterna utan prefix. Under `prefix` och `no_prefix` faller värden tillbaka till nästa locale den serverar. En runtime-`defaultLocale` gäller endast okända värdar.
+
+För en [statisk webbplats](/sv/guide/deployment#static-site-(nuxi-generate)), generera en gång per domän.
+
+### En app per domän {#one-app-per-domain}
+
+Ett delat layer med en liten app per domän fungerar fortfarande, när domänerna behöver olika sidor eller moduler. Varje app sätter sin egen `defaultLocale` ovanpå samma `locales`-lista. En locale på en annan domän ger 404 i den appen, som ovan.
+
+### Välja locale i kod {#choosing-the-locale-in-code}
+
+För en enda instans som svarar alla domäner med förfrågans eget origin i SEO-taggar, se [SEO](/sv/guide/seo#set-the-public-origin); för att välja locale utifrån värden i kod, se [Anpassad locale-detektering](/sv/guide/custom-auto-detect).
+
+## Relaterat {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Översättningsfiler" icon="book-open" href="/sv/guide/translations">
+
+</Card>
+
+<Card title="Runtime-åsidosättningar" icon="book-open" href="/sv/guide/runtime-overrides">
+
+</Card>
+
+<Card title="SEO" icon="book-open" href="/sv/guide/seo">
+
+</Card>
+
+<Card title="Nuxt-layers" icon="arrow-up-right-from-square" href="https://nuxt.com/docs/getting-started/layers">
+
+</Card>
+
+</CardGroup>

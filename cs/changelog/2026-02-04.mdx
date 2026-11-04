@@ -1,0 +1,115 @@
+---
+title: "v3.0.0 — optimalizace výkonu, balíčky pro strategie tras a cest"
+description: "Poznámky k vydání: v3.0.0 — optimalizace výkonu, balíčky pro strategie tras a cest"
+---
+
+**Datum**: 2026-02-04
+
+**Verze**: `v3.0.0`
+
+![v3.0.0 release](/images/3.0.0.png)
+
+Oznamujeme **v3.0.0** s **rozsáhlou přestavbou architektury**: systém ukládání překladů byl kompletně přepsán pro maximální výkon, generování tras a běhová logika cest jsou nyní rozděleny do samostatných balíčků a tok přesměrování byl přepracován pro vyšší spolehlivost a kompatibilitu se Serverless.
+
+## Co je nového? {#what’s-new}
+
+### Optimalizace výkonu — nová architektura ukládání překladů {#performance-optimization-—-new-translation-storage-architecture}
+
+Systém načítání a cachování překladů byl kompletně přepsán pro maximální výkon:
+
+- **Centralizovaná třída TranslationStorage** — Nová třída `TranslationStorage` (`src/runtime/utils/storage.ts`) poskytuje jednotné úložiště pro klienta i server. Používá `globalThis` se `Symbol.for`, aby zaručila skutečný singleton v celém procesu Node.js, a zabraňuje tak duplikaci cache napříč zabalenými moduly.
+
+- **Optimalizovaná funkce `$t()` (tFast)** — Překladová funkce používá přímé vyhledávání v jediném aktivním slovníku:
+  1. Všechny překlady (kořenové + specifické pro stránku + záložní) jsou při sestavení předem sloučeny do jediného souboru pro každou stránku
+  2. Při navigaci v rámci stejné locale se překlady nové stránky kumulativně slučují do aktivního slovníku (zabraňuje blikání klíčů během animací přechodu)
+  3. Podporuje vnořené klíče (`key.subkey.subsubkey`) s optimalizovaným vyhodnocováním cesty
+  4. Žádná vyhledávání v Map ani výpočty locale/trasy při každém volání — používá předem vypočítaný kontext
+
+- **Vkládání na straně serveru přes `window.__I18N__`** — Překlady načtené během SSR se vkládají do HTML jako značka script. Klient při prvním načtení čte přímo z `window.__I18N__` a vyhne se tak duplicitním požadavkům.
+
+- **Lokální cache chunků v pluginu** — Plugin udržuje lokální Map `loadedChunks`, která ukládá všechny načtené chunky překladů. Jakmile jsou překlady načteny, během životního cyklu stránky se již znovu nestahují.
+
+- **Předběžné sloučení při sestavení** — Krok `preMergeLocales` v `module.ts` sloučí při sestavení všechny vrstvy, řetězce záložních locale a kořenové překlady do každého souboru stránky. Server-loader jednoduše přečte jediný předem sestavený soubor — za běhu není potřeba nic slučovat.
+
+**Zlepšení výkonu:**
+
+- Menší alokace paměti na požadavek (žádné znovuvytváření objektů při každém volání `$t()`)
+- Nižší zátěž garbage collectoru
+- Rychlejší odezva pod zátěží
+- Stabilní průběh využití paměti (žádné „skákající“ grafy)
+
+### Balíčky pro strategie tras a cest {#route-&-path-strategy-packages}
+
+- **@i18n-micro/route-strategy** — Generování tras při sestavení: rozšiřuje stránky Nuxtu o lokalizované trasy, zpracovává aliasy, vnořené trasy a vlastní cesty pro každou strategii. Jediný vstupní bod: `new RouteGenerator(options)` a `extendPages(pages)`. Strategie (`no_prefix`, `prefix`, `prefix_except_default`, `prefix_and_default`) jsou implementovány jako samostatné třídy a vybírají se pomocí továrny.
+- **@i18n-micro/path-strategy** — Běhová práce s cestami a locale: poskytuje `PathStrategy` pro sestavování lokalizovaných cest, vyhodnocování přesměrování a přepínání locale. Exporty podcest podporující tree-shaking (`/prefix`, `/no-prefix` atd.), takže se do bundlu dostane jen zvolená strategie. Pro vyhodnocování tras používá čisté funkce a předem vypočítané příznaky kontextu pro minimum alokací.
+- **Strukturované rozvržení balíčků** — Logika tras v `@i18n-micro/route-strategy` s `core/`, `strategies/`. Strategie cest v `@i18n-micro/path-strategy` s plochou strukturou `src/`: `types.ts`, `path.ts`, `resolver.ts`, `helpers.ts` a `strategies/`.
+- **Konzistentní chování** — Zpracování aliasů, spojování cest rodič–potomek, vlastní `globalLocaleRoutes` / `filesLocaleRoutes` / `routeLocales` a záruky neměnnosti pokrývá samostatná sada testů.
+
+### Přestavba architektury přesměrování {#redirect-architecture-overhaul}
+
+- **Serverový middleware** — Přesměrování a zpracování 404 běží v middlewaru Nitro (`i18n.global.ts`). Ten se spouští před renderováním Nuxtu, takže přesměrování z `/` na `/<locale>/` proběhne bez probliknutí chyby, pokud je přítomna cookie s locale.
+- **Klientský plugin (na straně klienta)** — Plugin pouze pro klienta (`06.client-redirect.client.ts`) běží po hydrataci a zpracovává přesměrování, když `useI18nLocale()` nebo cookie nastaví jinou než výchozí locale. Nitro běží před Nuxtem, takže server nevidí změny cookie/stavu z uživatelských pluginů; tento případ pokrývá klientský plugin.
+- **Žádná záložní komponenta** — Záložní komponenta `locale-redirect.vue` a volba `fallbackRedirectComponentPath` byly odstraněny. Logiku přesměrování plně obstarává serverový middleware a klientský plugin.
+- **Podpora vlastních cest** — Cesty jako `/kontakt` pro němčinu (přes `globalLocaleRoutes`) jsou správně rozpoznány jako platné i bez prefixu locale, čímž se předejde nesprávným 404 během prerenderingu.
+- **Oprava customRegexMatcher** — Při použití `customRegexMatcher` vzor nyní odpovídá **celému** prvnímu segmentu cesty (s kotvami `^` a `$`). Tím se zabrání falešným 404 pro trasy jako `/locale-test`, kde by vzor `[a-z]{2}-[a-z]{2}` dříve odpovídal podřetězcům.
+- **Oprava autoDetectPath** — Volba `autoDetectPath` nyní správně porovnává s původní cestou URL, čímž zabraňuje nechtěným přesměrováním při explicitní navigaci na URL s prefixem locale.
+
+### Composable useI18nLocale {#usei18nlocale-composable}
+
+- **Centralizovaná správa locale** — Nový composable `useI18nLocale()` nahrazuje `useLocaleCookies` a poskytuje jediný vstupní bod pro stav locale, cookies a synchronizační nástroje.
+- **API** — `locale`, `localeCookie`, `hashCookie`, `getLocale()`, `getPreferredLocale()`, `setLocale()`, `syncLocale()`, `isValidLocale()`, `getEffectiveLocale()`, `resolveInitialLocale()`.
+- **Programové nastavení locale** — Ve serverových pluginech používejte `useI18nLocale().setLocale(locale)` místo `useState('i18n-locale')` pro čistší, centralizovanou práci s locale.
+
+### Vlastní automatická detekce a konfigurace {#custom-auto-detection-&-configuration}
+
+- **`getI18nConfig()`** — Vlastní pluginy (např. pro detekci locale) by měly používat `getI18nConfig()` z `#build/i18n.strategy.mjs` místo `useRuntimeConfig().public.i18nConfig`. To poskytuje přímý přístup k vyhodnocené konfiguraci i18n (např. `localeCookie`) bez závislosti na runtime konfiguraci.
+- **Název cookie** — Při implementaci vlastní logiky detekce používejte `getI18nConfig().localeCookie ?? 'user-locale'`.
+
+### Zjednodušené integrační balíčky {#simplified-integration-packages}
+
+Všechny integrační balíčky (`@i18n-micro/vue`, `@i18n-micro/astro`, `@i18n-micro/node`, `@i18n-micro/react`, `@i18n-micro/preact`, `@i18n-micro/solid`) byly zjednodušeny a optimalizovány a sdílejí stejnou základní logiku překladů.
+
+### Změny konfigurace {#configuration-changes}
+
+- **`previousPageFallback` odstraněno** — Tato volba již není potřeba. Nová kumulativní strategie slučování automaticky ponechává překlady předchozí stránky dostupné během animací přechodu a poté je uklidí pomocí hooku `page:transition:finish`.
+- **`hmr`** — Přesunuto z `experimental.hmr` do volby nejvyšší úrovně. Řídí serverové HMR pro soubory překladů (ve vývoji ve výchozím stavu zapnuto).
+
+```typescript
+// Before (v2.x)
+export default defineNuxtConfig({
+  i18n: {
+    experimental: {
+      hmr: true,
+    },
+  },
+})
+
+// After (v3.0.0)
+export default defineNuxtConfig({
+  i18n: {
+    hmr: true,
+  },
+})
+```
+
+## Zpětně nekompatibilní změny {#breaking-changes}
+
+- **`fallbackRedirectComponentPath`** — Odstraněno. Modul již pro přesměrování nepoužívá záložní komponentu trasy. Pokud jste měli nakonfigurovanou cestu k vlastní komponentě, odstraňte ji z konfigurace.
+- **`useLocaleCookies`** — Odstraněno. Místo toho použijte `useI18nLocale()`. Nový composable poskytuje `locale`, `localeCookie`, `hashCookie`, `setLocale()`, `syncLocale()` a další.
+- **`experimental.i18nPreviousPageFallback` / `previousPageFallback`** — Zcela odstraněno. Kumulativní strategie slučování řeší blikání při přechodu automaticky. Odstraňte tuto volbu z konfigurace.
+- **`experimental.hmr`** — Přesunuto do `hmr`. Pokud jste tuto volbu používali, aktualizujte konfiguraci.
+- **Vlastní pluginy** — Pokud váš vlastní plugin pro detekci locale používal `useRuntimeConfig().public.i18nConfig`, přejděte na `getI18nConfig()` z `#build/i18n.strategy.mjs`. Upřednostněte `useI18nLocale().setLocale()` před `useState('i18n-locale')`. Aktualizované příklady najdete v části [Vlastní detekce jazyka](/cs/guide/custom-auto-detect).
+- **Změny interních souborů** — `load-from-storage.ts` a `translation-loader.ts` byly odstraněny a nahrazeny soubory `storage.ts` a `server-loader.ts`. Pokud jste z těchto souborů importovali přímo (nedoporučuje se), aktualizujte importy.
+
+## Proč na tom záleží {#why-it-matters}
+
+- **Výkon**: Centralizovaná singleton cache eliminuje vytváření objektů pro každý požadavek a snižuje zátěž GC.
+- **Udržovatelnost**: Logika tras a cest žije v samostatných balíčcích s jasnými hranicemi a typy.
+- **Testování**: Chování strategií a okrajové případy se testují izolovaně.
+- **Spolehlivost**: Oddělená logika přesměrování na serveru (Nitro) a na klientovi zabraňuje problémům s časováním, když cookie/useState nastavují uživatelské pluginy.
+- **Připraveno pro Serverless**: Plugin Nitro běží ve stejném kontextu jako handlery Nitro, kompatibilní s Edge/Workers.
+- **Dokumentace**: Chování směrování je zdokumentováno v [průvodci strategiemi](/cs/guide/strategy) a v balíčcích [path-strategy](https://github.com/s00d/nuxt-i18n-micro/tree/main/packages/path-strategy) a [route-strategy](https://github.com/s00d/nuxt-i18n-micro/tree/main/packages/route-strategy).
+
+Poznámky k upgradu a úplný seznam změn najdete v [changelogu](https://github.com/s00d/nuxt-i18n-micro/blob/main/CHANGELOG.md).
+
+---

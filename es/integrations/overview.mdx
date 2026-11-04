@@ -1,0 +1,217 @@
+---
+title: "Frameworks"
+description: "Qué paquete @i18n-micro usar fuera de Nuxt, y el modelo de instancia, adaptador de router y componentes que comparten."
+sidebarTitle: "Resumen"
+---
+
+Los paquetes `@i18n-micro/*` llevan el núcleo de traducción de Nuxt I18n Micro a Vue, React, Preact, Solid, Astro, VitePress y JavaScript puro. Úsalos cuando tu aplicación no sea una aplicación Nuxt, o cuando un script o servidor fuera de Nuxt necesite los mismos archivos de traducción. Todos los paquetes comparten un mismo modelo de instancia, un mismo contrato de adaptador de router y los mismos cuatro componentes, descritos una sola vez en esta página.
+
+## Paquetes {#packages}
+
+| Stack | Paquete | Entrada del router |
+| --- | --- | --- |
+| [SPA de Vue 3](/es/integrations/vue-package) | `@i18n-micro/vue` | `@i18n-micro/vue/router` |
+| [React](/es/integrations/react-package) | `@i18n-micro/react` | `@i18n-micro/react/router` |
+| [Preact](/es/integrations/react-package#preact) | `@i18n-micro/preact` | — |
+| [SolidJS](/es/integrations/solid-package) | `@i18n-micro/solid` | `@i18n-micro/solid/router` |
+| [Astro](/es/integrations/astro-package): SSR e [islas](/es/integrations/astro-islands) | `@i18n-micro/astro` | — |
+| [VitePress](/es/integrations/vitepress-package) | `@i18n-micro/vitepress` | — |
+| [Navegador o edge](/es/integrations/runtime-package), sin framework | `@i18n-micro/runtime` | — |
+| Servidor [Node.js](/es/integrations/nodejs-package), CLI | `@i18n-micro/node` | — |
+| [Claves tipadas](/es/integrations/types-generator), Vite o Nuxt | `@i18n-micro/types-generator` | — |
+| [Editor de traducciones](/es/integrations/devtools-ui-package) en desarrollo | `@i18n-micro/devtools-ui` | — |
+
+La entrada del router es una importación aparte, así que una aplicación sin router nunca incluye uno en su bundle.
+
+`@i18n-micro/core`, `@i18n-micro/types` y `@i18n-micro/utils` se instalan con estos paquetes; rara vez los importarás directamente. Las firmas de todas las exportaciones están en la [referencia de paquetes](/es/api/packages/overview) generada.
+
+Cada paquete tiene un playground en `packages/<name>/playground` dentro del repositorio.
+
+## La instancia {#the-instance}
+
+`createI18n(options)` devuelve una instancia que contiene los diccionarios, el locale actual y la ruta actual. Las opciones son las mismas en todos los paquetes:
+
+| Opción | Tipo | Valor por defecto | Notas |
+| --- | --- | --- | --- |
+| `locale` | `string` | obligatorio | Locale activo. |
+| `fallbackLocale` | `string` | `locale` | Se consulta cuando falta una clave en `locale`. |
+| `messages` | `Record<locale, Translations>` | `{}` | Diccionarios raíz (ruta `'index'`). |
+| `routeMessages` | `Record<route, Record<locale, Translations>>` | `{}` | Diccionarios de ruta. Solo en Runtime, React, Preact, Node y VitePress. |
+| `plural` | `PluralFunc` | `defaultPlural` | Regla de plural personalizada. |
+| `missingWarn` | `boolean` | `true` | `console.warn` en el navegador, solo en desarrollo, para una clave que falta. |
+| `missingHandler` | `(locale, key, routeName) => void` | — | Se llama en lugar del aviso. |
+| `numberFormats` | `Record<locale, Record<name, Intl.NumberFormatOptions>>` | — | Formatos con nombre: `tn(9.5, 'currency')`. |
+| `datetimeFormats` | `Record<locale, Record<name, Intl.DateTimeFormatOptions>>` | — | Formatos con nombre: `td(date, 'short')`. |
+| `timeZone` | `string` | zona del runtime | Zona IANA para las fechas de `td`; no afecta a `tdr`. Defínela para que servidor y navegador rendericen la misma fecha. |
+| `now` | `() => number` | `Date.now` | El reloj de `tdr`. Pasa a la hidratación la hora del servidor para que ambos rendericen el mismo texto. |
+| `localeIso` | `Record<code, string>` | — | Etiqueta BCP 47 usada para las reglas de plural (`ua` → `uk-UA`). React, Preact y Solid la toman del `iso` de los `locales` del provider. |
+
+Los diccionarios viven en `i18n.storage.translations`, un `Map` con claves `locale:route` (`en:index`, `en:about`).
+
+Una clave se busca en el diccionario de la ruta actual y luego en el diccionario raíz, primero para `locale` y luego para `fallbackLocale`. Una clave que falta devuelve la propia clave (o el `defaultValue` que pases).
+
+```ts
+i18n.addTranslations('en', { nav: { home: 'Home' } }) // root, deep-merged
+i18n.addRouteTranslations('en', 'about', { title: 'About us' }) // route chunk
+i18n.addTranslations('en', { nav: { home: 'Start' } }, false) // replace instead of merge
+i18n.setRoute('about')
+i18n.t('title') // 'About us'
+i18n.t('nav.home') // 'Start' (root key, still visible on the route)
+```
+
+### Traducir y formatear {#translate-and-format}
+
+| Método | Devuelve |
+| --- | --- |
+| `t(key, params?, defaultValue?, routeName?)` | El valor (cadena, número, objeto) con `{param}` interpolado. |
+| `ts(...)` | Igual que `t`, como cadena. |
+| `tc(key, count \| params, defaultValue?)` | Forma plural. |
+| `tn(value, options \| name)` | `Intl.NumberFormat` en el locale activo. |
+| `td(value, options \| name)` | `Intl.DateTimeFormat`. |
+| `tdr(value, options?)` | Tiempo relativo (`3 days ago`). |
+| `has(key, routeName?)` | `true` cuando el locale activo tiene la clave (diccionario de ruta o raíz; no se comprueba el fallback). |
+
+`defaultPlural` divide el valor por `|` y elige la forma en el índice `count`, limitado a la última; un `count` negativo, fraccionario o `NaN` elige la última forma.
+
+Un `plural` personalizado recibe `(key, count, params, locale, getter)`. Lee el valor mediante `getter(key)`; no dividas la clave:
+
+```ts
+import type { PluralFunc } from '@i18n-micro/vue'
+
+const plural: PluralFunc = (key, count, params, _locale, getter) => {
+  const value = getter(key)
+  if (typeof value !== 'string') return null
+  const forms = value.split('|').map((form) => form.trim())
+  return (count === 1 ? forms[0] : forms[1] ?? forms[0])!.replace('{count}', String(count))
+}
+```
+
+## Adaptador de router {#router-adapter}
+
+Los paquetes SPA no dependen de ningún router. Un adaptador de router (`I18nRoutingStrategy`) les indica cómo leer la ruta actual, navegar y construir una ruta localizada. Los adaptadores integrados anteponen el prefijo a todos los locales excepto a `defaultLocale` (`/about`, `/de/about`).
+
+| Miembro | Obligatorio | Usado por |
+| --- | --- | --- |
+| `getCurrentPath(): string` | sí | comprobación del enlace activo (por página; query y hash no cuentan), `switchLocale` (los conserva) |
+| `push({ path }): void` | sí | `switchLocale`, `<I18nLink>` sin `linkComponent`, `<I18nSwitcher>` |
+| `replace({ path }): void` | sí | — |
+| `resolvePath(to, locale)` | no | `localePath`, `localeRoute`, `<I18nLink>`; sin él, las rutas se devuelven tal cual |
+| `linkComponent` | no | `<I18nLink>` lo renderiza (p. ej. `RouterLink`) en lugar de `<a>` |
+| `getRoute()` | no | `{ fullPath, query }` para los helpers de SEO |
+
+`push` y `replace` son obligatorios en Vue, React, Preact y Solid. Astro tiene su propio adaptador del lado del servidor con `push`/`replace` opcionales (consulta [Astro](/es/integrations/astro-package#router-adapter)).
+
+Un adaptador mínimo para cualquier router basado en el historial:
+
+```ts
+import type { I18nRoutingStrategy } from '@i18n-micro/react'
+
+const locales = ['en', 'de']
+const stripLocale = (path: string) => path.replace(/^\/(en|de)(?=\/|$)/, '') || '/'
+
+export const historyAdapter: I18nRoutingStrategy = {
+  getCurrentPath: () => window.location.pathname + window.location.search + window.location.hash,
+  push: ({ path }) => window.history.pushState({}, '', path),
+  replace: ({ path }) => window.history.replaceState({}, '', path),
+  resolvePath: (to, locale) => {
+    const path = stripLocale(typeof to === 'string' ? to : to.path || '/')
+    return locale === 'en' ? path : `/${locale}${path === '/' ? '' : path}`
+  },
+}
+```
+
+## Componentes {#components}
+
+Vue, React, Preact y Solid incluyen los mismos cuatro componentes. Sus props coinciden; React, Preact y Solid pasan las demás props al elemento raíz.
+
+### `<I18nT>` {#&lt;i18nt&gt;}
+
+| Prop | Tipo | Notas |
+| --- | --- | --- |
+| `keypath` | `string` | obligatorio |
+| `params` | `object` | valores de interpolación |
+| `plural` | `number \| string` | renderiza `tc(keypath, count)` |
+| `number` | `number \| string` | pasa `tn(number)` como `{number}` |
+| `date` | `Date \| string \| number` | pasa `td(date)` como `{date}` |
+| `relativeDate` | `Date \| string \| number` | pasa `tdr(relativeDate)` como `{relativeDate}` |
+| `tag` | `string` | elemento envoltorio, `span` por defecto |
+| `html` | `boolean` | renderiza la traducción como HTML; debe ser de confianza, los parámetros se escapan |
+| `defaultValue` | `string` | sustituye a una clave que falta, y se renderiza sin envoltorio cuando `hideIfEmpty` oculta un valor vacío |
+| `hideIfEmpty` | `boolean` | no renderiza nada para una traducción vacía |
+| `customPluralRule` | `PluralFunc` | regla de plural para este elemento |
+
+Solo se aplica una prop de formato, comprobadas en este orden: `number`, `date`, `relativeDate`, `plural`.
+
+#### Texto enriquecido {#rich-text}
+
+Un `{placeholder}` puede contener un elemento. En Vue es un slot con nombre; en React, Preact y Solid la prop `components` proporciona elementos, o funciones que devuelven uno, por nombre. En ambos casos gana a un parámetro con el mismo nombre, funciona en todas las ramas y sobrevive a un locale que reordena los placeholders.
+
+```tsx
+// { "terms": "I accept the {link} of {company}" }
+<I18nT keypath="terms" params={{ company: 'ACME' }} components={{ link: <a href="/terms">terms</a> }} />
+```
+
+En Solid, pasa una función cuando un placeholder se repite: un nodo solo ocupa un lugar. `children` reemplaza el texto; como función recibe `{ translation }`, igual que el slot por defecto de Vue. `html` ignora todo esto.
+
+### `<I18nLink>` {#&lt;i18nlink&gt;}
+
+| Prop | Tipo | Notas |
+| --- | --- | --- |
+| `to` | `string \| { path }` | localizado mediante el `resolvePath` del adaptador |
+| `activeStyle` | objeto de estilo | se fusiona sobre `style` en la página actual; React, Preact y Solid también lo aplican a una sección superior |
+| `localeRoute` | función | sobrescribe `resolvePath` para este enlace |
+
+Las URL externas (`https://`, `mailto:`, `tel:`) se renderizan como `<a target="_blank" rel="noopener noreferrer">`; un `target` o `rel` propio tiene prioridad. `onClick` siempre se ejecuta. Un clic con modificador, otro botón del ratón o un `target` se dejan al navegador.
+
+### `<I18nSwitcher>` {#&lt;i18nswitcher&gt;}
+
+Un desplegable de los locales habilitados (los locales con `disabled: true` se ocultan) con estilos por defecto en línea. Sus elementos son enlaces, con `lang`, `hreflang` y `dir` del locale. Por defecto, hacer clic en uno establece el locale y llama al `push` del adaptador con la ruta actual localizada; una prop `switchLocale` reemplaza esa acción. Con un `localeRoute` y sin router, el navegador sigue el enlace. Escape o un clic fuera lo cierran.
+
+| Prop | Notas |
+| --- | --- |
+| `locales`, `currentLocale`, `getLocaleName` | sobrescriben los valores proporcionados |
+| `switchLocale(code)` | reemplaza el cambio integrado |
+| `localeRoute` | reemplaza `resolvePath` |
+| `customLabels` | `{ de: 'DE' }` |
+| `customWrapperStyle`, `customButtonStyle`, `customDropdownStyle`, `customItemStyle`, `customLinkStyle`, `customActiveLinkStyle`, `customDisabledLinkStyle`, `customIconStyle` | sobrescrituras de estilo |
+
+### `<I18nGroup>` {#&lt;i18ngroup&gt;}
+
+Un `<div class="i18n-group">` que pasa un `t` con prefijo a sus hijos. **No** añade prefijo a los `<I18nT>` ni a las llamadas a `t()` dentro de él; solo el `t` que transmite lleva prefijo.
+
+| Prop | Notas |
+| --- | --- |
+| `prefix` | obligatorio, p. ej. `'profile'` |
+| `groupClass` | clase adicional en el envoltorio |
+
+El `t` con prefijo llega mediante un slot con ámbito en Vue (`v-slot="{ t }"`) y mediante un hijo render-prop en React, Preact y Solid (`{({ t }) => …}`).
+
+## Claves tipadas {#typed-keys}
+
+`t()` acepta cualquier cadena. Para obtener autocompletado de tus claves, genera una declaración con el [generador de tipos](/es/integrations/types-generator). Las claves se sugieren, no se imponen, y los parámetros no están tipados.
+
+## Comparación con el módulo de Nuxt {#compared-with-the-nuxt-module}
+
+Los paquetes no tienen enrutamiento basado en archivos, ni middleware de servidor, ni cargador de traducciones: tú decides cuándo cargar el JSON (`import`, `fetch` o `@i18n-micro/node` en el servidor) y qué adaptador de router usar. La detección del locale, los meta de SEO y la generación de rutas son funciones de Nuxt; Astro tiene su propio middleware para la detección y `useLocaleHead` para el SEO.
+
+## Relacionado {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Referencia de paquetes" icon="brackets-curly" href="/es/api/packages/overview">
+
+Todas las exportaciones y firmas
+
+</Card>
+
+<Card title="Traducciones" icon="book-open" href="/es/guide/translations">
+
+La estructura de archivos que leen estos paquetes
+
+</Card>
+
+<Card title="Primeros pasos con Nuxt" icon="book-open" href="/es/guide/getting-started">
+
+</Card>
+
+</CardGroup>

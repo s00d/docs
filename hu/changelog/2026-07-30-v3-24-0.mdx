@@ -1,0 +1,66 @@
+---
+title: "v3.24.0 — Node SSR a `public/`-ból, Rollup `raw:` nélkül"
+description: "Kiadási megjegyzések: v3.24.0 — Node SSR a public/-ból, Rollup raw: nélkül"
+---
+
+**Dátum**: 2026-07-30
+
+**Verzió**: `v3.24.0`
+
+![v3.24.0 kiadás](/images/3.24.0.png)
+
+A Node production buildek többé nem ágyazzák be a fordítási payloadokat Nitro `serverAssets` / Rollup `raw:` formában (ami nagy katalógusoknál több GB-os build RSS-t jelentett). Az SSR ugyanazt a `/{apiBaseUrl}/{page}/{locale}/data.json` fát olvassa, amelyet a kliens is lekér — a `public/`-ból, `readFile` segítségével. Az Edge megtartja a Nitro-beágyazást, és ott a `mode: 'source'` az ajánlott.
+
+## Mi az újdonság? {#what’s-new}
+
+### Node: SSR a `public/<apiBaseUrl>`-ból {#node-ssr-from-public/&lt;apibaseurl&gt;}
+
+- Azok a Node presetek, amelyek a `public/`-t lemezről szolgálják ki, **nem** regisztrálnak Nitro `serverAssets`-et.
+- A payloadok a `public/<apiBaseUrl>` (alapértelmezés `_locales`) alá másolódnak `{page}/{locale}/data.json` formában.
+- Az SSR a `#i18n-internal/payload-source` → `readFile` úton tölti be őket (production útvonal a `.output/server` mellett).
+- A `translationPayloads.serverAssets: true` továbbra is „helyi SSR”-t jelent, és **kikényszeríti** a nyilvános másolatot akkor is, ha a `publicAssets` false.
+
+Playground (az előző `serverAssets`-beágyazáshoz képest): ~**1,25 GB** / ~6–7 s / `raw`=0, szemben a ~**3 GB** / ~13 s / ~170 raw chunkkal.
+
+### Edge: `serverAssets` csak szükség esetén {#edge-serverassets-only-when-needed}
+
+- Az Edge (`nitro.node === false`) továbbra is Nitro `serverAssets`-en (`assets:i18n`) keresztül ágyaz be, a `mode`-nak megfelelő elrendezéssel.
+- Az Edge **nem** kényszerít ki nyilvános másolatot — CDN/statikus kiszolgáláshoz állítsd be a `publicAssets: true` értéket.
+- Figyelmeztet Edge + `mode: 'premerged'` esetén (nagy katalógusokhoz a `mode: 'source'` ajánlott).
+
+### A `publicDir` igazodik a kliens URL-jeihez {#publicdir-aligns-with-client-urls}
+
+- A `translationPayloads.publicDir` alapértelmezése az **`apiBaseUrl`** (nem a `translationDir`).
+- Az előre összefésült nyilvános/Edge fa `{page}/{locale}/data.json`, ami megfelel a `$fetch('/_locales/...')` hívásnak.
+- A modul alapértelmezései többé nem állítják be a beágyazott `publicAssets: true` értéket (a Nuxt mély összefésülése még `mode: 'source'` esetén is kikényszerítette a nyilvános másolatot).
+
+Lásd: [Modulbeállítások — `translationPayloads`](/hu/api/module-options#translationpayloads), [Üzembe helyezés — serverless és Edge](/hu/guide/deployment#serverless-and-edge), valamint [Gyorsítótár- és tárolóarchitektúra](https://s00d.github.io/nuxt-i18n-micro/v3/api/i18n-cache-api).
+
+## Kompatibilitástörő változások {#breaking-changes}
+
+- **Nincsenek szótárak a Nuxt SSR HTML payloadban.** A `payload.data['i18n-ssr-chunks']`, a `setSsrChunk` és a `seedFromSsrChunks` **eltávolításra került**. Ugyanaz az alapértelmezett megközelítés, mint a `@nuxtjs/i18n`-nél (`experimental.preload: false`): a szerver SSR-hez memóriában tartja a fordításokat; a kliens a plugin beállítása során tölti be a `/{apiBaseUrl}/.../data.json`-t (`await switchContext`).
+- **A `prerenderRoutes` alapértelmezése `false`.** Csak akkor kapcsold be, ha a Nitrónak kell létrehoznia a handler útvonalakat, mert a `publicAssets` még nem írta ki a fát (az előre összefésült `publicAssets` már létrehozza a `{page}/{locale}/data.json`-t).
+- **A `publicDir` alapértelmezése az `apiBaseUrl`**, nem a `translationDir`. A statikus kimenet például a `public/locales/...`-ból a `public/_locales/{page}/{locale}/data.json`-ba kerül, hacsak nem állítod be explicit módon a `publicDir`-t.
+- **Az előre összefésült tárolási elrendezés** most `{page}/{locale}/data.json` (korábban `pages/{page}/{locale}.json`). Mindent, ami a régi formában olvasta a Nitro/tároló kulcsokat vagy másolta a fákat, frissíteni kell.
+- **Node-on a `serverAssets: true` többé nem jelent Nitro-beágyazást** — a nyilvános másolaton keresztüli helyi SSR-t jelenti. Valódi Rollup `raw:` beágyazás csak Edge-en marad.
+
+## Migráció {#migration}
+
+1. Távolíts el minden kódot, amely a `payload.data['i18n-ssr-chunks']`-t olvasta, vagy a `seedFromSsrChunks` / `setSsrChunk` függvényt hívta.
+2. Tisztán statikus hostokhoz: tartsd meg az alapértelmezett premerged + `publicAssets` beállítást (a fájlok a `/_locales/.../data.json` alá kerülnek), vagy állítsd be a `prerenderRoutes: true` értéket / hosztold a payloadokat CDN-en.
+3. Cloudflare / más Edge esetén: nagy katalógusoknál állítsd be a `translationPayloads: { mode: 'source' }` értéket; a `publicAssets: true`-t csak akkor add hozzá, ha statikus/CDN másolatra van szükséged.
+4. Ha a `public/<translationDir>` alatti payloadokra támaszkodtál, állítsd be a `translationPayloads.publicDir`-t, vagy irányítsd az eszközeidet a `public/<apiBaseUrl>`-re.
+
+## Javítás: a letiltott locale-ok kihagyása az előre összefésült nyilvános payloadokból {#fix-skip-disabled-locales-in-premerged-public-payloads}
+
+A `preMergeLocales` most csak az összefésülésbe átadott locale-okhoz írja ki a `{page}/{locale}/data.json` fájlt (a build idején `locale.disabled: true` beállításúak kimaradnak). Korábban a lemezen lévő minden JSON locale a `public/`-ba másolódott, így a Nitro statikus kiszolgálás 200-as kóddal szolgálta ki a letiltott locale-okat, megkerülve a handlert. A futásidejű `disabledLocales` továbbra sem tudja visszavonni a már lebuildelt fájlok közzétételét — használd a `locale.disabled` beállítást build időben, ha a `publicAssets` / Node nyilvános SSR-másolat be van kapcsolva.
+
+## Miért fontos {#why-it-matters}
+
+- A Node buildek karcsúak maradnak: nincs több GB-os Rollup `raw:` kiugrás a fordítási katalógusok miatt.
+- A nyilvános fájlok és a kliens `$fetch` URL-jei egyetlen útvonal-elrendezésen osztoznak — a statikus hosztolás külön átképezés nélkül működik.
+- Az Edge továbbra is beágyazhat kompakt `source` payloadokat anélkül, hogy duplikált nyilvános fát kényszerítene ki.
+
+A teljes változásnapló a kiadással együtt jelenik meg a [GitHubon](https://github.com/s00d/nuxt-i18n-micro/blob/main/CHANGELOG.md).
+
+---

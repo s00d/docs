@@ -1,0 +1,291 @@
+---
+title: "React dan Preact"
+description: "Terjemahan, penggantian locale, dan integrasi router untuk app React dan Preact dengan @i18n-micro/react dan @i18n-micro/preact."
+---
+
+`@i18n-micro/react` dan `@i18n-micro/preact` membungkus [runtime](/id/integrations/runtime-package) yang tidak bergantung pada framework ke dalam provider, hook `useI18n()`, dan empat komponen. Gunakan di app React atau Preact yang tidak dibangun dengan Nuxt. Kedua paket memiliki API yang sama; blok [Preact](#preact) mencantumkan beberapa perbedaannya, dan model bersamanya dijelaskan di [Framework](/id/integrations/overview).
+
+## Instalasi {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add @i18n-micro/react
+```
+
+```bash npm
+npm install @i18n-micro/react
+```
+
+```bash yarn
+yarn add @i18n-micro/react
+```
+
+</CodeGroup>
+
+Peer dependency: `react` `^18.0.0 || ^19.0.0`; `react-dom` (opsional, untuk rendering); `react-router-dom` `^6.0.0 || ^7.0.0` (opsional, hanya untuk `@i18n-micro/react/router`). Diuji pada React 19.3 dan 18.3, React Router 7.18 dan 6.30.
+
+## Penyiapan {#setup}
+
+```tsx
+// src/main.tsx
+import { createRoot } from 'react-dom/client'
+import { createI18n, I18nProvider } from '@i18n-micro/react'
+import App from './App'
+import en from './locales/en.json'
+
+const locales = [
+  { code: 'en', iso: 'en-US', displayName: 'English' },
+  { code: 'de', iso: 'de-DE', displayName: 'Deutsch' },
+]
+
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', messages: { en } })
+
+createRoot(document.getElementById('root')!).render(
+  <I18nProvider i18n={i18n} locales={locales} defaultLocale="en">
+    <App />
+  </I18nProvider>,
+)
+```
+
+<Warning>
+
+Buat instance sekali saja, di tingkat modul atau di initializer `useState`, jangan pernah di body komponen.
+
+</Warning>
+
+`<I18nProvider>` menerima `i18n`, `locales`, `defaultLocale`, dan `routingStrategy`:
+
+- Prop yang tidak diberikan mempertahankan nilai provider luar, termasuk instance-nya.
+- Jika sama sekali tidak ada instance, provider membuatnya dari opsi `createI18n` yang diberikan di sampingnya, sehingga props tetap berupa data biasa: `<I18nProvider locale="de" messages={messages}>`.
+- Prop `locale` baru membuat instance baru dengan `messages` dari render tersebut. Instance semacam itu hidup di dalam komponen: jika sesuatu di atasnya melakukan suspend saat mount, React membuangnya, beserta apa pun yang telah ditambahkan ke dalamnya.
+
+Semua opsi `createI18n`, termasuk `routeMessages`, ada di [instance](/id/integrations/overview#the-instance).
+
+## Menerjemahkan {#translate}
+
+```tsx
+import { useI18n } from '@i18n-micro/react'
+
+export function Greeting() {
+  const { t, tc, tn } = useI18n()
+  return (
+    <>
+      <h1>{t('greeting', { name: 'Ada' })}</h1> {/* Hello, Ada! */}
+      <p>{tc('apples', 3)}</p> {/* 3 apples */}
+      <p>{tn(1234.5)}</p>
+    </>
+  )
+}
+```
+
+`useI18n()` mengembalikan:
+
+| Grup | Anggota |
+| --- | --- |
+| Terjemahan | `t`, `ts`, `tc`, `tn`, `td`, `tdr`, `has` |
+| Locale dan route | `locale`, `fallbackLocale`, `currentRoute`, `setLocale`, `setRoute`, `getRoute`, `getLocales`, `defaultLocale()`, `getLocaleName` |
+| Routing | `switchLocale`, `localePath`, `localeRoute` |
+| Kamus | `addTranslations`, `addRouteTranslations`, `clearCache` |
+
+- Komponen dirender ulang ketika locale, route, atau kamus yang dapat dibaca berubah, dan ketika provider menerima objek `locales` atau `routingStrategy` baru. Kamus dari locale yang bukan locale aktif maupun fallback tidak memicu render.
+- `t` dan metode terjemahan lainnya hanya berubah bersama store, sehingga aman digunakan di `memo` dan dependensi effect.
+
+`useT` adalah satu string sebagai nilai. Komponen hanya dirender ketika string tersebut berubah, apa pun yang terjadi pada props provider lainnya; `<I18nT>` juga tidak bergantung pada props tersebut:
+
+```tsx
+const title = useT('page.title')
+```
+
+Muat kamus tambahan kapan saja:
+
+```tsx
+const { addTranslations, addRouteTranslations, setRoute } = useI18n()
+
+useEffect(() => {
+  import('./locales/de.json').then((m) => addTranslations('de', m.default))
+  addRouteTranslations('en', 'about', { title: 'About us' })
+  setRoute('about') // t('title') now reads the 'about' dictionary first
+}, [])
+```
+
+Instance itu sendiri juga memiliki `loadFromUrl(url, { locale, routeName })` untuk JSON melalui `fetch`.
+
+## Mengganti locale {#switch-locale}
+
+```tsx
+const { setLocale, switchLocale } = useI18n()
+
+setLocale('de') // only the locale
+switchLocale('de') // the locale, then the adapter's push to the localized current path
+```
+
+Mengganti locale tidak memuat apa pun; tambahkan kamus locale tersebut terlebih dahulu. Penulisan ke store bersifat sinkron bagi React, bahkan di dalam `startTransition`, sehingga komponen yang melakukan suspend karena kamus yang hilang akan menampilkan fallback-nya. `useLocaleSwitch` memuat terlebih dahulu dan mempertahankan UI lama sampai kamus tersedia:
+
+```tsx
+const [switchTo, pending] = useLocaleSwitch((locale) => i18n.loadFromUrl(`/locales/${locale}.json`, { locale }))
+
+<button disabled={pending} onClick={() => switchTo('de')}>Deutsch</button>
+```
+
+Pemanggilan terakhir yang menang. Pemuatan yang gagal akan reject dan membiarkan locale seperti semula.
+
+`<I18nGroup>` meneruskan `t` berprefiks ke child berupa render-prop. `<I18nT>` dan `t()` di dalamnya tidak diberi prefiks:
+
+```tsx
+<I18nGroup prefix="profile">{({ t }) => <h2>{t('title')}</h2> /* profile.title */}</I18nGroup>
+```
+
+## Routing {#routing}
+
+Adapter React Router berada di subpath sehingga entry utama tidak pernah mengimpor `react-router-dom`. Adapter ini membutuhkan `useLocation()` dan `useNavigate()`, jadi buatlah di dalam komponen di bawah router:
+
+```tsx
+// src/App.tsx
+import { useMemo } from 'react'
+import { BrowserRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
+import { I18nLink, I18nProvider, I18nSwitcher } from '@i18n-micro/react'
+import { createReactRouterAdapter } from '@i18n-micro/react/router'
+import { i18n, locales } from './i18n'
+import { About, Home } from './pages'
+
+function Localized() {
+  const location = useLocation()
+  const navigate = useNavigate()
+  // memoized: a new object on every render re-renders every `useI18n()` consumer
+  const routingStrategy = useMemo(() => createReactRouterAdapter(locales, 'en', location, navigate), [location, navigate])
+  return (
+    <I18nProvider i18n={i18n} locales={locales} defaultLocale="en" routingStrategy={routingStrategy}>
+      <I18nLink to="/about">About</I18nLink>
+      <I18nSwitcher />
+      <Routes>
+        <Route path="/:locale?" element={<Home />} />
+        <Route path="/:locale?/about" element={<About />} />
+      </Routes>
+    </I18nProvider>
+  )
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <Localized />
+    </BrowserRouter>
+  )
+}
+```
+
+Adapter memberi prefiks pada setiap locale kecuali default (`/about`, `/de/about`) dan merender `<I18nLink>` sebagai `<Link>` milik React Router. Atur locale dari URL sendiri (misalnya dari `useParams().locale` di dalam effect). Untuk router lain, tulis adapter dengan `getCurrentPath`, `push`, dan `replace` (semuanya wajib) — lihat [Adapter router](/id/integrations/overview#router-adapter).
+
+## SSR {#ssr}
+
+`renderToString` berfungsi: `useI18n()` memiliki snapshot server. Buat satu instance per request dan tambahkan kamusnya sebelum Anda merender, agar request dengan locale berbeda tidak berbagi state, atau teruskan data biasa ke provider.
+
+### Hidrasi {#hydration}
+
+Angka, bentuk jamak, dan teks dihidrasi apa adanya. Tanggal bergantung pada zona waktu dan tanggal relatif bergantung pada jam: atur `timeZone` di server dan di browser, dan untuk `tdr` berikan waktu server ke browser dengan `now`. `<I18nT>` dengan `date` atau `relativeDate` mengatur `suppressHydrationWarning`, sehingga perbedaan tidak menggagalkan hidrasi, tetapi teks dari server tetap ada sampai teksnya berubah. Hal itu hanya berlaku satu tingkat: `children` yang membungkus terjemahan dalam sebuah elemen tetap gagal jika ada perbedaan, jadi berikan `timeZone` yang sama untuk itu.
+
+### Server Components {#server-components}
+
+Paket ini menandai kode klien-nya dengan `'use client'`. `@i18n-micro/react/server` memiliki `createI18n` dan `I18nT` tanpa hook yang menerima instance sebagai prop, sehingga teks tidak masuk ke bundle klien. Di bawah kondisi `react-server`, seperti di app router Next.js, entry utama juga di-resolve ke sana, tetapi TypeScript tidak mengetahuinya secara default: impor dari `/server`. `@i18n-micro/react/client` selalu memberikan entry klien.
+
+```tsx
+// app/[locale]/layout.tsx: a server component
+import { cache } from 'react'
+import { createI18n, I18nT } from '@i18n-micro/react/server'
+import { I18nProvider } from '@i18n-micro/react/client'
+import { loadMessages } from './messages'
+
+const getI18n = cache(async (locale: string) => createI18n({ locale, messages: await loadMessages(locale) }))
+
+export default async function Layout({ params, children }) {
+  const { locale } = await params
+  const i18n = await getI18n(locale)
+  return (
+    <I18nProvider locale={locale} messages={{ [locale]: i18n.resolveTranslations() }}>
+      <h1>
+        <I18nT i18n={i18n} keypath="title" />
+      </h1>
+      {children}
+    </I18nProvider>
+  )
+}
+```
+
+Dirender melalui `react-server-dom-webpack`; app Next.js itu sendiri belum pernah dijalankan dengan ini.
+
+## API {#api}
+
+| Ekspor | Entry |
+| --- | --- |
+| `createI18n`, `ReactI18n`, `I18nProvider`, `useI18n`, `useT`, `useLocaleSwitch` | `@i18n-micro/react` |
+| `I18nT`, `I18nLink`, `I18nSwitcher`, `I18nGroup` | `@i18n-micro/react` |
+| `I18nContext`, `I18nConfigContext`, `useI18nContext`, `useI18nLocales`, `useI18nDefaultLocale`, `useI18nRouter` | `@i18n-micro/react` |
+| `defaultPlural`, `FormatService`, `interpolate` | `@i18n-micro/react` |
+| Tipe: `I18nRoutingStrategy`, `ReactI18nOptions`, `I18nProviderProps`, `UseI18nReturn`, props komponen, `TranslationKey`, `Locale`, `Translations`, `PluralFunc` | `@i18n-micro/react` |
+| `createReactRouterAdapter` | `@i18n-micro/react/router` |
+| `createI18n`, `ReactI18n`, `I18nT` (menerima `i18n`) | `@i18n-micro/react/server` |
+
+Signature lengkap: [referensi React](/id/api/packages/react).
+
+## Preact {#preact}
+
+`@i18n-micro/preact` dibangun dari source yang sama, di atas Preact itu sendiri, tanpa `preact/compat`: instance, provider, hook, dan komponen yang sama. Perbedaannya:
+
+| | React | Preact |
+| --- | --- | --- |
+| Peer dependency | `react` (+ `react-router-dom` opsional) | `preact` `^10.0.0 \|\| ^11.0.0`, diuji pada 10.29 dan 11.1 |
+| Class instance | `ReactI18n` | `PreactI18n` |
+| Adapter router | `createReactRouterAdapter` dari `/router` | `createBrowserHistoryAdapter(locales, defaultLocale, ssrUrl?)` dari `/router` |
+| Render ulang | `useSyncExternalStore` | subscription layout-effect yang memeriksa ulang store |
+| Server Components | `/server`, `/client` | tidak ada |
+
+`createBrowserHistoryAdapter` berfungsi dengan router apa pun berbasis History API (wouter, preact-router): `push` dan `replace` memanggil `history.pushState` / `replaceState` dan men-dispatch `popstate`, dan `<I18nLink>` merender `<a>` biasa yang bernavigasi melalui `push`. Server tidak memiliki address bar: teruskan URL request sebagai `ssrUrl`, atau link dan switcher akan dirender seperti di `/`. Di browser, address bar yang menang.
+
+```tsx
+// src/main.tsx
+import { render } from 'preact'
+import { createI18n, I18nProvider } from '@i18n-micro/preact'
+import { createBrowserHistoryAdapter } from '@i18n-micro/preact/router'
+import { App } from './App'
+import en from './locales/en.json'
+
+const locales = [
+  { code: 'en', iso: 'en-US', displayName: 'English' },
+  { code: 'de', iso: 'de-DE', displayName: 'Deutsch' },
+]
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', messages: { en } })
+
+render(
+  <I18nProvider i18n={i18n} locales={locales} defaultLocale="en" routingStrategy={createBrowserHistoryAdapter(locales, 'en')}>
+    <App />
+  </I18nProvider>,
+  document.getElementById('app')!,
+)
+```
+
+Signature lengkap: [referensi Preact](/id/api/packages/preact).
+
+## Terkait {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Framework" icon="book-open" href="/id/integrations/overview">
+
+Opsi instance, adapter router, props komponen
+
+</Card>
+
+<Card title="Runtime" icon="book-open" href="/id/integrations/runtime-package">
+
+Instance yang menjadi dasar paket-paket ini
+
+</Card>
+
+<Card title="Generator tipe" icon="book-open" href="/id/integrations/types-generator">
+
+Autocomplete untuk key
+
+</Card>
+
+</CardGroup>

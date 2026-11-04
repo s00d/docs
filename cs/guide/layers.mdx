@@ -1,0 +1,128 @@
+---
+title: "Vrstvy a domény"
+description: "Sdílejte konfiguraci i18n a soubory překladů přes vrstvy Nuxtu a obsluhujte locale na vlastních doménách."
+---
+
+Vrstva Nuxtu může nést konfiguraci i18n a složku `locales/` pro několik aplikací a každá aplikace si přidá nebo přepíše, co potřebuje. Tato stránka ukazuje, jak na to, a jak jeden build obsluhuje několik domén.
+
+## Sdílení konfigurace a překladů {#share-config-and-translations}
+
+```ts
+// base/nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    locales: [
+      { code: 'en', iso: 'en-US' },
+      { code: 'de', iso: 'de-DE' },
+      { code: 'fr', iso: 'fr-FR' },
+    ],
+    defaultLocale: 'en',
+  },
+})
+```
+
+```ts
+// shop/nuxt.config.ts
+export default defineNuxtConfig({
+  extends: ['../base'], // a layer directory or package, not a nuxt.config file
+  i18n: {
+    locales: [
+      { code: 'es', iso: 'es-ES' }, // added
+      { code: 'fr', disabled: true }, // the base layer's fr, switched off here
+    ],
+  },
+})
+```
+
+- **Konfigurace:** skalární možnosti v aplikaci nahrazují ty z vrstvy. Pole `locales` ze všech vrstev se spojí a položky se stejným `code` se sloučí do jedné, přičemž vyhrávají pole aplikace; aplikace tak může přidat locale nebo nastavit u zděděného pole jako `disabled: true`.
+- **Překlady:** složky `locales/` všech vrstev se slučují klíč po klíči, nejdřív vrstva a nakonec aplikace, takže klíč v `shop/locales/en.json` přepíše stejný klíč v `base/locales/en.json`. Soubory stránek (`locales/pages/<page>/`) se slučují stejně.
+- **Stránky:** `$defineI18nRoute` se čte ze stránek všech vrstev.
+
+Chcete-li sloučit složky, které nejsou součástí vrstvy, uveďte je v [`additionalTranslationDirs`](/cs/api/module-options#additionaltranslationdirs).
+
+## Více domén {#multiple-domains}
+
+Jeden build obsluhuje všechny domény. Uveďte každé locale s jeho doménou; `baseDefault` z něj udělá výchozí locale daného hostitele:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    strategy: 'prefix_except_default',
+    defaultLocale: 'en',
+    locales: [
+      { code: 'en', iso: 'en-US', baseUrl: 'https://example.com', baseDefault: true },
+      { code: 'de', iso: 'de-DE', baseUrl: 'https://example.de', baseDefault: true },
+      { code: 'nl', iso: 'nl-NL', baseUrl: 'https://example.de' },
+      { code: 'fr', iso: 'fr-FR' },
+    ],
+  },
+})
+```
+
+Nasměrujte obě domény na stejný server. O zbytku rozhoduje hostitel požadavku:
+
+- **Výchozí:** locale hostitele s `baseDefault`. Pokud žádné není, výchozí locale buildu, pokud ho hostitel obsluhuje, jinak první locale hostitele.
+- **Obsluhovaná locale:** locale daného hostitele plus každé locale bez `baseUrl`. Na `example.de` jsou to `de`, `nl` a `fr`.
+- **Locale jiných domén** jsou cíle odkazů. `$localePath`, `$localeRoute`, `$switchLocalePath`, `<i18n-switcher>` a `hreflang` pro ně vracejí absolutní URL na jejich `baseUrl` a `$switchLocale` tam naviguje. Na tomto hostiteli vracejí jejich URL 404 a cookie ani `Accept-Language` je nemohou vybrat.
+- **Odkaz na jinou doménu** jde přes `$localePath` nebo `<i18n-link>`: `<NuxtLink :to="$localePath('/contact', 'de')">`, `<i18n-link :to="$localeRoute('/contact', 'de')">`. Router nepřijímá absolutní objekt, takže `<NuxtLink :to="$localeRoute(...)">` a `router.push($localeRoute(...))` zůstanou na tomto originu. Na `localhost` nebo na náhledovém hostiteli je takovým odkazem každé locale s `baseUrl`, i to aktuální. V kódu použijte `navigateTo($localePath('/contact', 'de'), { external: true })` nebo `$switchRoute`.
+- **Jakýkoli jiný hostitel** dostane konfiguraci buildu, kde je každé locale s `baseUrl` cílem odkazu. Nic z požadavku se nepřebírá: canonical a `hreflang` používají `metaBaseUrl`, jinak `baseUrl` výchozího locale buildu (výchozí locale bez `baseUrl` potřebuje `metaBaseUrl` nebo `site.url`, viz [SEO](/cs/guide/seo#set-the-public-origin)).
+- **Soubory payloadu** v `public/` jsou statické: jakýkoli hostitel vrátí soubor jakéhokoli locale. [Generate](/cs/guide/deployment#static-site-(nuxi-generate)) pro jednotlivé domény publikuje jen soubory dané domény.
+
+`example.de` při jednotlivých strategiích, s `de: '/kontakt'` jako vlastní cestou pro `contact`:
+
+| Strategie | `/` | Stránka výchozího locale | Ostatní URL |
+| --- | --- | --- | --- |
+| `prefix_except_default` | `de` | `/kontakt` | `/de/kontakt` a `/en/contact` vracejí 404, `/contact` přesměruje na `/kontakt` |
+| `prefix_and_default` | `de` | `/kontakt` a `/de/kontakt`, odkazy používají `/kontakt` | `/en/contact` a `/contact` vracejí 404 |
+| `prefix` | přesměruje na `/de` | `/de/kontakt` | `/kontakt` přesměruje na `/de/kontakt`, `/en/contact` vrací 404 |
+| `no_prefix` | `de` | `/kontakt` | vlastní cesta locale na jiné doméně vrací 404 |
+
+Při `prefix` si odkaz z jiné domény ponechá prefix, protože URL bez prefixu by jen přesměrovala. Při `no_prefix` odkaz na jinou doménu skončí na výchozím locale daného hostitele: URL nemůže určit jiné.
+
+Co je dobré vědět:
+
+- **Za proxy** se hostitel bere z `Host`. Pokud proxy místo toho dává veřejného hostitele do `X-Forwarded-Host`, nastavte [`trustForwardedHost`](/cs/api/module-options#trustforwardedhost), a to jen tehdy, když proxy tuto hlavičku přepisuje. Proxy, která neposílá ani jednu, nemůže obsluhovat doménový build. Viz [Za proxy nebo CDN](/cs/guide/deployment#behind-a-proxy-or-cdn).
+- **`app.baseURL`** patří také do `baseUrl`: `baseUrl: 'https://example.de/shop'` s `app.baseURL: '/shop'`.
+- **Hostitelé se porovnávají přesně.** `www.example.de` je jiný hostitel: přesměrujte ho na edge, nebo nastavte tuto `baseUrl` u locale. Na jedno locale připadá jen jeden hostitel.
+- **Cache musí rozlišovat podle hostitele.** CDN to běžně dělá. Cache rout v Nitru rozlišuje podle cesty, takže v doménovém buildu modul přidá `host` do `cache.varies` každého pravidla `swr` a `cache` a s `trustForwardedHost` i `x-forwarded-host`. Pravidlo s `cache: false` zůstane, jak je napsané. `isr` je cache platformy: ověřte, že rozlišuje podle hostitele.
+- **Vlastní cesty dvou výchozích locale hostitelů nesmí kolidovat.** Záznamy bez prefixu sdílejí jeden router, takže `/x` nemůže být jedna stránka na `example.de` a jiná na `example.com`.
+- **Prerenderované stránky:** pravidlo routy `prerender: true` se v `nuxt build` vykreslí jednou, bez hostitele, a soubor odpovídá všem doménám. Stránky, které se liší podle domény, nechte na serveru, nebo [generujte pro každou doménu](/cs/guide/deployment#static-site-(nuxi-generate)).
+- **`noPrefixRedirect`** se řídí locale hostitele a návštěvníka, na každém hostiteli.
+- **`hashMode`:** hostitel vybírá vykreslení jako výše, odkazy na jinou doménu nesou routu v hashi (`https://example.com/#/contact`).
+- **`ssr: false`:** prohlížeč čte doménu z `location.host`, takže i hostitel bez serveru se správně rozpozná.
+- **[Runtime přepisy](/cs/guide/runtime-overrides)** se uplatní jako první. Runtime `disabledLocales` platí na každém hostiteli s jednou výjimkou: při `prefix_except_default` a `prefix_and_default` zůstává výchozí locale hostitele na jeho hostiteli povolené, protože jeho stránky jsou záznamy bez prefixu. Při `prefix` a `no_prefix` hostitel přejde na další locale, které obsluhuje. Runtime `defaultLocale` platí jen pro neznámé hostitele.
+
+Pro [statický web](/cs/guide/deployment#static-site-(nuxi-generate)) generujte jednou pro každou doménu.
+
+### Jedna aplikace na doménu {#one-app-per-domain}
+
+Sdílená vrstva s jednou malou aplikací pro každou doménu funguje i nadále, pokud domény potřebují různé stránky nebo moduly. Každá aplikace si nad stejným seznamem `locales` nastaví vlastní `defaultLocale`. Locale na jiné doméně vrací v této aplikaci 404, jak je popsáno výše.
+
+### Volba locale v kódu {#choosing-the-locale-in-code}
+
+Pro jedinou instanci, která odpovídá všem doménám s vlastním originem požadavku v SEO tazích, viz [SEO](/cs/guide/seo#set-the-public-origin); pro volbu locale podle hostitele v kódu viz [Vlastní detekce locale](/cs/guide/custom-auto-detect).
+
+## Související {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Soubory překladů" icon="book-open" href="/cs/guide/translations">
+
+</Card>
+
+<Card title="Runtime přepisy" icon="book-open" href="/cs/guide/runtime-overrides">
+
+</Card>
+
+<Card title="SEO" icon="book-open" href="/cs/guide/seo">
+
+</Card>
+
+<Card title="Vrstvy Nuxtu" icon="arrow-up-right-from-square" href="https://nuxt.com/docs/getting-started/layers">
+
+</Card>
+
+</CardGroup>

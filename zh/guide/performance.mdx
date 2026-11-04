@@ -1,0 +1,259 @@
+---
+title: "性能调优"
+description: "影响内存、载荷大小和缓存的设置，以及如何衡量你的应用实际发送的内容。"
+---
+
+默认值是针对典型应用调优的：每个页面和 locale 一个 JSON 载荷，翻译不放入 HTML，服务端缓存有上限。本页列出了在目录很大、服务器内存受限或载荷来自其他主机时值得修改的少数几个设置。与 `@nuxtjs/i18n` 及纯 Nuxt 的实测对比数据，请参见[基准测试](/zh/guide/performance-results)。
+
+## 默认值已经做了什么 {#what-the-defaults-already-do}
+
+- **每个页面一个载荷。** 构建会将根键、页面键和回退 locale 的键合并到 `/_locales/<page>/<locale>/data.json` 中，因此一个页面只加载一个文件，`$t` 只需一次查找。
+- **HTML 中不包含字典。** SSR 将翻译保留在服务器内存中；浏览器获取载荷，而不是从 `__NUXT_DATA__` 中解析。
+- **浏览器缓存。** `?v=` 只在翻译变化时才改变，因此对于未涉及翻译的部署，浏览器会保留其载荷。主机上的静态副本在 60 秒内保持新鲜，之后重新验证：重复加载只需等待一次 `304`。服务端路由以 `immutable` 响应，有效期一年（[部署](/zh/guide/deployment#cache-headers-and-datebuild)）。
+- **有上限的服务器内存。** 服务器默认最多缓存 1000 个载荷，并淘汰最近最少使用的条目。
+
+## 按页面拆分翻译 {#split-translations-by-page}
+
+只在某个页面上使用的键应放在 `locales/pages/<page>/<locale>.json` 中，而不是根文件中：根键是每个页面载荷的一部分。参见[翻译文件](/zh/guide/translations)。
+
+有两个设置会改变这种拆分：
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    // pages that show the same keys share one payload: /de/products/123 loads the products payload
+    routesLocaleLinks: { 'products-id': 'products' },
+    // or: no page files at all, every page loads only the root dictionary
+    // disablePageLocales: true,
+  },
+})
+```
+
+[`routesLocaleLinks`](/zh/api/module-options#routeslocalelinks) 可以减少相关路由的重复载荷。[`disablePageLocales`](/zh/api/module-options#disablepagelocales) 适用于每个 locale 一个字典更简单的小型应用。
+
+## 服务端缓存 {#server-caches}
+
+| 设置 | 默认值 | 作用 |
+| --- | --- | --- |
+| [`cacheMaxSize`](/zh/api/module-options#cachemaxsize) | `0` | 载荷缓存中的最大条目数。`0` = 浏览器中不限制，服务器上为 1000。 |
+| [`cacheTtl`](/zh/api/module-options#cachettl) | `0` | 缓存条目在重新加载前保留的秒数。`0` = 永不重新加载；当载荷来自 `apiBaseServerHost` 且会在不重新部署的情况下变化时设置此项。 |
+| `serverTranslationPreload` | `false` | 在 Nitro 中间件中为每个页面请求加载 `index` 载荷，以便服务端辅助函数和首页复用它。 |
+
+在页面 × locale 数量很多的小型实例上，请调低 `cacheMaxSize`。本地编辑的翻译永远不需要 TTL：开发环境实时读取文件，生产环境的载荷只随部署而变化。
+
+## Node 服务器上的内存 {#memory-on-a-node-server}
+
+在持续负载下，Node 服务器的内存占用可能达到其存活堆的约 12 倍并保持在该水平。在每页 10 万个键的压力测试中，90 MB 的存活堆对应约 1.1 GB 的 RSS。这不是内存泄漏。在一次超大的 GC 周期之后，V8 会提高其堆上限，并在负载持续期间将释放的页保留在池中以供复用。负载停止约 8 秒后，池会被清空，RSS 降至约 160 MB。`global.gc()` 不会归还这部分内存。不使用该模块的纯 Nuxt 也是如此，只是按其更小的堆等比缩小。
+
+这会占用余量：如果内存限制低于该水平且没有设置堆上限，进程可能会被杀死。请设置一个适合你的限制、且远高于存活堆的上限：
+
+```bash
+NODE_OPTIONS=--max-old-space-size=512 node .output/server/index.mjs
+```
+
+| 10 万个键，12 个 locale，5 到 30 分钟的负载 | 默认 | `--max-old-space-size=512` |
+| --- | --- | --- |
+| 负载下的 RSS | 约 1,150 MB | 254-287 MB |
+| 每秒请求数 | 624 | 517-572 |
+
+因此，该上限以 8% 到 10% 的吞吐量换取内存。普通规模的目录堆更小，增幅也更小。这些测试运行在 macOS 上的 Node 22 中，而非容器内。
+
+## 解析时间与 `dir` {#parse-time-and-dir}
+
+在 locale 上设置 `dir: 'auto'` 会让浏览器在解析时根据内容推断文本方向。在 Chromium 中，20,000 个元素时，使用 `dir="auto"` 的 DOMContentLoaded 约为 1.1 秒，不使用时为 0.1 秒；5,000 个元素时约为 130 毫秒对比 45 毫秒。请不要设置 `dir`，或将其设为 `ltr` 或 `rtl`（[文本方向](/zh/guide/seo#text-direction)）。
+
+## 多个实例共享缓存 {#shared-cache-for-several-instances}
+
+当同一构建运行多个实例时，[`cacheStorage`](/zh/api/module-options#other) 让它们在任意 Nitro 存储中共享一个字典缓存，使用你的应用在 `nitro.storage` 中配置的连接。模块不会添加任何连接器或依赖。
+
+**它是缓存，而不是数据源。** 翻译来自嵌入的或 public 载荷，或来自 `apiBaseServerHost`。只有来自数据源的内容才会被写入，并且键中包含构建信息，因此你手动填充的存储不会被读取。如果要从 KV 或数据库提供翻译，请在 `apiBaseServerHost` 处放置一个读取它们的小型路由。
+
+**何时有帮助。** 仅在使用远程 `apiBaseServerHost` 时。三个实例遍历 39 个字典，不使用它时向主机发出 117 次请求，使用后为 48 次。当文件在磁盘上时，命中存储并不比读取文件更快：首次遍历 12 个页面时，不使用该选项耗时 280-296 毫秒，而使用已填充的 Redis 耗时 308-325 毫秒，因此请不要设置它。在嵌入字典的预设上，如果没有主机，它不起任何作用，构建也会提示这一点。
+
+冷字典、单个客户端、每项遍历一次，因此数据较为粗略，且大部分时间是到主机的距离：
+
+| 存储 | 从主机获取 | 从存储获取 |
+| --- | --- | --- |
+| Cloudflare KV | 约 300 毫秒 | 约 110 毫秒 |
+| D1 | 约 230 毫秒 | 约 115 毫秒 |
+| Deno KV | 约 430 毫秒 | 约 100 毫秒 |
+| Upstash，Vercel serverless | 约 445 毫秒 | 约 245 毫秒 |
+| Upstash，Vercel Edge | 约 505 毫秒 | 约 235 毫秒 |
+
+### Redis {#redis}
+
+需要在项目中安装 `ioredis`。
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      redis: { driver: 'redis', url: process.env.REDIS_URL },
+    },
+  },
+  i18n: {
+    cacheStorage: 'redis', // the mount name
+    apiBaseServerHost: 'https://translations.internal',
+    cacheTtl: 300,
+  },
+})
+```
+
+### Vercel 和 Vercel Edge 上的 Upstash {#upstash-on-vercel-and-vercel-edge}
+
+两者都使用 `upstash` 驱动：它通过 REST 通信，而 `redis` 驱动需要 TCP。它需要在项目中安装 `@upstash/redis`，并从环境变量中读取 `UPSTASH_REDIS_REST_URL` 和 `UPSTASH_REDIS_REST_TOKEN`。
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      upstash: { driver: 'upstash' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'upstash',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+### Cloudflare KV {#cloudflare-kv}
+
+将一个命名空间以 `I18N_KV` 绑定到 Worker（在其 wrangler 配置的 `kv_namespaces` 中）。
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      kv: { driver: 'cloudflare-kv-binding', binding: 'I18N_KV' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'kv',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+如果主机是同一账户下的另一个 Worker，则需要 `global_fetch_strictly_public` 兼容性标志，否则请求无法到达它。
+
+### Cloudflare D1 {#cloudflare-d1}
+
+`nitro.storage` 无法容纳数据库对象，因此需要由一个 Nitro 插件挂载驱动。挂载在首次使用时才会检查，所以这样做已经足够早。将数据库以 `I18N_DB` 绑定（`d1_databases`），并在项目中安装 `unstorage`。
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    experimental: { database: true },
+    database: {
+      default: { connector: 'cloudflare-d1', options: { bindingName: 'I18N_DB' } },
+    },
+  },
+  i18n: {
+    cacheStorage: 'd1',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+```ts
+// server/plugins/i18n-storage.ts
+import dbDriver from 'unstorage/drivers/db0'
+
+export default defineNitroPlugin(() => {
+  useStorage().mount('d1', dbDriver({ database: useDatabase() }))
+})
+```
+
+`db0` 驱动被标记为实验性，并且会忽略 TTL：旧构建的行会一直保留，直到你删除它们。
+
+### Deno KV {#deno-kv}
+
+在 Deno Deploy 上，创建一个数据库（`deno deploy database provision <name> --kind denokv`），将其分配给应用（`deno deploy database assign`），然后使用该驱动：
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      kv: { driver: 'deno-kv' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'kv',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+### 工作方式 {#how-it-behaves}
+
+字典会先在实例自身的缓存中查找，然后在共享存储中查找，最后从其数据源获取。实例自身的缓存仍然保留，因为 `$t` 是同步的，需要树位于内存中：这只是区分了由谁获取、由谁提供，并不能节省内存。
+
+- **由谁获取。** 使用远程主机时，每个字典只需从后端获取一次，而不是每个实例获取一次。同一时刻未命中的多个实例会各自获取，因为没有锁。
+- **没有自身字典的页面**不会被存储，这样虚构的页面名称就无法增加键。每个实例会从主机获取一次这类页面；在 isolate 不断创建和销毁的 Workers 上，这会形成持续的少量请求。
+- **主机不可用时。** 已存储字典的页面可以正常工作。没有字典的页面会使用已存储的根字典渲染，其自身的键以原始形式显示，并返回[一个不会被任何缓存保留的 `503`](/zh/guide/deployment#when-a-dictionary-cannot-be-read)；在主机恢复之前，`/_locales` 会对其返回 `503`。对于无法读取的字典，`useTranslationServerMiddleware` 会返回键本身。
+- **主机**在运行时为 `NUXT_I18N_APP_BASE_SERVER_HOST`，否则为构建时的 `apiBaseServerHost`，与不使用该选项时相同。在嵌入字典的预设上（Cloudflare、Vercel、Netlify，参见[部署](/zh/guide/deployment#serverless-and-edge)），只有存在主机时该层才会生效：数据已经在包中，而 KV 中的副本只会把内存里已有的内容变成一次网络读取。
+- **键**的格式为 `i18n-micro:<buildId>~<dateBuild>~<fallbackLocale>~<host>:<locale>:<page>`，因此滚动部署中的两个构建永远不会读取对方的数据，同一产物的两个后端也不会。每个实例必须来自同一个构建（同一个产物，或固定的 Nuxt [`buildId`](https://nuxt.com/docs/api/nuxt-config#buildid)）；分别构建的实例只是不会共享。如果固定了 `buildId` 且 `dateBuild: 0`，两个不同的构建确实会共享键。只会查找已启用的 locale，名称超过 200 个字符的页面会跳过该层。
+- **存储哪些内容。** 字典在写入前会与根字典（`__root`）进行比较，只有当它包含所有根键且与根字典不同时才会写入。因此，以根字典响应的虚构页面不会增加键，页面上返回 200 的错误响应体也不会。每个实例会从数据源读取一次这类页面。主机必须以根字典、空对象或 404 响应未知页面，并提供 `__root`。没有 `__root` 的主机，或提供不含根键的页面的主机，不会共享任何内容。如果主机对 `__root` 本身返回格式正确的错误，该错误会被存储：当后端可能出现这种情况时，请将 `cacheTtl` 设得短一些。
+- **过期。** 条目在写入后 `cacheTtl` 秒过期；当 `cacheTtl` 为 `0` 时则在一天后过期，因此旧构建的键不会堆积。一个值还可能在实例自身的缓存中再保留一个 `cacheTtl`，并在渲染的块缓存中再保留一个：后端变更会在三倍 `cacheTtl` 内生效。不支持过期的驱动（`fs`）会保留旧键，直到你删除它们。
+- **存储失败时**页面不会失败。一次读取最多可以耗时 1 秒，这足以覆盖连接握手以及 Cloudflare KV 中在该位置尚为冷数据的键。失败之后，限制变为 250 毫秒，直到存储再次响应。连续三次失败会将该层关闭 5 秒。在关闭期间以及读取刚刚失败时，不会写入任何内容。写入失败不会关闭任何东西，因此只读副本可以继续提供读取。响应时间超过这些限制的存储视为失败：即未命中，字典改从其数据源获取。使用 ioredis 时，这会从每条命令约 400 毫秒开始出现，因为它的握手需要三次往返。模块每分钟记录一条警告；ioredis 还会额外打印它自己的错误。不是字典的值视为未命中并会被覆盖。未知的挂载名称会在首次使用时警告一次；之后应用在没有该层的情况下运行。
+- **数据源失败时**不会保留失败结果。获取失败或无法读取的文件不会进入任何缓存，无论是该缓存还是实例自身的缓存，下一个请求会重新读取。参见[部署](/zh/guide/deployment#when-a-dictionary-cannot-be-read)。
+- **在开发环境和预渲染中关闭**，因为它们读取自己的文件，不应依赖你的生产 Redis。
+- **失效。** 没有清除调用：新构建使用新的键。要立即刷新正在运行的构建，请从存储中删除 `i18n-micro:` 键并重启实例。`clearCache` 和 HMR 只影响进程状态。
+- 运行时变更（`$mergeTranslations`、`$defineI18nRoute`）只保留在产生它们的渲染或浏览器中，永远不会写入存储。
+
+## 载荷大小 {#payload-size}
+
+当载荷输出超过 `translationPayloads.warnFileCount`（500 个文件）或 `warnSizeBytes`（10 MB）时，构建会发出警告。出现这种情况时：
+
+- 将仅页面使用的键移出根文件；
+- 关联显示相同键的路由（`routesLocaleLinks`）；
+- 在 serverless 或 Edge 上，使用 `translationPayloads.mode: 'source'`，使服务端包嵌入紧凑的源文件，而不是每个页面 × locale 的载荷（[部署](/zh/guide/deployment#serverless-and-edge)）。Edge 构建在超过平台限制时会自行发出警告（[包大小限制](/zh/guide/deployment#bundle-limits-on-edge)）；
+- 启用 `nitro.compressPublicAssets`，为静态载荷生成 `.gz` / `.br` 副本。
+
+## 测量 {#measuring}
+
+仓库使用 `pnpm run budget:payload` 跟踪 playground 发送的内容；当前数据如下：
+
+在 `playground` 上针对 `/`、`/de` 测量：
+
+| 测量项 | 大小 |
+| --- | --- |
+| 磁盘上的翻译源文件 | 7.8 MB |
+| 作为独立载荷文件提供 | 23.9 MB |
+| 最大的内联 `__NUXT_DATA__` | 0.4 KB |
+| 客户端资源 | 624.4 KB |
+
+playground 是一个测试平台，其中的字典是生成的，最多包含 10 万个键，因此这些数据并不代表真实应用的预期——它们是用于对比测量的固定基准点。当数据意外增长时预算检查会失败，这样就能发现对载荷内容的意外更改。
+
+使用 `pnpm test:performance` 自行运行基准测试套件；其工作原理请参见[基准测试方法](https://s00d.github.io/nuxt-i18n-micro/contributing/performance-methodology)。
+
+## 相关内容 {#related}
+
+<CardGroup cols={2}>
+
+<Card title="基准测试" icon="book-open" href="/zh/guide/performance-results">
+
+</Card>
+
+<Card title="部署" icon="book-open" href="/zh/guide/deployment">
+
+</Card>
+
+<Card title="翻译文件" icon="book-open" href="/zh/guide/translations">
+
+</Card>
+
+</CardGroup>

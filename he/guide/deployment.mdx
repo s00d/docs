@@ -1,0 +1,440 @@
+---
+title: "פריסה"
+description: "פריסה לשרת Node, ל-serverless או ל-Edge, או כאתר סטטי — לאן הולכים ה-payloads של התרגומים, מה כל פלטפורמה צריכה, proxies ומטמון."
+---
+
+המודול עובד עם כל preset של Nitro ללא תצורה נוספת: הוא בוחר היכן יישבו קובצי התרגום לפי ה-preset שעבורו אתם בונים. ברירות המחדל מתאימות לרוב האפליקציות; קראו את הסעיף של הפלטפורמה שלכם. עמוד זה מסביר:
+
+- מה מגיע ל-`.output/` ואילו headers מקבלים ה-payloads;
+- מה לשנות עבור אחסון סטטי, קטלוגים גדולים, נתיב משנה, proxy או CDN.
+
+<Note>
+
+נפרס ונבדק על שרתים אמיתיים: Cloudflare Workers ו-Pages, ‏Vercel ו-Vercel Edge, ‏Netlify ו-Netlify Edge, ‏Cloud Run ו-Deno Deploy, כל אחד עם מה ש-[פלטפורמות](#platforms) מפרט. שאר ה-presets נבנו והורצו מקומית.
+
+</Note>
+
+## כיצד התרגומים מועברים {#how-translations-are-delivered}
+
+בזמן הבנייה המודול הופך את `locales/` (כל השכבות ממוזגות) ל-**payloads**: קובץ JSON אחד לכל עמוד ושפה. שני צרכנים קוראים אותם:
+
+- **SSR** טוען את ה-payload של העמוד המוצג בתוך התהליך — ללא בקשת HTTP, והמילון אינו מוטמע ב-HTML.
+- **הדפדפן** שולף את `/_locales/<page>/<locale>/data.json?v=<dateBuild>` בזמן hydration ובניווט.
+
+`_locales` הוא [`apiBaseUrl`](/he/api/module-options#apibaseurl). נתיב השרת המובנה עונה לכתובת זו; העותק הסטטי ב-`public/` עונה לה ללא שרת.
+
+## שרת Node {#node-server}
+
+```bash
+npx nuxi build
+node .output/server/index.mjs
+```
+
+עם `node-server` (ה-preset ברירת המחדל), ‏`node-cluster`, ‏`bun`, ‏`deno-server` או כל preset אחר שמגיש את `public/` מהדיסק, כאשר `public/` נמצא ליד תיקיית `server/`:
+
+- ה-payloads מועתקים ל-`.output/public/_locales/<page>/<locale>/data.json`;
+- SSR קורא אותם מאותה תיקייה עם `fs` (שום דבר לא נארז לתוך השרת);
+- הדפדפן מקבל אותם כקבצים סטטיים, או מנתיב השרת.
+
+פרסו את כל תיקיית `.output/`. המודול דורש Node 20 ומעלה, ול-Nuxt יש מינימום משלו: Nuxt 4.5 מצהיר על `^22.19.0 || ^24.11.0 || >=26.0.0`.
+
+תהליך תחת עומס קבוע יכול להחזיק הרבה יותר זיכרון מה-heap החי שלו. ראו [זיכרון בשרת Node](/he/guide/performance#memory-on-a-node-server) לפני שאתם מגדירים מגבלת container.
+
+עם מבנה אחר, המודול מטמיע את ה-payloads כפי שמתואר בסעיף הבא. זה כולל:
+
+- `nitro.output.publicDir` מותאם אישית, שהבנייה קוראת פעם אחת;
+- `serveStatic: true` ב-preset ששומר קבצים סטטיים במקום אחר.
+
+<Warning>
+
+אם בנייה קוראת את `public/` והתיקייה אינה מגיעה לשרת, כמו עם `aws-lambda` ו-`serveStatic: true`, השרת רושם שגיאה אחת ביומן והעמודים מציגים מפתחות גולמיים. הגדירו `nitro.serveStatic: false` כדי להטמיע את ה-payloads.
+
+</Warning>
+
+## Serverless ו-Edge {#serverless-and-edge}
+
+ה-presets האלה אינם יכולים לקרוא את `public/` בזמן ריצה:
+
+- presets של פונקציות ששולחים את `public/` ל-CDN או שאינם מגישים אותו: `vercel`, `netlify`, `aws-lambda`, `aws-amplify`, `azure-swa`, `firebase`, `stormkit`, `zeabur`, `node-listener`;
+- presets של Edge ללא מערכת קבצים: `cloudflare-module`, `cloudflare-pages`, `vercel-edge`, `netlify-edge`, `deno_deploy`;
+- `serveStatic: 'inline'`, כמו `winterjs`.
+
+שם המודול מטמיע את ה-payloads לתוך ה-bundle של השרת כ-server assets של Nitro ‏(`assets:i18n`) ועדיין כותב את העותק הציבורי עבור הדפדפן.
+
+הטמעת המטריצה המלאה של עמוד × שפה הופכת את ה-bundle לגדול. מעבר למגבלה של פלטפורמת Edge, הבנייה מזהירה ומציינת אותה, ראו [מגבלות Bundle](#bundle-limits-on-edge). עבור קטלוגים גדולים עברו למצב `source`, שמטמיע את קובצי המקור הקומפקטיים וממזג תרגומי שורש, עמוד ו-fallback בזמן ריצה:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    translationPayloads: {
+      mode: 'source',
+    },
+  },
+})
+```
+
+במצב `source` הדפדפן תמיד שולף payloads מנתיב השרת, שממזג אותם לפי בקשה (כל עותק ציבורי מחזיק את עץ המקור הקומפקטי שרק השרת קורא). זה דורש שרת פעיל, לכן אל תשתמשו ב-`source` עבור אתר סטטי טהור.
+
+### מגבלות Bundle ב-Edge {#bundle-limits-on-edge}
+
+| פלטפורמה           | מגבלה                                                                                  |
+| ------------------ | -------------------------------------------------------------------------------------- |
+| Cloudflare Workers | ‏64 MiB לא דחוס, ב-Free וב-Paid. אין מגבלה על גודל דחוס. אתחול של 1 s, זיכרון 128 MB |
+| Vercel Edge        | ‏1 MB gzip ב-Hobby, ‏2 MB ב-Pro, ‏4 MB ב-Enterprise                                    |
+| Netlify Edge       | ‏20 MB דחוס                                                                       |
+
+הבנייה סוכמת את המילונים שהיא מטמיעה ומזהירה רק מעבר למגבלה הנמוכה ביותר של הפלטפורמה. היא סופרת מילונים בלבד, כך שהאפליקציה מתווספת מעל. לדוגמה, 120 עמודים × 4 שפות עם קובץ שורש של 60 KB מטמיעים:
+
+| מצב | מוטמע | מתאים |
+| --- | --- | --- |
+| `premerged` | 34.9 MiB | Cloudflare; לא Vercel Edge ולא Netlify Edge |
+| `source` | 5.7 MiB | עדיין 3 MB gzip ב-Vercel Edge |
+
+קטלוג בגודל כזה ב-Vercel Edge דורש [שרת payload](#app-baseurl-and-payload-hosts).
+
+`source` משלם מיזוג לכל עמוד ושפה בכל isolate, כ-1 ms בדוגמה זו ו-7 ms של CPU ב-isolate קר. הוא גדל עם גודל שרשרת ה-fallback: כ-43 ms עבור 4 MB של קובצי שרשרת. Netlify Edge מאפשר 50 ms של CPU לבקשה, והתוכנית החינמית של Cloudflare ‏10 ms.
+
+### תאריכים בסביבות ריצה של Edge {#dates-on-edge-runtimes}
+
+`$td` משתמש ב-`Intl` של סביבת הריצה, ונתוני ה-ICU שלו יכולים להיות שונים מאלה של הדפדפן. ב-Netlify Edge תאריך מעוצב יכול להכיל U+202F (רווח צר בלתי שביר) במקום שבו ב-Chrome יש רווח רגיל, ולכן Vue רושם אי-התאמת hydration אחת והטקסט מתקן את עצמו ב-hydration. Nuxt רגיל עם `Intl` רגיל מתנהג שם אותו דבר; Deno Deploy לא.
+
+<Tip>
+
+`<i18n-t>` עם `date` או `relativeDate` כבר מתיר את אי-ההתאמה. עבור `$td` בתבנית, הוסיפו `data-allow-mismatch="text"` לאלמנט.
+
+</Tip>
+
+## אתר סטטי (nuxi generate) {#static-site-nuxi-generate}
+
+```bash
+npx nuxi generate
+```
+
+`nuxi build --preset <static preset>` עושה אותו דבר.
+
+- מצב ברירת המחדל `premerged` כותב כל payload לתוך `.output/public/_locales/`, כך שכל שרת סטטי יכול להגיש אותם.
+- העמודים עוברים prerender לכל שפה: תחת `prefix` המודול זורע כל שורש מותאם שפה (`/en`, `/de`), ו-`/` נשמר כ-stub של הפניה.
+- השאירו את [`prerenderRoutes`](/he/api/module-options#translationpayloads) כבוי: העותק הציבורי כבר מכיל את קובצי ה-payload.
+- עם מצב `source` או `publicAssets: false` אין לדפדפן מה לקרוא, והבנייה מזהירה.
+
+<Note>
+
+אין שרת שיקרא עוגייה או `Accept-Language`, כך ששפה שמורה אינה מפנה את `/` בטעינה הראשונה. תחת `no_prefix` ה-HTML מכיל את שפת ברירת המחדל, ועוגייה שמורה אינה מוחלת בטעינה: `$switchLocale` עדיין עובד בעמוד הפתוח.
+
+</Note>
+
+עבור Cloudflare Pages ראו [Cloudflare Pages](#cloudflare-pages).
+
+עבור בנייה עם [דומיינים לשפות](/he/guide/layers#multiple-domains), הריצו generate פעם אחת לכל דומיין, עם `NUXT_I18N_DOMAIN` כ-host של ההרצה. כל עץ מחזיק אז את העמודים וה-payloads של אותו דומיין. ל-Nitro אין משתנה לתיקיית הפלט, לכן קראו משתנה משלכם מהתצורה:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: { output: { publicDir: process.env.PUBLIC_DIR } },
+})
+```
+
+```bash
+NUXT_I18N_DOMAIN=example.de PUBLIC_DIR=sites/example.de npx nuxi generate
+NUXT_I18N_DOMAIN=example.com PUBLIC_DIR=sites/example.com npx nuxi generate
+```
+
+- שמרו את התיקיות מחוץ ל-`.output`: כל הרצה מרוקנת אותה.
+- קישורים מוחלטים לדומיינים האחרים אינם נסרקים.
+- ללא המשתנה, בנייה עם שפה בעלת `baseUrl` מזהירה ומייצרת את תצורת הבנייה, שבה שפות אלה הן קישורים ואינן מקבלות עמודים.
+- בשרת Node אותו משתנה מצמיד את התהליך לדומיין אחד, לא משנה מה `Host` אומר.
+
+שרת סטטי מחיל headers משלו על קבצים אלה; הגדירו מטמון בתצורת השרת. כלל ה-`/_locales/*` של המודול כן מגיע ל-Cloudflare Pages דרך `_headers` ול-Vercel דרך `config.json`, בתור `public, max-age=60`. כדי לשלוח קבצים נלווים מסוג `.gz` / `.br`, הפעילו את `nitro.compressPublicAssets`: המודול דוחס את עותק ה-payload עם אותן הגדרות.
+
+## כותרות מטמון ו-dateBuild {#cache-headers-and-datebuild}
+
+| בקשה                                                                                  | `Cache-Control`                                                                                                 |
+| ---------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| שרת Node או נתיב, `?v=` שווה ל-`dateBuild` הנוכחי, מילון לא ריק     | `private, max-age=<httpCacheDuration>, immutable`                                                               |
+| שרת Node או נתיב, ללא `?v=`, עם ערך ישן, או מילון ריק             | `public, max-age=0, must-revalidate`                                                                            |
+| עותק של `public/` אצל שרת אחסון, כל `?v=`                                                    | `public, max-age=60` ([`httpCacheControl`](/he/api/module-options#other)) |
+| מצב `source`, ‏`cacheTtl`, או `apiBaseServerHost`: מילון יכול להשתנות ללא בנייה | ה-header של `httpCacheControl`, תמיד                                                                           |
+| נתיב שרת, לא ניתן היה לקרוא את המילון                                           | `503`, `no-store`                                                                                               |
+| שרת פיתוח                                                                               | ללא                                                                                                            |
+
+למה הטבלה נראית כך:
+
+- ה-URL עם ה-`v` הנוכחי מוצמד כמו asset עם hash, ורק מי שרואה את ה-query יכול לקבוע זאת: נתיב השרת, ושרת Node, שמגדיר את ה-header על הקבצים הסטטיים שלו.
+- הוא `private`, כך ש-CDN שמתעלם מה-query אינו יכול לענות ל-`v` הבא מתוך תגובה זו.
+- הקבצים הסטטיים של שרת אחסון מקבלים header לכל הנתיב מכלל נתיב `/_locales/**`, שאינו יכול לראות את ה-query, ולכן הוא נשאר קצר; טעינה חוזרת עדיין אינה נחסמת על שום דבר.
+- `v` ישן נשאר ניתן להגשה, כי HTML שבמטמון מציין אותו.
+
+`httpCacheControl: false` משאיר כל קובץ סטטי על `max-age=0, must-revalidate`. ברירת המחדל של [`httpCacheDuration`](/he/api/module-options#httpcacheduration) היא שנה אחת; `0` אינו שולח header. `$clearCache()` מאמת מחדש כל מה שהוא טוען בהמשך.
+
+Safari מבקש שוב payload שנטען מראש כאשר ייתכן שאסור לו לעשות שימוש חוזר בתגובה: עם `no-cache` ו-`ETag` הבקשה השנייה היא `304`, וללא header מטמון וללא validator היא הורדה מלאה שנייה. `max-age` מעל `0` נותן בקשה אחת. רק `httpCacheDuration: 0` בשרת אחסון שאינו מוסיף validator משלם על כך.
+
+[`dateBuild`](/he/api/module-options#datebuild) הוא הערך של `?v=`. כברירת מחדל זהו hash של קובצי התרגום שלכם, כך שהוא משתנה רק כאשר התרגומים משתנים, ודפדפנים שומרים את ה-payloads שבמטמון שלהם לאורך פריסות שלא נגעו בהם. הוא זז גם עם שרשרת ה-fallback.
+
+- הגדירו אותו בעצמכם כדי להצמיד ערך.
+- הגדירו `0` או `''` כדי להסיר את `?v=` לחלוטין; ה-payloads אז לעולם אינם `immutable`.
+
+<Tip>
+
+אחרי החלפת מילון במקום בשרת Node, הפעילו מחדש עם `NUXT_I18N_DATE_BUILD=<new value>`: שום דבר אחר אינו מזיז את `v` ללא בנייה מחדש.
+
+</Tip>
+
+### קובצי שורש ו-delta {#root-and-delta-files}
+
+`premerged` כותב שורש אחד לכל שפה, `__root/<locale>/data.json`, ובקובץ של כל עמוד רק את מה ששונה ממנו.
+
+- קובץ העמוד מסמן את השורש שמולו הוא נוצר עם מפתח `__i18n_root`.
+- הדפדפן שולף את שניהם, העמוד אינו מציג דבר עד ששניהם הגיעו, ו-SSR ממזג אותם פעם אחת לכל chunk.
+- קובץ ללא סימון הוא מילון שלם ועומד בפני עצמו: מצב פיתוח, מצב `source`, נתיב השרת ושרת אחסון שעדיין מחזיק קבצים ישנים יותר — כולם עונים בקובץ כזה, ללא כל הגדרה.
+
+לכן מי שקורא את `_locales/*/data.json` ישירות קורא delta. הגדירו `translationPayloads.rootDelta: false` כדי לשמור קבצים שלמים.
+
+לשונית שפתוחה לאורך פריסה ומבקשת delta חדש רואה שהוא נוצר מול שורש אחר, ושולפת את השורש הזה לפני שהיא מציגה אותו.
+
+### כאשר לא ניתן לקרוא מילון {#when-a-dictionary-cannot-be-read}
+
+שליפה שנכשלה משרת אחסון (כל דבר מלבד 404), קובץ שאינו קריא או פגום, או 200 שאינו אובייקט JSON — אינם מגיעים לשום מטמון, והבקשה הבאה קוראת שוב:
+
+- הצגת עמוד רושמת אזהרה, מציגה מפתחות גולמיים עבור אותו מילון ועונה `503` עם `Cache-Control: no-store`, אותו דבר בכל header של CDN ‏(`CDN-Cache-Control`, `Cloudflare-CDN-Cache-Control`, `Netlify-CDN-Cache-Control`, `Vercel-CDN-Cache-Control`, `Surrogate-Control`, מעל כל ערך מכלל נתיב) ו-`Retry-After: 60`;
+- `/_locales/...` עונה `503` עם `no-store`;
+- `useTranslationServerMiddleware` נותן `t` שעונה במפתח או בערך ברירת המחדל.
+
+מה קורה במהלך התקלה:
+
+- **מבקרים:** גוף תגובת ה-503 הוא העמוד עצמו. ב-hydration הדפדפן קורא את המילון שוב, והטקסט מופיע ברגע ששרת האחסון חוזר, עם שגיאת קונסול אחת של Vue על אי-התאמת hydration, כי ב-HTML של השרת היו המפתחות.
+- **סורקים** מתבקשים לחזור מאוחר יותר.
+- **מטמונים:** כלל נתיב `swr` או `cache` אינו שומר דבר עם סטטוס 400 ומעלה, ו-CDN מקבל `no-store`, כך ששום מטמון אינו שומר את המפתחות הגולמיים והבקשה הראשונה אחרי ההתאוששות מציגה את הטקסט האמיתי.
+- **עמודים שכבר נשמרו במטמון** על ידי כלל נשארים כפי שהם: האימות מחדש נכשל ואינו שומר דבר. ב-Vercel אימות `isr` שנכשל שומר את העמוד האחרון באותו אופן.
+
+זה מכסה כל chunk שהצגה טוענת, כולל chunk עמוד שנכשל כשהשורש שלו זמין, ו-chunk שממוזג מאוחר יותר בהצגה. עמוד עם מילון תקין, הפניה ועמוד שגיאה שומרים על הסטטוס שלהם. [Component island](/he/guide/server-side-translations) הוא היוצא מן הכלל: הוא נשאר 200, כי 503 היה מוציא אותו מהעמוד, כך שעמוד שהמילון שלו נטען יכול להישאר עם המפתחות הגולמיים של island. בקשות במהלך תקלה מגיעות כל אחת לשרת האחסון, ללא timeout משל המודול מעבר ל-60 השניות לכותרות התגובה.
+
+404 משרת האחסון פירושו שאין לו קובץ כזה, וזה אינו כישלון. הצגת עמוד מציגה את מילון השורש, כפי שהדפדפן עושה, ו-`/_locales/...` עונה באותו 404. שום מטמון אינו שומר אף אחד מהם, כך שקובץ שמופיע נקרא בבקשה הבאה, במחיר של בקשה אחת לשרת האחסון לכל הצגה של עמוד כזה. כאשר גם קובץ השורש חסר, המילון ריק, ו-[prerender](/he/guide/upgrade#server,-build-and-deployment) נכשל.
+
+השרת שומר payloads שנטענו במטמון LRU בתוך התהליך של עד `cacheMaxSize` רשומות (1000 כברירת מחדל), שטוען רשומה מחדש אחרי `cacheTtl` כאשר הוא מוגדר; [כוונון ביצועים](/he/guide/performance) מכסה את שניהם, ו-[`cacheStorage`](/he/guide/performance#shared-cache-for-several-instances) מוסיף מטמון משותף למופעים. אל תוסיפו מעל זה כלל נתיב `cache` של Nitro על `/_locales/**`: הוא ממפה לפי ה-URL המלא, כולל ה-query, ושומר עותק שלישי.
+
+## ה-baseURL של האפליקציה ושרתי payload {#app-baseurl-and-payload-hosts}
+
+**`app.baseURL`** אינו דורש דבר נוסף. עם `app.baseURL: '/shop/'` הדפדפן שולף את `/shop/_locales/...`; העותק נשאר ב-`.output/public/_locales/`, ש-Nitro מגיש תחת הבסיס (שרת סטטי חייב לעגן את הפלט ב-`/shop/`). קידומות שפה ו-[נתיבים מוחרגים](/he/guide/excluding-static-files) מותאמים ללא הבסיס.
+
+**`app.cdnURL`** מזיז גם את ה-payloads, כאשר הם קבצים ב-`public/`: הדפדפן שולף וטוען מראש את `<cdnURL>/_locales/...`.
+
+- ה-CDN חייב להחזיק את `_locales/` לצד `_nuxt/`, בנתיב הזה.
+- הוא חייב לאפשר את המקור של האתר שלכם (CORS), כי הקובץ מגיע באמצעות `fetch`.
+- מילון שרק נתיב השרת עונה עליו (מצב `source`, ללא עותק ציבורי) נשאר במקור של האפליקציה.
+
+`NUXT_APP_BASE_URL` בזמן ריצה ב-`cloudflare-module` דורש תאימות Node ‏(`nodejs_compat`). כאשר `nitro.cloudflare.nodeCompat` כבוי, מצב ש-Nitro גם נופל אליו בתאריך ישן ללא דגל, הוא אינו רואה את המשתנה ומגיש את `/`, כולל Nuxt רגיל, בעוד שהפניית שפה עדיין הולכת לבסיס. הגדירו שם את `app.baseURL` בזמן הבנייה.
+
+כדי להגיש payloads ממקור אחר, הפנו את הלקוח והשרת אליו וכבו את הפלטים המקומיים:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    apiBaseClientHost: 'https://cdn.example.com',
+    apiBaseServerHost: 'https://cdn.example.com',
+    translationPayloads: {
+      serverHandler: false,
+      publicAssets: false,
+      serverAssets: false,
+    },
+  },
+})
+```
+
+- ב-Node, ‏`serverAssets` כותב את אותו עותק עבור הקריאות של השרת עצמו, והקובץ הזה עונה ל-`/_locales`: גם הוא חייב להיות כבוי, גם אם אתם שומרים את נתיב השרת עבור הדפדפן, שלעולם לא יגיע אליו.
+- שרת האחסון חייב להגיש את אותו מבנה `<apiBaseUrl>/<page>/<locale>/data.json`.
+- הבנייה מזהירה כאשר כל הפלטים המקומיים כבויים ו-host חסר.
+
+אותם ערכים יכולים להגיע מ-`NUXT_I18N_APP_BASE_URL`, ‏`NUXT_I18N_APP_BASE_CLIENT_HOST` ו-`NUXT_I18N_APP_BASE_SERVER_HOST` בזמן הבנייה. `NUXT_I18N_APP_BASE_SERVER_HOST` עובד גם בזמן ריצה וגובר על ערך הבנייה. ראו [`apiBaseServerHost`](/he/api/module-options#apibaseserverhost) לפרטים.
+
+## פלטפורמות {#platforms}
+
+רק מה שהמודול או הפלט שלו צריכים. חשבונות, אזורים והתחברויות CLI נמצאים בתיעוד של הפלטפורמה.
+
+### Cloudflare Workers {#cloudflare-workers}
+
+Preset ‏`cloudflare_module`. ‏`wrangler deploy` אורז את הפלט של Nitro פעם שנייה עם esbuild, ואחרי זה `defineAsyncComponent(() => import('./X.vue'))` גולמי מוצג ריק בשרת. עמוד השגיאה ברירת המחדל של Nuxt הוא כזה, כך של-404 יש גוף ריק והדפדפן רושם אי-התאמת hydration. הלקוח מציג אז את העמוד והסטטוס נשאר 404, אבל ללא JavaScript העמוד ריק. זהו [nuxt#33270](https://github.com/nuxt/nuxt/issues/33270): ‏Nuxt רגיל ללא המודול מתנהג אותו דבר. נתיבי עמודים אינם מושפעים.
+
+כבו את האריזה השנייה:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: {
+    preset: 'cloudflare_module',
+    cloudflare: {
+      deployConfig: true, // `wrangler` below applies only with it
+      wrangler: {
+        no_bundle: true,
+        find_additional_modules: true,
+        rules: [{ type: 'ESModule', globs: ['**/*.mjs'] }],
+      },
+    },
+  },
+})
+```
+
+```bash
+npx nuxi build
+cd .output/server && npx wrangler deploy -c wrangler.json
+```
+
+הגדירו את `compatibilityDate` ל-`2024-09-19` או מאוחר יותר: תאריך ישן יותר בוחר את ה-preset הישן, שאינו כותב `wrangler.json` ואינו נותן שגיאה. ה-404 מוצג אז, וההעלאה קטנה יותר: 190 KiB gzip לעומת 246 KiB באפליקציית הבדיקה. `error.vue` משלכם הוא הדרך האחרת, אבל הוא מכסה רק את עמוד השגיאה.
+
+המודול עצמו אינו צריך `nodejs_compat`. למגבלות ראו [מגבלות Bundle](#bundle-limits-on-edge).
+
+### Cloudflare Pages {#cloudflare-pages}
+
+השתמשו ב-preset ‏`cloudflare-pages-static`. ‏`nuxi generate --preset cloudflare-pages` הוא בניית שרת ללא `index.html`.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: {
+    preset: 'cloudflare-pages-static',
+    prerender: { autoSubfolderIndex: false },
+  },
+})
+```
+
+```bash
+npx nuxi generate
+npx wrangler pages project create my-site --production-branch main --force
+npx wrangler pages deploy dist --project-name my-site --branch main
+```
+
+- **פלט.** ה-preset כותב ל-`dist/`, לא ל-`.output/public`.
+- **`--force`.** בלעדיו, wrangler חדש (4.156 כאן) מעביר את `pages project create` ל-Workers. איתו מקבלים פרויקט Pages קלאסי. הוא נחוץ פעם אחת, ליצירה.
+- **`autoSubfolderIndex: false`.** ‏Pages עונה ל-`/de` ב-308 אל `/de/` בעוד ש-canonical ו-`hreflang` מציינים `/de`, כך שהם מצביעים על הפניה. עם אפשרות זו הקובץ הוא `de.html`, וההפניה נעלמת.
+- **`NUXT_E1005` בקונסול ב-404** הוא 404 רגיל. Nuxt מדווח עליו כך כי `404.html` מתחיל בצד הלקוח, לפני שהאפליקציה מותקנת. העמוד עובד, ו-Nuxt רגיל מדפיס את אותה שורה.
+
+### Vercel ו-Vercel Edge {#vercel-and-vercel-edge}
+
+ה-presets ‏`vercel` ו-`vercel_edge`, ללא שינוי באפליקציה. התגיות עובדות ללא `metaBaseUrl`, מתוך ה-headers המועברים של הפלטפורמה. ל-Vercel Edge יש מגבלת bundle קטנה: ראו [מגבלות Bundle](#bundle-limits-on-edge). למטמון משותף השתמשו ב-[driver של `upstash`](/he/guide/performance#upstash-on-vercel-and-vercel-edge).
+
+### Netlify {#netlify}
+
+ה-presets ‏`netlify` ו-`netlify_edge`.
+
+```bash
+npx nuxi build --preset netlify
+npx netlify deploy --prod --no-build --dir dist --functions .netlify/functions-internal
+```
+
+- **השאירו את `nitro.output` לא מוגדר.** ה-preset כותב את `.netlify/` ואת `dist/` בעצמו.
+- **שמרו `package.json` בתיקייה שממנה אתם פורסים.** בלעדיו ה-CLI מסתכל בתיקיית האב ואינו פורס שום פונקציה, ללא שגיאה.
+- **Netlify Edge** נפרס עם `--dir dist` בלבד. ראו [תאריכים בסביבות ריצה של Edge](#dates-on-edge-runtimes).
+
+### Cloud Run {#cloud-run}
+
+השתמשו בבניית `node-server` ברירת המחדל. ‏`gcloud run deploy --source` צריך `Dockerfile` בתיקיית הפלט כאשר docker אינו רץ מקומית:
+
+```dockerfile
+# .output/Dockerfile
+FROM node:22-slim
+WORKDIR /app
+COPY . .
+ENV NODE_ENV=production
+CMD ["node", "server/index.mjs"]
+```
+
+```bash
+cd .output && gcloud run deploy my-app --source .
+```
+
+התגיות עובדות ללא `metaBaseUrl`, מתוך ה-headers המועברים של הפלטפורמה.
+
+### Deno Deploy {#deno-deploy}
+
+Preset ‏`deno_deploy`. ‏`deno deploy` מחליף את `deployctl`. צרו אפליקציה דינמית עם נקודת הכניסה `server/index.ts`, ופרסו מתיקיית הפלט.
+
+### Firebase {#firebase}
+
+| מוצר | הגדרה |
+| --- | --- |
+| App Hosting | מריץ את בניית ה-Node: השתמשו ב-preset ברירת המחדל או ב-`firebase-app-hosting`, וב-Node 20+ |
+| Cloud Functions | ה-preset ‏`firebase` מטמיע את ה-payloads ודורש `firebase-functions` |
+| Hosting (סטטי) | מגיש את `.output/public` כקבצים, כך ש-`/_locales/**` מקבל את ה-headers של Hosting |
+
+ב-Hosting סטטי, אם JSON חוזר עם `Content-Type` או מטמון שגויים, הוסיפו רשומת `headers` עבור `/_locales/**` ב-`firebase.json`. ה-headers של `routeRules` ב-Nuxt אינם חלים על קבצים ש-Hosting מגיש בעצמו; נתיב ה-payload מגדיר `Content-Type` ו-`Cache-Control` משלו על תגובות שכן מגיעות לשרת.
+
+### AWS Amplify {#aws-amplify}
+
+`aws-amplify` שומר קבצים סטטיים לצד תיקיית המחשוב שלו, לא ליד השרת, ולכן ה-payloads מוטמעים כמו בפלטפורמת פונקציות.
+
+### מספר מופעים של בנייה אחת {#several-instances-of-one-build}
+
+Artifact אחד יכול לרוץ עם שפת ברירת מחדל או שפה מושבתת שונה לכל מופע באמצעות משתני סביבה: ראו [דריסות בזמן ריצה](/he/guide/runtime-overrides). לשפה שמושבתת רק בזמן ריצה עדיין יש קבצים סטטיים ב-`public/`; השביתו אותה בזמן הבנייה אם אסור שיהיו נגישים.
+
+מופעים שטוענים מילונים משרת מרוחק יכולים לשתף אותם ב-Redis, ‏Upstash, ‏Cloudflare KV או D1, ‏Deno KV או אחסון Nitro אחר, כך שה-backend מקבל בקשה אחת במקום בקשה לכל מופע. זהו מטמון, לא מקור לתרגומים: ראו [מטמון משותף למספר מופעים](/he/guide/performance#shared-cache-for-several-instances).
+
+## מאחורי proxy או CDN {#behind-a-proxy-or-cdn}
+
+האפליקציה צריכה ללמוד את ה-host הציבורי ואת הסכמה מתוך הבקשה.
+
+| ה-proxy שולח                              | בנייה רגילה                                      | בנייה עם `baseUrl` בשפות                                                   |
+| -------------------------------------------- | ------------------------------------------------ | --------------------------------------------------------------------------------- |
+| את ה-`Host` האמיתי                              | אין מה להגדיר                                   | אין מה להגדיר                                                                    |
+| את ה-`Host` של המקור, ועוד `X-Forwarded-Host` | אין מה להגדיר                                   | [`trustForwardedHost: true`](/he/api/module-options#trustforwardedhost)              |
+| אף אחד מהם                                      | [`metaBaseUrl`](/he/api/module-options#metabaseurl) | שום הגדרה לא עוזרת: כל בקשה נראית כמו ה-host של המקור, לכן שנו את ה-proxy |
+
+- **נתיבים תחת `swr` או `cache`.** הטבלה אינה תקפה שם: ראו [מטמון HTML](#caching-html). הגדירו `metaBaseUrl` או `site.url`.
+- **`X-Forwarded-Proto`.** שלחו אותו, אחרת כתובות canonical יהיו `http://` מאחורי proxy של HTTPS. ‏`metaBaseUrl` מתקן גם את זה.
+- **בבניית דומיינים** הדומיין בוחר את ה-base URL של התגיות. `metaTrustForwardedHost` אינו בוחר שם את הדומיין, רק `trustForwardedHost` עושה זאת.
+- **ההפניות יחסיות ולעוגיית השפה אין `Domain`,** כך ששתיהן נשארות ב-host הציבורי.
+
+<Warning>
+
+**הצמידו את `metaBaseUrl` כאשר המקור נשאר נגיש** — בבנייה רגילה ללא `metaBaseUrl` או `site.url`, ‏canonical, ‏`hreflang` ו-`og:url` לוקחים את ה-host שלהם מהבקשה. [`metaTrustForwardedHost`](/he/api/module-options#metatrustforwardedhost) פעיל כברירת מחדל, כך שבקשה ישירה עם `X-Forwarded-Host: evil.example` מקבלת `https://evil.example` בתגיות אלה, ומטמון שלפניה מפיץ את העמוד הזה. Host של פלטפורמה כמו `*.workers.dev` הוא בדיוק מקור כזה. `metaBaseUrl` סוגר זאת גם עבור `Host`. Host מוכר של בניית דומיינים שומר על ה-`baseUrl` שלו. עם `trustForwardedHost: true` לקוח ישיר יכול לבחור את העמוד של דומיין אחר, לכן הפעילו זאת רק מאחורי proxy שדורס את ה-header.
+
+</Warning>
+
+## מטמון HTML {#caching-html}
+
+רוב כתובות ה-URL בטוחות לשמירה במטמון, כי הן מציינות את השפה שלהן. אלה תלויות במבקר:
+
+| הגדרה                          | כתובות URL                                              |
+| ------------------------------ | ------------------------------------------------- |
+| ברירת מחדל, `autoDetectPath: '/'` | `/`                                               |
+| `prefix`                       | `/` וכל URL ללא קידומת, שרק מפנים |
+| `autoDetectPath: '*'`          | כל URL                                         |
+| `no_prefix`                    | כל עמוד                                        |
+
+- **`Vary`.** תגובות אלה נושאות `Vary` עם `Cookie` כאשר [`localeCookie`](/he/api/module-options#localecookie) מוגדר ועם `Accept-Language` כאשר `autoDetectLanguage` פעיל. מטמון שמכבד אותו מפריד בין התשובות.
+- **מטמון שמתעלם מ-`Vary`,** כמו "שמור הכול במטמון לפי URL", חייב לדלג על כתובות אלה. אחרת ה-`302 /de` של מבקר אחד מגיע למבקר הבא, ועמוד ברירת מחדל שמור מבטל את ההפניה לכולם. על `/` אפשר גם להגדיר `redirects: false`. מטמון הנתיבים של Nitro ממפה לפי הנתיב ורשימת ה-`varies` שלו, לכן השאירו את `/` גם מחוץ לכללי `swr` ו-`cache`.
+- **`Set-Cookie`.** כאשר `localeCookie` מוגדר, כל עמוד שמוצג בשרת תחת קידומת נושא `Set-Cookie`, ו-CDN תקין לא ישמור אותו. עבור HTML במטמון השאירו את `localeCookie` כבוי, או הסירו את ה-header ב-edge.
+- **כללי `swr` ו-`cache` דורשים `metaBaseUrl` או `site.url`.** Nitro מציג נתיב כזה רק עם ה-headers שב-`cache.varies`, כך ש-`Host`, ‏`X-Forwarded-Host` ו-`X-Forwarded-Proto` נעלמים וה-URL של הבקשה הוא `http://localhost`. ללא מקור קבוע, canonical, ‏`hreflang` ו-`og:url` בנתיבים אלה מצביעים על `http://localhost`, בכל פלטפורמה. `useRequestURL()` של Nuxt רגיל קורא שם את אותו הדבר. לקיחת ה-host מהמבקר במקום זאת הייתה מכניסה את ה-`X-Forwarded-Host` של מבקר אחד לעמוד שכל המבקרים מקבלים. בניית דומיינים אינה מושפעת: התגיות שלה משתמשות ב-`baseUrl` של השפות.
+
+  אם בנייה אחת מגישה כמה hosts ושום מקור יחיד אינו מתאים, תנו לכלל לראות את ה-headers ושמרו עותק אחד לכל ערך: `'/blog/**': { swr: 60, cache: { varies: ['host', 'x-forwarded-host', 'x-forwarded-proto'] } }`. כל ערך שונה הוא רשומת מטמון חדשה, כך שלקוח ששולח headers מומצאים ממלא את המטמון: שימו את המקור מאחורי proxy שמגדיר אותם.
+- **כללי `swr` ו-`cache` בבניית דומיינים.** המודול מוסיף `host` ל-`cache.varies` של כל כלל כזה, ו-`x-forwarded-host` עם `trustForwardedHost`, כך שדומיין אחד אינו מגיש לאחר את העמוד שלו. כלל עם `cache: false` נשאר כפי שנכתב. `isr` הוא המטמון של הפלטפורמה: בדקו שהוא ממפה לפי ה-host. כשה-host נמצא במפתח, לקוח ששולח hosts מומצאים מוסיף רשומות מטמון.
+
+עבור קובצי ה-payload ראו [כותרות מטמון ו-dateBuild](#cache-headers-and-datebuild).
+
+## קשור {#related}
+
+<CardGroup cols={2}>
+
+<Card title="כוונון ביצועים" icon="book-open" href="/he/guide/performance">
+
+</Card>
+
+<Card title="דריסות בזמן ריצה" icon="book-open" href="/he/guide/runtime-overrides">
+
+</Card>
+
+<Card title="עיון ב-translationPayloads" icon="brackets-curly" href="/he/api/module-options#translationpayloads">
+
+</Card>
+
+<Card title="שכבות ודומיינים" icon="book-open" href="/he/guide/layers">
+
+</Card>
+
+<Card title="SEO" icon="book-open" href="/he/guide/seo">
+
+</Card>
+
+</CardGroup>

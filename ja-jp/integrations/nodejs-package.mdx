@@ -1,0 +1,131 @@
+---
+title: "Node.js"
+description: "@i18n-micro/node を使って、ディスクから翻訳ファイルを読み込み、Node.js のサーバー、スクリプト、CLI で翻訳します。"
+---
+
+`@i18n-micro/node` は、[ランタイム](/ja-jp/integrations/runtime-package)のインスタンスに、ディスクから翻訳フォルダーを読み込むローダーを加えたものです。Express や Fastify のサーバー、CLI、メールや PDF のジェネレーターなど、Nuxt アプリと同じ JSON ファイルを必要とするあらゆるスクリプトで使用できます。ファイルは一度だけ読み込み、リクエスト間で可変状態を共有することなくリクエストごとに翻訳します。
+
+## インストール {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add @i18n-micro/node @i18n-micro/utils
+```
+
+```bash npm
+npm install @i18n-micro/node @i18n-micro/utils
+```
+
+```bash yarn
+yarn add @i18n-micro/node @i18n-micro/utils
+```
+
+</CodeGroup>
+
+ピア依存関係はありません。Node.js `>=20` が必要です。`@i18n-micro/utils` は、下記の `Accept-Language` ヘルパーを使う場合にのみ必要です。
+
+## セットアップ {#setup}
+
+ローダーは [Nuxt のフォルダー構成](/ja-jp/guide/translations)を読み取ります。`locales/en.json` はルート辞書で、`locales/pages/blog/post/en.json` はルート `blog-post` に属します。
+
+```ts
+import { createI18n } from '@i18n-micro/node'
+
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', translationDir: './locales' })
+await i18n.loadTranslations()
+
+i18n.t('greeting', { name: 'Ada' }) // 'Hello, Ada!'
+i18n.t('title', undefined, undefined, 'blog-post') // from locales/pages/blog/post/en.json
+```
+
+オプションはランタイムのもの([インスタンス](/ja-jp/integrations/overview#the-instance)を参照)に加えて、`translationDir` と `disablePageLocales`(`pages/**` のファイルをルート辞書として扱う)です。`i18n.reload()` はすべての辞書をクリアしてフォルダーを再度読み込みます。開発時のファイルウォッチャー向けです。
+
+`loadTranslations(dir, disablePageLocales?)` は単独でもエクスポートされており、`{ root, routes }` を返します:
+
+```ts
+import { loadTranslations } from '@i18n-micro/node'
+
+const { root, routes } = await loadTranslations('./locales')
+// root:   { en: {...}, de: {...} }
+// routes: { 'blog-post': { en: {...}, de: {...} } }
+```
+
+## リクエストごと {#per-request}
+
+インスタンスは 1 つのロケールと 1 つのルートを保持します。リクエストハンドラー内で共有インスタンスの `i18n.locale` を切り替えると、同時リクエストとの競合が発生します。`run` はリクエストに専用のインスタンスを与えます:
+
+```ts
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', translationDir: './locales' })
+await i18n.loadTranslations()
+
+// `() => next()`: `run` hands its callback the fork, and Express reads an argument of `next` as an error
+app.use((req, res, next) => i18n.run(pickLocale(req), () => next()))
+
+app.get('/', (req, res) => {
+  res.send(i18n.t('greeting')) // the request's locale, in everything it awaits
+})
+```
+
+`run` の内部では、共有インスタンスはリクエストのロケールとルートを読み書きします(`AsyncLocalStorage`)。フォークは現在のルートから開始し、コールバック内の `i18n.setRoute(...)` はそのリクエストのルートを変更します。コールバックはリクエストのフォークも受け取ります。フォークに書き込んだ辞書はそのリクエスト内に留まり、共有インスタンスに書き込んだ辞書は全員に届きます。
+
+`AsyncLocalStorage` を使わない場合は、`i18n.fork(locale)` が同じ種類のインスタンスを返すので、それを受け渡してください。
+
+`reload()` はディレクトリを再度読み込みます。新しい辞書が揃うまでは古い辞書が応答します。
+
+## ロケールを選択する {#pick-the-locale}
+
+`detectLocaleFromAcceptLanguage(header, locales)` は `q` の重みを考慮し、`de-DE` を `de` ロケールに(また `de` を `de-DE` に)一致させます。一致するものがない場合は `null` を返します。
+
+```ts
+import express from 'express'
+import { detectLocaleFromAcceptLanguage } from '@i18n-micro/utils/accept-language'
+
+const app = express()
+
+app.get('/hello', (req, res) => {
+  const locale = detectLocaleFromAcceptLanguage(req.headers['accept-language'], locales) ?? 'en'
+  const i18n = byLocale.get(locale)!
+  res.json({ message: i18n.t('greeting', { name: 'Ada' }) })
+})
+```
+
+URL プレフィックス、Cookie、ヘッダーを組み合わせる場合は、`@i18n-micro/utils/resolve-locale` の `resolveLocale({ defaultLocale, validLocales, url, cookie, acceptLanguage, autoDetectLanguage: true })` がモジュールと同じ優先順位を適用します: URL、Cookie、`Accept-Language`、デフォルトの順です。無効な値はスキップされます。
+
+Nuxt アプリ内では、サーバー側でこのパッケージは不要です。モジュールの[サーバーサイド翻訳](/ja-jp/guide/server-side-translations)を使用してください。
+
+## API {#api}
+
+| エクスポート | 備考 |
+| --- | --- |
+| `createI18n(options)`, `I18n` | ランタイムインスタンス + `translationDir`、`loadTranslations(dir?)`、`reload()` |
+| `loadTranslations(dir, disablePageLocales?)` | `{ root, routes }` |
+| `loadRootTranslations(dir, disablePageLocales?)` | `root` のみ |
+| `FormatService`, `interpolate` | core から |
+| 型: `I18nOptions`, `LoadedTranslations`, `Translations`, `Locale`, `PluralFunc`, `Params` | |
+
+インスタンスのメソッドは [Runtime](/ja-jp/integrations/runtime-package#api) に掲載されています。完全なシグネチャ: [パッケージリファレンス](/ja-jp/api/packages/node)。
+
+## 関連 {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Runtime" icon="book-open" href="/ja-jp/integrations/runtime-package">
+
+`fs` を使わないインスタンス
+
+</Card>
+
+<Card title="翻訳" icon="book-open" href="/ja-jp/guide/translations">
+
+フォルダー構成
+
+</Card>
+
+<Card title="ロケール検出" icon="book-open" href="/ja-jp/guide/locale-detection">
+
+Nuxt モジュールにおける優先順位
+
+</Card>
+
+</CardGroup>

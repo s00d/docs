@@ -1,0 +1,407 @@
+---
+title: "v4.0.0 — 统一的路由模型，一次构建服务所有域名"
+description: "发布说明：v4.0.0 — 统一的路由模型，一次构建服务所有域名，重写的各个包"
+---
+
+**日期**：2026-11-03
+
+**版本**：`v4.0.0`
+
+![v4.0.0 release](/images/4.0.0.png)
+
+**v4.0.0** 已发布。路由、翻译核心、字典文件、locale 检测以及所有框架包都已重写。选项、`$t`、`$localePath`、`$switchLocale`、组件和组合式函数都保留原名。变化的是行为，而其中大多数变化都是已被修复的 bug。大多数应用只需少量代码改动，但升级前请阅读[破坏性变更](#breaking-changes)：URL、SEO 标签和框架包 API 在某些地方有所调整。[升级指南](/zh-Hans/guide/upgrade)包含全部细节。
+
+## 有哪些新内容？ {#what’s-new}
+
+### 一次构建服务所有域名 {#one-build-for-every-domain}
+
+`locales[].baseUrl` 和 `baseDefault` 过去只影响链接。现在它们也会路由请求，适用于全部四种策略以及 `nuxt generate`：
+
+```ts
+export default defineNuxtConfig({
+  i18n: {
+    locales: [
+      { code: 'en', baseUrl: 'https://example.com', baseDefault: true },
+      { code: 'fr', baseUrl: 'https://example.com' },
+      { code: 'de', baseUrl: 'https://example.de', baseDefault: true },
+    ],
+  },
+})
+```
+
+- 每个主机只服务自己的 locale。指向其他域名 locale 的链接会变成该域名上的绝对 URL，切换到该 locale 时会跳转过去。
+- 在会覆盖 `X-Forwarded-Host` 的代理之后，`trustForwardedHost` 会从该请求头中选取域名。默认关闭。
+- `NUXT_I18N_DOMAIN` 为 `nuxt generate` 指定主机：每个域名运行一次，每次输出只包含该域名的页面和字典。
+- 未设置 `baseUrl` 的应用不会打包这部分代码。
+
+参见[层与域名](/zh-Hans/guide/layers#multiple-domains)和[部署](/zh-Hans/guide/deployment)。
+
+### 与路由器一致的路由 {#routing-that-agrees-with-the-router}
+
+构建阶段和运行时不再各自计算本地化 URL。所有结果都来自构建生成的路由，因此链接、切换器、`hreflang` 和重定向都不会指向不存在的页面。
+
+- 不提供某页面的 locale 会链接到它自己的首页，而不会链接到其他 locale 的页面。
+- `hreflang` 只列出提供该页面的 locale。
+- `$switchLocale` 会解析为 `true` 或 `false`，因此你可以知道字典何时加载失败。重复调用会重试。
+- 在 SSR 期间设置的 `$setI18nRouteParams` 和 `useI18nHead` 在水合后依然保留。切换器会链接到翻译后的 slug，服务端 HTML 中也是如此。
+- 导航在提交时才生效：被取消或被拦截的导航不会改变任何东西。
+- 哈希模式在 `prefix` 下可用。
+- 在服务端组件上使用 `<Greeting :locale="$getLocale()" />` 会设置其渲染 locale。
+
+### 统一的 locale 检测 {#one-locale-detection}
+
+在服务端、浏览器、服务端 API 辅助函数和 Astro 中都使用同一种顺序。`Accept-Language` 会遵循 `q` 值，地区匹配不再依赖 `locales` 的顺序，并且永远不会跨越中文的不同书写系统。运行时覆盖现在会影响路由：`NUXT_I18N_DEFAULT_LOCALE` 和运行时 `disabledLocales` 会改变实际提供的内容。参见 [Locale 检测](/zh-Hans/guide/locale-detection)。
+
+### 所有模式下一致的字典 {#one-dictionary-in-every-mode}
+
+预合并构建、`mode: 'source'` 和开发模式过去在许多页面上结果不一致。现在它们给出相同的字典。
+
+- 每一层都进行深度合并，回退链（`fr` → `de` → `en`）会一直追溯到底。
+- 开发环境中对翻译的编辑会就地生效，无需刷新页面。删除的键会消失，编辑根文件会影响所有页面。
+- `$clearCache()` 会重新加载当前页面，并在新文本到达之前保留旧文本。
+- 某个分块加载失败时会保留当前字典，而不是显示原始键。
+
+### 更小的字典文件 {#smaller-dictionary-files}
+
+- 页面文件现在只保存与该 locale 根字典（位于 `__root/<locale>/data.json`）不同的部分。浏览器只加载一次根字典，并将每个页面合并到其上，因此磁盘占用下降，下一个页面的开销只是第一个页面的一小部分。
+- 字典 URL 带有版本号。在 Node 服务器上，带有当前 `?v=` 的 URL 会被缓存一年，而主机上的静态副本返回 `max-age=60`。参见[缓存头](/zh-Hans/guide/deployment#cache-headers-and-datebuild)。
+- 每个 SSR 页面都会预加载其字典文件，使其与 HTML 同时开始加载。
+- 读取失败不再被缓存：下一个请求会重新读取。参见[无法读取字典时](/zh-Hans/guide/deployment#when-a-dictionary-cannot-be-read)。
+
+### 更好的 `<i18n-t>`、复数与格式化 {#better-&lt;i18n-t&gt;-plurals-and-formats}
+
+- 插槽可以与 `plural`、`number`、`date` 和 `relativeDate` 一起使用，并且每个 `{name}` 都会被填充，而不仅仅是第一个。
+- `<i18n-t>` 在 Nuxt、Vue、React、Preact、Solid 和 Astro 中使用同一个渲染器。
+- 以 `=0 ` 开头的第一个形式是显式的零形式，其余形式按 `Intl.PluralRules` 选择：`=0 no apples | one apple | {count} apples`。参见 [`$tc`](/zh-Hans/api/methods#$tc)。
+- 新增 `timeZone` 选项：服务端和所有浏览器显示同一个日历日期。
+- `{firstName}`、`{first-name}` 和 `{user.name}` 都是有效的占位符。
+- `$tn`、`$td` 和 `$tdr` 与复数一样遵循 `iso`。
+- `$tdr` 能给出真正的未来日期：`in 3 days`，或在 `numeric: 'auto'` 时给出 `tomorrow`。
+
+### 默认更安全 {#safer-by-default}
+
+- `<i18n-t html>` 会转义 `params`。只有翻译本身被视为可信标记。
+- 不会有链接意外离开当前源：`//host`、`/\host` 和空值都会留在本站。
+- 服务端翻译缓存有上限，因此带有虚构页面名的 URL 无法让内存无限增长。
+- DevTools 保存端点只接受翻译目录中已存在的 `.json` 文件，并拒绝跨站请求。
+
+### 框架包升至 2.0 {#framework-packages-at-2-0}
+
+- **React、Preact、Solid：** `I18nT` 接受用于富文本的 `components` prop。新增 `useT` 和 `useLocaleSwitch`，并通过 `@i18n-micro/react/server` 和 `/client` 支持 React Server Components。Preact 不再需要 `preact/compat`。
+- **Vue 和 VitePress：** `I18nLink` 保留 `name`、`query` 和 `hash`，VitePress 遵循 `base`。
+- **Astro：** `i18nIntegration` 会打包你的字典并安装中间件。主入口不含 `node:*` 导入，因此可以在边缘环境运行。`base` 可用。
+- **Node 和 runtime：** `fork(locale)` 提供开销很小的按请求实例，`@i18n-micro/node` 上的 `run(locale, fn)` 将实例限定在单个请求内。
+- **`@i18n-micro/types-generator`：** 无第三方依赖，是一个普通的 Vite 和 Rollup 插件。
+- **`@i18n-micro/devtools-ui`：** 通过 Vite 的 socket 实时更新，并提供 Astro 工具栏应用。
+
+### `@i18n-micro/cli` {#@i18n-micro/cli}
+
+CLI 现在作为 `@i18n-micro/cli` 位于 monorepo 中，经过重写后只有 16 个命令（原为 28 个），依赖也少得多。`check` 取代了 `validate`、`diff` 和 `check-duplicates`，并提供 `--json` 和用于 CI 的退出码。当无法证明某个键未被使用时，`clean` 不会写入任何内容。参见 [CLI](/zh-Hans/guide/cli)。
+
+### 文档 {#documentation}
+
+文档依据代码重写，围绕一条阅读路径展开：安装、第一个翻译页面、翻译文件、路由、检测，然后是各项任务指南。旧 URL 会重定向。[升级指南](/zh-Hans/guide/upgrade)详细列出了每一项变更。
+
+## 速度与体积 {#speed-and-size}
+
+- 服务端渲染直接读取字典，不再发起本地 HTTP 请求，也不再重复解析。
+- `dir="auto"` 不再是默认值。在大型页面上浏览器处理它会耗费很长时间：在包含 20,000 个 `$t` 元素的页面上，Chromium 中的 DOMContentLoaded 从约 980 ms 降到约 115 ms。
+- `serverTranslationPreload` 和 `i18n:register` 不再拖慢每个请求。
+- 未配置 cookie 时，客户端包会去掉 `useCookie`，`@i18n-micro/path-strategy` 的体积只剩原来的一小部分。
+
+**测试应用对比 v3.30.3。** 一个生成的 Nuxt 应用运行在一台 Node 服务器上，在一台 Mac 上使用 `wrk`，24 个连接，持续 20 秒，轮换进行三轮，基于预发布构建。各行来自不同的运行，因此请在同一行内比较。水合测试两侧都使用 `dir: 'ltr'`。
+
+| 指标 | v3.30.3 | v4.0.0 |
+| --- | ---: | ---: |
+| 4 个 locale，10k 词条：每秒请求数 | 384-395 | 585-591 |
+| 4 个 locale，10k 词条：p95 延迟 | 106-110 ms | 70-72 ms |
+| 4 个 locale，10k 词条：每个请求的服务端 CPU | 2.92-3.00 ms | 2.01-2.02 ms |
+| 12 个 locale，100k 词条：每秒请求数 | 362-370 | 578-580 |
+| 12 个 locale，100k 词条：p95 延迟 | 115-117 ms | 72-73 ms |
+| 12 个 locale，100k 词条：每个请求的服务端 CPU | 3.11-3.17 ms | 2.02-2.03 ms |
+| 水合，100k 页面 | 86-92 ms | 77-81 ms |
+| 此应用的客户端 JS，gzip | 105.1 KB | 93.9 KB |
+| 有 `i18n:register` 订阅者时的请求耗时，100k 分块 | 96-108 ms | 1.7 ms |
+
+在更早的预发布构建上，对 100k 词条进行的 30 分钟测试共处理了 113 万个请求，没有任何错误，存活堆内存保持平稳。
+
+**三个生产应用对比 v3.29.5**（它们当时运行的版本），基于预发布构建。其中两个是 SSR 站点，一个是 SPA。每个应用运行在一台 Node 服务器上，60 秒，8 个连接，仅 GET，两轮。构建时间各测一次。
+
+| 指标 | SSR 应用 1 | SSR 应用 2 | SPA 应用 |
+| --- | ---: | ---: | ---: |
+| 磁盘上的字典字节数 | 6.37 MB 降至 1.52 MB（-76%） | 4.43 MB 降至 1.52 MB（-66%） | 15.40 MB 降至 1.69 MB（-89%） |
+| `.output` 体积 | -22% | -14% | -29% |
+| 构建时间 | 27 秒降至 22 秒 | 23 秒降至 19 秒 | 41 秒降至 28 秒 |
+| 客户端 JS，gzip | +1.7% | +0.9% | +0.5% |
+| 每秒请求数 | 82 升至 88 | 237 升至 240，在误差范围内 | 233 升至 404，仅 SPA 外壳 |
+
+**客户端 JS。** 如上所示，带有自身代码的真实应用体积略有增加。共享的修复也让框架包变大了：在另一个预发布构建上，用最小规模的 Vue、React、Preact 和 Solid 应用测量，gzip 后约多出 1.4 KB 到 2.5 KB。React、Preact 和 Solid 还包含共享的富文本渲染器。
+
+**字典请求。** 首次加载现在需要两个文件：根字典和页面字典。其字节数保持不变（在两个 SSR 应用的 103 次和 89 次首次加载中为 +0.3%）。同一文档中的下一个页面只需一个小文件：在测量的两个页面上分别从 4.7 KB 降到 1.5 KB gzip、从 5.9 KB 降到 0.5 KB gzip。在 SPA 的一次登录后浏览中，字典字节数下降了 21%。
+
+**边缘环境。** 在一个小型演示应用上，基于预发布构建，Cloudflare Worker 上传体积从 241.5 KiB 增至 250.3 KiB gzip。嵌入 Edge 包中的字典使用相同的根文件和页面文件，但我们尚未在大型词条库上测量这种嵌入方式。
+
+## 破坏性变更 {#breaking-changes}
+
+### 要求 {#requirements}
+
+- **Nuxt 3.18 或更高版本**，以及 **Node 20 或更高版本**。
+- **`@i18n-micro/test-utils`** 不再随模块一起安装。如果你的测试导入了它，请自行添加。
+- **`@i18n-micro/hmr`** 已移除：翻译 HMR 已内置。如果安装过该包，请将其移除。
+- **`@i18n-micro/react`** 需要 React 18 或更高版本。
+- **`nuxt-i18n-micro-cli`** 已被 `@i18n-micro/cli` 取代。
+
+### 选项与配置 {#options-and-config}
+
+- `dependsOn` 中的 `i18n-plugin-hooks` 和 `i18n-plugin-define` 不再等待任何东西，也不会报错。请使用 `i18n-plugin-loader`。
+- 服务端自动导入的是 `useLocaleServerMiddleware`、`useTranslationServerMiddleware`、`loadTranslationsFromServer` 和 `detectCurrentLocale`。其他函数不再自动导入。
+- `resolveTranslationPayloadMode` 及其他 `resolveTranslationPayload*` 辅助函数已从 `nuxt-i18n-micro` 中移除，`shouldCopyTranslationPayloadsToPublic` 和 `shouldRegisterNitroServerAssets` 也一同移除。`TranslationPayloadMode` 类型保留。
+- `$getI18nConfig()` 不再包含 `isSSG`、`hmr`、`hooks`、`noPrefixRedirect`、`routeLocales`、`routeDisableMeta` 或 `globalLocaleRoutes`。这些选项本身不变。
+- `locales[].baseUrl` 现在会路由请求：属于其他域名的 locale 在本主机上返回 404，同一主机上的链接是相对链接。在这种构建中，`$getI18nConfig().locales` 保存本主机服务的 locale，`linkLocales` 保存全部 locale。
+- `baseUrl` 也会在其他任何主机上设置源：canonical 和 `hreflang` 若设置了 `metaBaseUrl` 则使用它，否则使用默认 locale 的 `baseUrl`，而不是请求的源。
+- `excludePatterns` 按完整路径段匹配（`'/admin'` 不再匹配 `/administrator`），glob 是锚定的，`RegExp` 模式现在会传到运行时。
+- 未设置 `cacheMaxSize` 时，服务端最多 1000 个条目。`cacheTtl` 从条目存入时开始计时，读取不再延长它。
+- 在 `no_prefix` 下，`i18n` 配置中显式的 `localeCookie: null` 会保持关闭。
+- 在 `prefix_except_default` 和 `prefix_and_default` 下，运行时的 `defaultLocale` 会被忽略并给出警告。运行时的 `fallbackLocale` 必须是已启用的 locale。
+- `nuxt.config` 中的 `routeDisableMeta` 会被遵循，并且无论键是何种形式，`nuxt.config` 中的条目都优先于 `$defineI18nRoute`。
+- 在开发环境的服务端，解析后的配置被冻结：写入它会抛出错误。
+- 对于相同 `code`，项目的 `locales` 条目优先于层中的条目。
+
+### 组合式函数与 `$` 方法 {#composables-and-$-methods}
+
+- `$switchLocale` 会解析为 `true` 或 `false`，以前不解析任何值。`$switchRoute` 的类型为 `Promise<void>`。
+- 对于不提供某页面的 locale，`$localeRoute`、`$switchLocalePath` 和切换器会链接到该 locale 的首页。
+- `$localePath` 对带有 `http(s):`、`mailto:` 或 `tel:` scheme 的字符串原样返回，`$localeRoute` 将其放在 `path` 和 `fullPath` 中。不要把未经检查的值作为链接目标传给它们。`//host` 以及 `x.com` 这样的裸名称仍是本源上的路径。
+- 没有路径的链接会停留在当前页面：`$localePath('#top')`、`'?p=2'`、`''` 和 `{ query }`。`'#top'` 以前是相对站点根解析的。单独的 `'about'` 仍表示 `/about`。
+- `$switchRoute` 留在应用内。只有 locale 自己的 `baseUrl`、`mailto:` 和 `tel:` 会离开应用。
+- 指向带有 `baseUrl` 的 locale 的链接需通过 `$localePath` 或 `<i18n-link>`。`<NuxtLink :to="$localeRoute(x, 'fr')">` 和 `router.push($localeRoute(x, 'fr'))` 仍是本应用的路径。在代码中请使用 `navigateTo($localePath(x, 'fr'), { external: true })`。
+- `$switchLocaleRoute` 和重定向遵循 `trailingSlash`。
+- 在服务端设置的 `$setI18nRouteParams` 和 `useI18nHead` 会在导航改变路径时被丢弃，包括从 `/news/1` 到 `/news/4`：请在新页面上重新设置。
+- 在 setup 中读取的 `$setI18nRouteParams` 绑定到该页面：已离开的页面中迟到的调用不会产生任何效果。它没有 setter，因此在测试中请直接 stub `useI18n` 本身。
+- `useI18n()` 每个应用返回同一个对象。写入它会影响所有调用方。
+- 字典、locale、params 和 head 在导航提交时才改变。`beforeResolve`、`beforeRouteEnter` 或之后的全局守卫看到的是旧值。路由中间件不受影响。
+- 在 URL 策略下，当 `$switchLocale` 的导航被取消时，会恢复已存储的 locale。
+- `$t` 会对 `defaultValue` 进行插值：`$t('missing', { n: 1 }, 'Got {n}')` 得到 `Got 1`。`$tc` 也会这样做，并且在翻译为空时返回 `''`。
+- `$has(key, route)` 会遵循 route 参数。
+- `$clearCache()` 会重新加载当前页面的字典。
+- `{param}` 占位符只读取你传入的 params：`{constructor}` 会保持原样。
+- `$tc` 在数量为负数、小数或极大值时，会选择最后一个形式并使用真实数量。`{ count: null }` 不再抛出错误，缺失的复数键会交给缺失处理函数。
+- `$tdr` 对无效输入返回 `Invalid Date`。过去不到一秒显示为 `0 seconds ago`。
+- `$tn`、`$td` 和 `$tdr` 遵循 `iso`：`{ code: 'en', iso: 'en-GB' }` 会把日期格式化为 `31/10/2026`。`Intl` 不认识的代码会按 `en` 格式化，复数则按索引规则处理：请设置 `iso`（`{ code: 'ua', iso: 'uk-UA' }`）。
+- `detectCurrentLocale` 已弃用：请使用 `useLocaleServerMiddleware(event).current`。
+
+### 复数 {#plurals}
+
+模板含义保持不变，只有一个例外。若模板为一个不含占位符的零形式，后面每个类别各一个形式，且多个数量共用的每个形式中都有 `{count}`，那么在具有三个或更多类别的 locale（`ru`、`uk`、`pl`、`cs`、`ar` 等）中，它现在按类别选择：在 `uk` 中，`none | {count} one | {count} few | {count} many` 对 3 得到 `3 few`，对 21 得到 `21 one`。要在其他任何模板中使用类别，请添加 `=0 ` 标记。自定义 `plural` 规则读取原始值，因此带标记的模板传给它时会保留 `=0 `。参见[升级指南中的表格](/zh-Hans/guide/upgrade#plurals-and-formatting)。
+
+### 组件 {#components}
+
+**`<i18n-t>`**
+
+- `html` 在任何情况下都会转义 `params`，并忽略所有插槽。
+- 插槽优先于同名的 param。
+- 对于 `plural`、`number`、`date` 和 `relativeDate`，`null` 表示未设置。
+- `plural` 与 `$tc` 一样使用 `Number` 计数：`1.5` 仍为 `1.5`，`"2 items"` 为 `NaN`，`""` 为 `0`。
+- `number`、`date` 和 `relativeDate` 会保留 `params`。
+- `hideIfEmpty` 在每个分支中都生效，`defaultValue` 在每个分支中都会替代缺失的键。
+- 在 `html` 下，缺失的键会作为转义后的文本输出。
+- `date` 和 `relativeDate` 的输出带有 `data-allow-mismatch="text"`，在具名插槽旁边时，文本位于独立的 `<span>` 中。
+- `.innerHTML` 和 `textContent` 属性会被丢弃。
+- 它是函数式组件：在其上使用 `ref` 拿不到实例。
+- `<i18n-t>` 和 `<i18n-group>` 与 `$t` 一样读取当前激活的字典。
+
+**`<i18n-switcher>`**
+
+- 链接是调用 `$switchLocale` 的普通 `<a>`，因此 `router-link-active` class 已不存在。
+- 按钮为 `type="button"`，带有 `aria-expanded`。按 Escape 或点击外部会关闭下拉菜单。
+- 新增 class：`i18n-switcher-wrapper`、`i18n-switcher-dropdown` 和 `i18n-switcher-button`。每个链接都有 `lang`，若 locale 设置了 `dir` 则也带有 `dir`。
+- 默认样式使用 CSS 逻辑属性，下拉菜单具有更大的 `z-index`、最小宽度和阴影。
+- 在带参数的页面上，服务端会在渲染结束时重写其链接。手写的 `$switchLocalePath` 链接不会被重写。
+
+**`<i18n-link>`**
+
+- `https://`、`mailto:` 和 `tel:` 不区分大小写匹配。单独的 `report.pdf` 是路由，`example.com` 仍为外部链接。以同时也是顶级域名的扩展名结尾的文件（`example.md`）会被视为文件：请写 `https://`。
+- `activeStyle` 会忽略末尾斜杠、query 和 hash。
+
+### 钩子与类型 {#hooks-and-types}
+
+- `i18n:register` 是运行时钩子：在插件中使用 `nuxtApp.hook('i18n:register', …)`。
+- 导出类型 `ModuleHooks` 已重命名为 `ModuleRuntimeHooks`。
+- `i18n:beforeLocaleSwitch` 和 `i18n:afterLocaleSwitch` 从未被触发过，不再出现在文档中。
+- `ModuleOptionsExtend.isSSG` 变为可选并已弃用：没有任何地方设置它。
+
+### URL 与重定向 {#urls-and-redirects}
+
+- **在 `prefix_except_default` 下，当 `en` 为默认 locale 时，`/en` 和 `/en/...` 返回 404**。
+- **大小写或拼写不同的 locale 前缀返回 404**（`/DE/about`）。`[...slug]` 下的 `/DE/x` 和 `[slug]` 旁的 `/DE` 也是如此，因此与某个 locale 代码仅大小写不同的 CMS slug 会失去其页面。
+- **在 `autoDetectPath: '*'` 或 `'no_prefix'` 下，未知 URL 仍返回 404**。`prefix` 保留重定向，`/` 在所有情况下也保留重定向。
+- **在 `prefix_except_default` 下，不带前缀的其他 locale 自定义路径**会以 `302` 重定向到默认 locale 的 URL。在 `prefix` 下，重定向现在会到达一个存在的页面。`prefix_and_default` 仍返回 404。
+- **带有 `redirects: false` 的 `prefix`** 对不带前缀的 URL 返回 404，包括具有自定义默认路径的页面的原始 URL。
+- **`autoDetectPath: '*'`** 也会对不带前缀的路径应用 cookie 和 `Accept-Language`。
+- **在 `prefix` 下**，无论 `autoDetectPath` 如何设置，不带前缀的 URL 在所有路径上都会保留访问者的 locale。
+- **在 `prefix_and_default` 下**，不带前缀的 URL 使用默认 locale。
+- **在 `no_prefix` 下**，自定义路径会以其自身的 locale 渲染，受限页面会以它所提供的 locale 渲染，共享同一路径的 locale 共用一条记录。
+- **没有对应页面的 `routeRules` 重定向**不会被本地化：`/de/old` 返回 404，以前是空的 200。
+- **路由规则会作用于自定义路径**，在 `no_prefix` 下也会被复制。像 `/de/artikel/news` 这样的静态同级路径会匹配 `/de/artikel/:slug`。
+- **设置了 `disabled: true` 的 locale** 在其前缀上会立即返回 404，指向它的链接会停留在当前页面。
+- **大小写不同的页面路径**会以 `302` 重定向到其本身的拼写：`/T/BASIC` 跳转到 `/t/basic`。
+- **在 `prefix_except_default` 下，具有自定义默认路径的页面的原始 URL** 会以 `302` 重定向到该路径。以前返回 404。
+- **`noPrefixRedirect`** 依据访问者的 locale：当 cookie 为 `de` 时，`/about` 会跳转到 `/ueber-uns`，而不是默认 locale 的路径。
+- **在 `prefix_except_default` 下，主机自身的前缀**在其 `baseDefault` 主机上返回 404：`de` 主机上的 `/de/x` 以前返回 200。
+- **`customRegexMatcher`** 不再对首段看起来像 locale 的真实页面返回 404。
+- **`nuxi generate`** 会在每个提供该页面的 locale 中预渲染所有静态页面，除非路由规则设置了 `prerender: false`：输出中的文件会更多。使用 `baseUrl` 时，请配合 `NUXT_I18N_DOMAIN` 为每个域名运行一次。
+- **客户端重定向会保持其导航的模式：** 普通的 `<NuxtLink>` 会添加一条历史记录。
+- **本地化路由名称保持一致。** 只有在 `router.push({ name })` 中硬编码 `localized-…` 名称的代码受影响：请把页面自身的名称传给 `$localeRoute`。
+- **来自 `extendPages` 的未命名页面**会被本地化并获得名称。
+- **在 `prefix` 下，指向其他域名的链接**会保留 locale 前缀。
+- **域名的首页**在所有地方都不带末尾斜杠。
+- **`?locale=`** 仅在 `no_prefix` 下对页面生效。`/about?locale=de` 不再在 `lang="en"` 下渲染德语。
+- **插件中的 `setLocale('de')`** 在 `/en/...` 上不再加载 `de` 字典。
+
+### SEO 与 HTML 输出 {#seo-and-html-output}
+
+- `dir="auto"` 不再是默认值。已知的 RTL 语言会得到 `dir="rtl"`，其他未设置 `dir` 的 locale 不会得到该属性。要保留旧输出，请设置 `dir: 'auto'`，但在大型页面上会有解析开销。参见[文本方向](/zh-Hans/guide/seo#text-direction)。
+- `disableMeta` 现在生效：页面不含 `hreflang`、canonical 或 `og:locale`。`lang` 和 `dir` 保留。
+- `hreflang` 只列出提供该页面的 locale。只有当默认 locale 提供该页面时才会出现 `x-default`。
+- 未本地化的页面没有 `hreflang` 或 `og:locale:alternate`。
+- 404 页面带有使用 URL 所对应 locale 的 `<html lang dir>`，且没有 canonical 或 `hreflang`。
+- Canonical、`og:url` 和 `hreflang` 会保留白名单中的 query（`/about?page=2`），服务端也是如此。
+- 当源来自请求时，canonical 和 `hreflang` 会包含 `app.baseURL`。
+- 每个 SSR 页面（包括 404 页面）都会为其字典文件输出 `<link rel="preload" as="fetch" crossorigin="anonymous">`。在严格的 CSP 中请允许它。使用 `apiBaseClientHost` 时，该主机需要 CORS。
+- 在 `no_prefix` 下每个页面都会设置 `Vary`，在其他策略下则在 locale 重定向上设置。请检查你的 CDN 缓存键。
+- 只有实际提供的页面才会写入 locale cookie。
+
+### 检测与服务端 {#detection-and-server}
+
+- `Accept-Language` 会遵循 `q` 值，`q=0` 会排除某种语言。
+- `useLocaleServerMiddleware` 和 `useTranslationServerMiddleware` 在每个路由上使用同一顺序（`?locale`、`[locale]` 参数或前缀、cookie、请求头、默认值），遵循 `localeCookie: null` 和 `autoDetectLanguage: false`，并按 locale 缓存字典。
+- 格式错误的 locale cookie 会被忽略并保持原样，而不会导致 SSR 失败。
+- 哈希模式只读取 `hash-locale` cookie。单独的 `user-locale=de` 不再生效。
+- `NUXT_I18N_DEFAULT_LOCALE` 和运行时 `disabledLocales` 会改变路由。
+- **`premerged` 输出已变化。** `/{apiBaseUrl}/<page>/<locale>/data.json` 只保存与 `__root/<locale>/data.json` 不同的部分。任何直接读取这些文件的程序都必须合并两者。完整的字典仍是有效文件。
+- **字典遵循 `app.cdnURL`。** 浏览器从 `<cdnURL>/_locales/...` 获取字典，以前使用的是 `app.baseURL`。CDN 必须包含 `_locales/` 并允许你站点的源。参见 [App baseURL 与 payload 主机](/zh-Hans/guide/deployment#app-baseurl-and-payload-hosts)。
+- `/{apiBaseUrl}/**` 上不再有 Nitro 路由缓存，`s-maxage=60, stale-while-revalidate` 头也已移除。如果你依赖该缓存，请在 payload 路由前放置 CDN。
+- `/{apiBaseUrl}/<没有文件夹的页面>/<locale>/data.json` 返回根字典，以前是 `{}`。主机的 404 现在会作为 404 传递，以前返回 `200 {}`。
+- 无法加载字典的预渲染会以 500 和一条警告失败，在 Nuxt 默认的 `failOnError` 下，构建会以 1 退出。
+- 不重新构建而修改的翻译只有在 `v` 变化时才会到达浏览器：请设置 `NUXT_I18N_DATE_BUILD`。
+- 除非设置了 `apiBaseServerHost`，SSR 不再通过 HTTP 请求 `/{apiBaseUrl}`。
+
+### 翻译 {#translations}
+
+- 每一层都进行深度合并，回退链会一直追溯到底。
+- 合并按 locale 进行：当前 locale 的根文件优先于回退 locale 的页面文件。
+- 在生产环境中，没有自己 `pages/<name>/` 文件夹的页面读取根字典。以前得到的是 `{}`。
+- `disablePageLocales: true` 只读取根文件。
+- 导航后，离开页面的键不再能被解析。如果某个布局使用了只有上一个页面文件中才有的键，请把它们移到根文件中。
+- 损坏的 locale 文件在所有模式下都只警告一次并给出其路径。开发模式以前会抛出错误。
+
+### `@i18n-micro/*` 包 {#@i18n-micro/*-packages}
+
+所有 `@i18n-micro/*` 包都升至 2.0.0，包括 `@i18n-micro/types` 和新的 `@i18n-micro/cli`。
+
+**`@i18n-micro/react`、`preact`、`solid`**
+
+- 路由适配器移到了 `/router`：`createReactRouterAdapter`、`createSolidRouterAdapter` 以及 Preact 的 `createBrowserHistoryAdapter`。`createPreactRouterAdapter` 已移除。
+- `I18nT` 遵循上文 `<i18n-t>` 的规则。`dangerouslySetInnerHTML`、`innerHTML` 和 `textContent` 属性会被丢弃。
+- `I18nSwitcher` 渲染带有 `aria-current="page"` 的 `<a href>` 项、`▾`、CSS 逻辑属性，并在按钮上使用 `language-switcher`。没有 `aria-haspopup`。`className` 会追加到 `i18n-switcher-wrapper` 上。
+- 指向 `/` 或 locale 根路径的链接只在完全匹配时激活（React、Preact）。
+- `I18nLink` 保留用户的 `onClick` 和 `style`，并把带修饰键的点击交给浏览器处理。激活检查不考虑 query 和 hash。没有路由器时，不会有链接处于激活状态。
+- React 和 Preact：`I18nLocalesContext`、`I18nDefaultLocaleContext` 和 `I18nRouterContext` 合并为一个 `I18nConfigContext`。Solid：一个 `I18nContext` 保存 `{ i18n, locales, defaultLocale, router }`。
+- 适配器的 `getCurrentPath` 包含 query 和 hash，`getRoute().query` 中重复的键是数组。
+- 未传 `i18n` 的嵌套 `I18nProvider` 会沿用外层实例，完全没有实例的 provider 会抛出错误。
+- 未传值的 `defaultLocale()` 返回 `fallbackLocale`。
+- Solid：`getCurrentPathAccessor` 已移除。`useI18n()` 在没有 `locales` 时不再抛出错误。
+- React：`use-sync-external-store` 不再是依赖，`react-dom` 是可选的 peer 依赖。
+
+**`@i18n-micro/vue`、`vitepress`**
+
+- `I18nT` 是函数式组件。
+- `I18nSwitcher` 和 `I18nLink` 遵循上文各节。`aria-haspopup` 已移除。
+- `I18nLink` 和 `createVueRouterAdapter` 会解析 `name`、`query` 和 `hash`。未知的 `name` 会像 `RouterLink` 一样抛出错误。
+- `useLocaleHead` 不再生成 `//de/`。同一页面的 canonical 和 `hreflang` 保持一致（`/de`），白名单中的 query 参数会传给它们。
+- `I18nRoutingStrategy.resolvePath` 可能收到一个位置对象，以及带有 query 和 hash 的路径。新增可选的 `toHref`。
+- VitePress：链接、切换器、`push` 和 `replace` 都带上 `site.base`。
+
+**`@i18n-micro/astro`**
+
+- `i18nIntegration` 会打包 `translationDir` 并安装中间件：删除只是复制该设置的 `src/middleware.ts`，或传入 `middleware: false`。你自己的 `src/middleware.ts` 需传入 `base: config.base`。
+- `i18nIntegration` 遇到 `messages`、`plural`、`missingHandler` 和 `routingStrategy` 时会抛出错误：请配合 `middleware: false`，把它们传给 `createI18n` 或 `createI18nMiddleware`。从未起作用的选项已从其类型中移除。
+- `loadTranslationsFromDir` 和 `loadTranslationsIntoI18n` 移到了 `@i18n-micro/astro/node`，它仅支持 ESM。
+- `getGlobalRoutingStrategy`、`setGlobalRoutingStrategy` 和 `runWithRoutingStrategy` 已移除：请读取 `Astro.locals.routingStrategy`。
+- `clone()` 改为 `fork()`，`_storage` 选项已移除。
+- 动态页面是一条路由：`/blog/hello` 是 `blog-slug`，以前是 `blog-hello`。请把 `pages/blog-hello/` 移到 `pages/blog-slug/`。自定义的 `getRouteName` 会以第三个参数收到该模式。
+- URL 决定页面的 locale。`autoDetect` 是从 `/` 到首选 locale 首页的 302 重定向。新增 `localeCookie` 选项，`redirectToDefault` 已实现。
+- 从另一个 locale 的同源页面访问页面时，会写入 locale cookie 且不会重定向。服务端岛屿和 actions 从不重定向，并带有 `Vary: Referer`。
+- `config.localeCodes` 不包含已禁用的 locale，`prepareLocaleRewrite` 对它们返回 404。
+- 不带键调用 `getI18nProps()` 时，会发送 `t()` 在该页面上能回答的全部内容，超过 20 KB 时会给出开发警告。请传入岛屿实际使用的键。
+- `useLocaleHead`：默认 `baseUrl` 为 `site`，否则使用相对根路径。链接和 meta 带有 `id`。
+- `<I18nT html>` 会转义 `params`，空翻译渲染为空。
+- `<I18nLink>` 和 `localizePath` 不处理外部 URL、`#hash` 和 `?query`，并保留末尾斜杠。
+- `<I18nSwitcher>` 保留 query，并使用 `data-i18n-switcher` 代替生成的 id。
+- `@i18n-micro/astro/client` 只有 `translate` 和 `hasTranslation`：请从 `/client/vue`、`/client/react`、`/client/preact` 和 `/client/svelte` 导入适配器。`client/vue` 需要安装 `vue`。
+- 岛屿：`has()` 对子树返回 true，`t('')` 为 `''`。`provideI18n` 接受一个 getter 以跟随新的 props。
+- 没有中间件时，`getLocale` 和 `getDefaultLocale` 会抛出错误。
+
+**`@i18n-micro/runtime`、`node`**
+
+- 写入既不是当前 locale 也不是回退 locale 的 locale 时，不会通知订阅者。
+- `addRouteTranslations(locale, route, messages, false)` 会替换该分块。
+- `loadFromUrls` 并行获取，只要有一个失败就不写入任何内容。
+- Node：`reload()` 会替换字典，而不是先清空它们，并且不再输出成功消息。目录不存在时保留旧字典。
+- Node、Astro、VitePress：使用同一个 locales 文件夹读取器。缺失的文件夹会发出警告，不是 JSON 对象的文件会被报告并跳过，消息以 `[i18n]` 开头。
+
+**`@i18n-micro/test-utils`**
+
+- mock 遵循真实的翻译规则：`tc('a', 1.5)` 选择最后一个形式，`td('nope')` 为 `Invalid Date`，`t(miss, undefined, '')` 返回键，未命中时不再输出日志。
+- `createI18nTestContext` 中的 `isolated` 已移除，`./publish-smoke` 已删除。
+
+**`@i18n-micro/types-generator`**
+
+- `I18nTypesPlugin(options)` 是普通的 Vite 和 Rollup 插件：没有 `.vite()`、`.webpack()` 或 `.esbuild()`。对于 webpack 或 esbuild，请在脚本中调用 `generateTypes`。
+- `getTypesString` 和 `generateTypes` 是同步的。`flattenKeys` 和 `isPlainTranslationObject` 已移除。
+- 键就是 `t()` 读取的内容：会加入对象路径，locale 布局之外的文件会被丢弃。
+
+**`@i18n-micro/devtools-ui`**
+
+- 保存只接受 `translationDir` 中已存在的 `.json`，并且不再创建文件。跨站请求返回 403。
+- 向可访问端点保存失败时会抛出错误并回滚。
+- `createBridge` 接受 `base` 选项。Astro 使用 `i18nDevToolsIntegration`。
+
+**`@i18n-micro/utils`、`core`、`path-strategy`、`route-strategy`**
+
+仅适用于自定义适配器和工具。
+
+- `utils`：子路径 `./route`、`./route-pattern`、`./build`、`./payload-stats` 和 `./payload-config` 已移除，`resolveServerLocale` 和 `resolvePreferredLocale` 也一同移除：请调用 `resolveLocale`。`deepMergeTranslations` 和 `mergeRouteTranslationsWithRoot` 已移除：请使用 `deepMergeTranslationsRecursive`。
+- `core`：`TranslationHelper` 移除了 `setCache`、`getGeneration` 和 `lookupIn`（请使用 `lookup(chunkKey, key)`）。`BaseI18n` 移除了 `ensurePinnedChunk` 和 `invalidatePin`。`useTranslationHelper(storage)` 已移除：请使用 `new TranslationHelper(storage)`。
+- `path-strategy`：**`switchLocaleRoute(fromLocale, toLocale, route, options)` 现在是 `switchLocaleRoute(toLocale, route, options)`。旧的 JavaScript 调用会返回错误的结果且不报错。** Nuxt 的 `$switchLocaleRoute` 不受影响。`/prefix`、`/no-prefix`、`/prefix-except-default` 和 `/prefix-and-default` 入口已移除，`getRedirect` 和 `getCanonicalPath` 也已移除。`RouterAdapter` 需要 `getRoutes`。`createPathStrategy` 不再构建绝对 URL：当 locale 设置了 `baseUrl` 时，请使用 `new DomainPathStrategy(ctx)`。
+- `route-strategy`：只导出 `RouteGenerator`、`generateRoutes`、`Rules` 和路径辅助函数。
+
+## 迁移 {#migration}
+
+1. 检查要求：Nuxt 3.18、Node 20，若使用 `@i18n-micro/react` 则需要 React 18。
+2. 同时更新 `nuxt-i18n-micro` 和所有 `@i18n-micro/*` 包。移除 `@i18n-micro/hmr`。如果你的测试导入了 `@i18n-micro/test-utils`，请将其添加为开发依赖。用 `@i18n-micro/cli` 替换 `nuxt-i18n-micro-cli`，并参照[其命令对照表](/zh-Hans/guide/cli#moving-from-nuxt-i18n-micro-cli)。
+3. 在代码中搜索来自 `@i18n-micro/path-strategy` 的 `switchLocaleRoute(`、`i18n-plugin-hooks`、`i18n-plugin-define`、`localized-` 路由名称、`$getI18nConfig().globalLocaleRoutes` 及其他已移除的配置键、`ModuleHooks`，以及 `i18n:register` 上的 `@ts-expect-error`。
+4. 把 `<i18n-t html>` params 中的标记移到翻译中，并以 params 传递数据。
+5. 如果设置了 `baseUrl`：检查用 `$localeRoute` 构建的链接，在代理之后设置 `trustForwardedHost`，并配合 `NUXT_I18N_DOMAIN` 为每个域名运行一次 `nuxi generate`。
+6. 对照你的策略检查 URL：`prefix_except_default` 下的 `/en`、类似 locale 的 CMS slug、`routeRules` 重定向以及 `excludePatterns`。
+7. 检查 CDN 缓存键中的 `Vary`，并在严格的 CSP 中允许 preload 链接。使用 `app.cdnURL` 时，把 `_locales/` 放到 CDN 上并允许 CORS。
+8. 如果有工具直接读取 `/_locales/...` 文件，请把页面文件合并到 `__root/<locale>/data.json` 之上。
+9. 如果全局守卫读取 locale 或字典，请确认它可以在导航提交之前运行。把布局从上一个页面文件中获取的键移到根文件中。
+10. 对比升级前后的 `nuxi generate` 输出或站点地图抓取结果：`hreflang`、`x-default`、canonical 和页面列表会按设计发生变化。
+11. 更新框架包的导入：React、Solid 和 Preact 适配器使用 `/router`，Astro 的加载器使用 `/node`，类型插件使用 `I18nTypesPlugin(o)`。
+12. 对于 Astro，删除只是复制设置的 `src/middleware.ts`，并把 `pages/blog-hello/` 这类字典重命名为对应的模式。
+13. 更新固定了 `router-link-active`、`li button`、`▼` 或旧 mock 行为的测试。
+
+详细信息与所有边界情况：[升级指南](/zh-Hans/guide/upgrade)。
+
+## 为什么重要 {#why-it-matters}
+
+- **从构造上保证正确：** 链接、重定向和 SEO 标签都来自应用真实拥有的路由。
+- **处处一致：** 构建、source 模式和开发模式给出相同的字典，所有调用方使用同一检测顺序。
+- **域名：** 一次部署服务所有 locale 域名，无需第二次构建。
+- **更安全的默认值：** 转义的 params、有上限的缓存、留在你的源上的链接。
+- **更少的发布体积：** 更小的字典文件、更小的路由包，共享逻辑集中在一处。
+
+完整的变更列表请参见[升级指南](/zh-Hans/guide/upgrade)和[变更日志](https://github.com/s00d/nuxt-i18n-micro/blob/main/CHANGELOG.md)。
+
+---

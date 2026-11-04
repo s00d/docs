@@ -1,0 +1,440 @@
+---
+title: "部署"
+description: "部署到 Node 伺服器、Serverless 或 Edge，或作為靜態網站 — 翻譯 payload 放在哪裡、各平台需要什麼、代理伺服器與快取。"
+---
+
+此模組無需額外設定即可搭配任何 Nitro preset 使用：它會依你建置的 preset 決定翻譯檔案的存放位置。預設值適用於大多數應用程式；請閱讀與你的平台相關的章節。本頁說明：
+
+- `.output/` 中會產生什麼，以及 payload 會帶有哪些標頭；
+- 針對靜態託管、大型目錄、子路徑、代理伺服器或 CDN 需要調整什麼。
+
+<Note>
+
+已在真實主機上部署並驗證：Cloudflare Workers 與 Pages、Vercel 與 Vercel Edge、Netlify 與 Netlify Edge、Cloud Run 與 Deno Deploy，各自搭配[平台](#platforms)中列出的設定。其他 preset 則在本機建置並執行。
+
+</Note>
+
+## 翻譯如何傳遞 {#how-translations-are-delivered}
+
+在建置時，模組會將 `locales/`（合併所有 layer）轉換為 **payload**：每個頁面與語系各一個 JSON 檔案。有兩種使用者會讀取它們：
+
+- **SSR** 會在程序內載入所呈現頁面的 payload — 不會發出 HTTP 請求，字典也不會嵌入 HTML 中。
+- **瀏覽器**會在 hydration 與導覽時擷取 `/_locales/<page>/<locale>/data.json?v=<dateBuild>`。
+
+`_locales` 即 [`apiBaseUrl`](/zh-TW/api/module-options#apibaseurl)。內建的伺服器路由會回應該 URL；`public/` 中的靜態副本則可在沒有伺服器的情況下回應它。
+
+## Node 伺服器 {#node-server}
+
+```bash
+npx nuxi build
+node .output/server/index.mjs
+```
+
+使用 `node-server`（預設 preset）、`node-cluster`、`bun`、`deno-server`，或任何其他從磁碟提供 `public/` 且 `public/` 位於 `server/` 資料夾旁的 preset 時：
+
+- payload 會被複製到 `.output/public/_locales/<page>/<locale>/data.json`；
+- SSR 會使用 `fs` 從該資料夾讀取它們（不會打包進伺服器）；
+- 瀏覽器會以靜態檔案或透過伺服器路由取得它們。
+
+請部署整個 `.output/` 目錄。模組需要 Node 20 或更新版本，而 Nuxt 有它自己的最低需求：Nuxt 4.5 宣告為 `^22.19.0 || ^24.11.0 || >=26.0.0`。
+
+處於持續負載下的程序，所佔用的記憶體可能遠多於其即時 heap。在設定容器限制之前，請參閱 [Node 伺服器上的記憶體](/zh-TW/guide/performance#memory-on-a-node-server)。
+
+若使用其他目錄結構，模組會如下一節所述將 payload 嵌入。這包含：
+
+- 自訂的 `nitro.output.publicDir`，建置時會讀取一次；
+- 在將靜態檔案存放於其他位置的 preset 上設定 `serveStatic: true`。
+
+<Warning>
+
+如果建置會讀取 `public/`，但該資料夾無法抵達伺服器（例如 `aws-lambda` 搭配 `serveStatic: true`），伺服器會記錄一次錯誤，且頁面會顯示原始鍵。請設定 `nitro.serveStatic: false` 以嵌入 payload。
+
+</Warning>
+
+## Serverless 與 Edge {#serverless-and-edge}
+
+以下 preset 無法在執行階段讀取 `public/`：
+
+- 將 `public/` 交給 CDN 或不提供它的函式 preset：`vercel`、`netlify`、`aws-lambda`、`aws-amplify`、`azure-swa`、`firebase`、`stormkit`、`zeabur`、`node-listener`；
+- 沒有檔案系統的 Edge preset：`cloudflare-module`、`cloudflare-pages`、`vercel-edge`、`netlify-edge`、`deno_deploy`；
+- `serveStatic: 'inline'`，例如 `winterjs`。
+
+在這些環境中，模組會將 payload 以 Nitro 伺服器資產（`assets:i18n`）的形式嵌入伺服器套件，並仍會為瀏覽器寫出公開副本。
+
+嵌入完整的頁面 × 語系矩陣會使套件變大。超過 Edge 平台的限制時，建置會發出警告並指出是哪個平台，請參閱[套件大小限制](#bundle-limits-on-edge)。若目錄很大，請切換至 `source` 模式，它會嵌入精簡的原始檔，並在執行階段合併根層級、頁面與後備翻譯：
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    translationPayloads: {
+      mode: 'source',
+    },
+  },
+})
+```
+
+在 `source` 模式下，瀏覽器一律從伺服器路由擷取 payload，由伺服器在請求時合併（任何公開副本存放的都是只有伺服器會讀取的精簡原始樹）。這需要執行中的伺服器，因此不要在純靜態網站上使用 `source`。
+
+### Edge 上的套件大小限制 {#bundle-limits-on-edge}
+
+| 平台               | 限制                                                                                   |
+| ------------------ | -------------------------------------------------------------------------------------- |
+| Cloudflare Workers | 未壓縮 64 MiB，Free 與 Paid 方案皆同。無壓縮後限制。啟動時間 1 s，記憶體 128 MB        |
+| Vercel Edge        | Hobby 方案 gzip 後 1 MB，Pro 方案 2 MB，Enterprise 方案 4 MB                           |
+| Netlify Edge       | 壓縮後 20 MB                                                                           |
+
+建置會加總它所嵌入的字典，並只在超過平台最低限制時發出警告。它只計算字典，因此應用程式本身的大小需另外加上。例如，120 個頁面 × 4 個語系，加上 60 KB 的根檔案，會嵌入：
+
+| 模式 | 嵌入大小 | 可容納 |
+| --- | --- | --- |
+| `premerged` | 34.9 MiB | Cloudflare；Vercel Edge 與 Netlify Edge 不行 |
+| `source` | 5.7 MiB | 在 Vercel Edge 上 gzip 後仍有 3 MB |
+
+在 Vercel Edge 上，這麼大的目錄需要 [payload 主機](#app-baseurl-and-payload-hosts)。
+
+`source` 在每個 isolate 中，每個頁面與語系都需要付出一次合併成本，在該範例中約 1 ms，冷啟動的 isolate 中則需 7 ms 的 CPU 時間。它會隨著後備鏈的大小而增加：4 MB 的鏈檔案約需 43 ms。Netlify Edge 每個請求允許 50 ms 的 CPU 時間，Cloudflare 的 Free 方案則為 10 ms。
+
+### Edge 執行環境上的日期 {#dates-on-edge-runtimes}
+
+`$td` 使用執行環境的 `Intl`，而其 ICU 資料可能與瀏覽器不同。在 Netlify Edge 上，格式化後的日期可能包含 U+202F（窄不換行空格），而 Chrome 則使用一般空格，因此 Vue 會記錄一次 hydration 不一致，且文字會在 hydration 時自行修正。使用一般 `Intl` 的純 Nuxt 在那裡也會如此；Deno Deploy 則不會。
+
+<Tip>
+
+帶有 `date` 或 `relativeDate` 的 `<i18n-t>` 已允許這種不一致。對於範本中的 `$td`，請在元素上加上 `data-allow-mismatch="text"`。
+
+</Tip>
+
+## 靜態網站（nuxi generate） {#static-site-(nuxi-generate)}
+
+```bash
+npx nuxi generate
+```
+
+`nuxi build --preset <static preset>` 的效果相同。
+
+- 預設的 `premerged` 模式會將每個 payload 寫入 `.output/public/_locales/`，因此任何靜態主機都能提供它們。
+- 頁面會為每個語系預先渲染：在 `prefix` 下，模組會預先加入每個在地化的根路徑（`/en`、`/de`），而 `/` 會保留為重新導向的殘根頁面。
+- 請保持 [`prerenderRoutes`](/zh-TW/api/module-options#translationpayloads) 關閉：公開副本已包含 payload 檔案。
+- 使用 `source` 模式或 `publicAssets: false` 時，瀏覽器沒有可讀取的內容，建置會發出警告。
+
+<Note>
+
+由於沒有伺服器可讀取 cookie 或 `Accept-Language`，已儲存的語系在首次載入時不會重新導向 `/`。在 `no_prefix` 下，HTML 包含的是預設語系，已儲存的 cookie 不會在載入時套用：`$switchLocale` 在已開啟的頁面中仍可運作。
+
+</Note>
+
+關於 Cloudflare Pages，請參閱 [Cloudflare Pages](#cloudflare-pages)。
+
+若建置使用[語系網域](/zh-TW/guide/layers#multiple-domains)，請針對每個網域執行一次 generate，並將 `NUXT_I18N_DOMAIN` 設為該次執行的主機。如此每個目錄樹都會包含該網域的頁面與 payload。Nitro 沒有用於輸出資料夾的變數，因此請在設定中讀取你自己的變數：
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: { output: { publicDir: process.env.PUBLIC_DIR } },
+})
+```
+
+```bash
+NUXT_I18N_DOMAIN=example.de PUBLIC_DIR=sites/example.de npx nuxi generate
+NUXT_I18N_DOMAIN=example.com PUBLIC_DIR=sites/example.com npx nuxi generate
+```
+
+- 請將這些資料夾放在 `.output` 之外：每次執行都會清空它。
+- 不會爬取指向其他網域的絕對連結。
+- 若未設定該變數，帶有 `baseUrl` 語系的建置會發出警告並產生建置設定，其中那些語系只是連結，不會產生頁面。
+- 在 Node 伺服器上，同一個變數會將程序固定在單一網域，無論 `Host` 為何。
+
+靜態主機會對這些檔案套用自己的標頭；請在主機的設定中設定快取。模組的 `/_locales/*` 規則確實會透過 `_headers` 傳到 Cloudflare Pages，並透過 `config.json` 傳到 Vercel，值為 `public, max-age=60`。若要提供 `.gz` / `.br` 同層檔案，請開啟 `nitro.compressPublicAssets`：模組會以相同設定壓縮 payload 副本。
+
+## 快取標頭與 dateBuild {#cache-headers-and-datebuild}
+
+| 請求                                                                                     | `Cache-Control`                                                                                                 |
+| ---------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Node 伺服器或路由，`?v=` 等於目前的 `dateBuild`，且字典非空                              | `private, max-age=<httpCacheDuration>, immutable`                                                               |
+| Node 伺服器或路由，沒有 `?v=`、`?v=` 為舊值，或字典為空                                  | `public, max-age=0, must-revalidate`                                                                            |
+| 主機上的 `public/` 副本，任何 `?v=`                                                      | `public, max-age=60`（[`httpCacheControl`](/zh-TW/api/module-options#other)）                                   |
+| `source` 模式、`cacheTtl` 或 `apiBaseServerHost`：字典可能在未重新建置的情況下變更       | 一律使用 `httpCacheControl` 標頭                                                                                |
+| 伺服器路由，無法讀取字典                                                                 | `503`、`no-store`                                                                                               |
+| 開發伺服器                                                                               | 無                                                                                                              |
+
+為什麼表格是這個樣子：
+
+- 帶有目前 `v` 的 URL 會像帶雜湊的資產一樣被固定，而只有看得到查詢字串的一方才能這樣宣告：伺服器路由，以及會為其靜態檔案設定標頭的 Node 伺服器。
+- 它是 `private`，因此忽略查詢字串的 CDN 無法用此回應來回答下一個 `v`。
+- 主機的靜態檔案會從 `/_locales/**` 路由規則取得適用於整個路徑的標頭，而該規則看不到查詢字串，因此會維持較短的時間；重複載入時仍不會被任何東西阻塞。
+- 舊的 `v` 仍然可以提供，因為已快取的 HTML 會引用它。
+
+`httpCacheControl: false` 會讓每個靜態檔案維持 `max-age=0, must-revalidate`。[`httpCacheDuration`](/zh-TW/api/module-options#httpcacheduration) 預設為一年；`0` 則不送出標頭。`$clearCache()` 會重新驗證它接下來載入的任何內容。
+
+當 Safari 可能無法重複使用回應時，會再次請求預先載入的 payload：若有 `no-cache` 與 `ETag`，第二次請求會是 `304`；若既沒有快取標頭也沒有驗證器，則會是第二次完整下載。`max-age` 大於 `0` 時只會有一次請求。只有在不加驗證器的主機上設定 `httpCacheDuration: 0` 才會付出這個代價。
+
+[`dateBuild`](/zh-TW/api/module-options#datebuild) 就是 `?v=` 的值。預設為翻譯檔案的雜湊值，因此只有在翻譯變更時才會改變，瀏覽器在未觸及翻譯的部署之間會保留已快取的 payload。它也會隨後備鏈變動。
+
+- 自行設定它以固定一個值。
+- 設為 `0` 或 `''` 可完全移除 `?v=`；此時 payload 永遠不會是 `immutable`。
+
+<Tip>
+
+在 Node 伺服器上就地替換字典後，請以 `NUXT_I18N_DATE_BUILD=<new value>` 重新啟動：若不重新建置，沒有其他方式能改變 `v`。
+
+</Tip>
+
+### 根檔案與差異檔案 {#root-and-delta-files}
+
+`premerged` 會為每個語系寫出一個根檔案 `__root/<locale>/data.json`，而每個頁面的檔案只包含與根檔案不同的部分。
+
+- 頁面檔案會以 `__i18n_root` 鍵標記它所依據的根檔案。
+- 瀏覽器會擷取兩者，在兩者都到齊之前頁面不會顯示任何內容，而 SSR 會在每個 chunk 合併一次。
+- 沒有標記的檔案是完整的字典，可單獨使用：開發環境、`source` 模式、伺服器路由，以及仍保有舊檔案的主機，都會回應這種檔案，無需任何設定。
+
+因此，任何直接讀取 `_locales/*/data.json` 的人讀到的都是差異檔案。設定 `translationPayloads.rootDelta: false` 可保留完整檔案。
+
+在部署期間保持開啟的分頁，若請求新的差異檔案，會發現它是依據另一個根檔案產生的，並會在顯示之前先擷取該根檔案。
+
+### 當字典無法讀取時 {#when-a-dictionary-cannot-be-read}
+
+從主機擷取失敗（404 以外的任何錯誤）、無法讀取或已損毀的檔案，或者不是 JSON 物件的 200 回應，都不會進入任何快取，下一個請求會重新讀取：
+
+- 頁面渲染會記錄警告，針對該字典顯示原始鍵，並以 `503` 回應，帶有 `Cache-Control: no-store`，每個 CDN 標頭（`CDN-Cache-Control`、`Cloudflare-CDN-Cache-Control`、`Netlify-CDN-Cache-Control`、`Vercel-CDN-Cache-Control`、`Surrogate-Control`，覆寫任何來自路由規則的值）皆相同，並帶有 `Retry-After: 60`；
+- `/_locales/...` 會以帶有 `no-store` 的 `503` 回應；
+- `useTranslationServerMiddleware` 提供的 `t` 會回傳鍵或預設值。
+
+服務中斷期間會發生什麼：
+
+- **訪客：**該 503 的內容就是頁面本身。在 hydration 時，瀏覽器會再次讀取字典，一旦主機恢復，文字就會出現，並伴隨 Vue 關於 hydration 不一致的一次主控台錯誤，因為伺服器的 HTML 中是鍵。
+- **爬蟲**會被告知稍後再來。
+- **快取：**`swr` 或 `cache` 路由規則不會儲存狀態碼為 400 以上的任何內容，而 CDN 會收到 `no-store`，因此沒有任何快取會保留原始鍵，恢復後的第一個請求就會呈現真正的文字。
+- **已被規則快取的頁面**會維持原狀：重新驗證失敗且不會儲存任何內容。在 Vercel 上，失敗的 `isr` 重新驗證也會以相同方式保留最後一個頁面。
+
+這涵蓋了渲染所載入的每個 chunk，包括手邊有根檔案但頁面 chunk 失敗的情況，以及在渲染後期才合併的 chunk。擁有正常字典的頁面、重新導向與錯誤頁面會保留它們的狀態碼。[元件 island](/zh-TW/guide/server-side-translations) 是例外：它會維持 200，因為 503 會讓它從頁面中消失，所以自身字典成功載入的頁面，可能會保留 island 的原始鍵。中斷期間的每個請求都會打到主機，除了回應標頭的 60 秒之外，模組本身沒有其他逾時設定。
+
+主機回傳 404 表示它沒有該檔案，這不算失敗。頁面渲染會顯示根字典（與瀏覽器相同），而 `/_locales/...` 會回應相同的 404。兩者都不會被快取，因此檔案出現後會在下一個請求時被讀取，代價是這類頁面每次渲染都會對主機發出一次請求。若連根檔案也沒有，字典就會是空的，且[預先渲染](/zh-TW/guide/upgrade#server,-build-and-deployment)會失敗。
+
+伺服器會將已載入的 payload 保存在程序內的 LRU 快取中，最多 `cacheMaxSize` 筆（預設 1000），若有設定 `cacheTtl`，則會在該時間後重新載入項目；[效能調校](/zh-TW/guide/performance)涵蓋這兩者，而 [`cacheStorage`](/zh-TW/guide/performance#shared-cache-for-several-instances) 則可加入由多個實例共用的快取。不要在此之上為 `/_locales/**` 再加上 Nitro `cache` 路由規則：它以完整 URL（包含查詢字串）作為鍵，會儲存第三份副本。
+
+## App baseURL 與 payload 主機 {#app-baseurl-and-payload-hosts}
+
+**`app.baseURL`** 不需要其他設定。使用 `app.baseURL: '/shop/'` 時，瀏覽器會擷取 `/shop/_locales/...`；副本仍位於 `.output/public/_locales/`，由 Nitro 在 base 之下提供（靜態主機必須將輸出掛載於 `/shop/`）。語系前綴與[排除的路徑](/zh-TW/guide/excluding-static-files)在比對時不含 base。
+
+當 payload 是 `public/` 中的檔案時，**`app.cdnURL`** 也會移動它們：瀏覽器會擷取並預先載入 `<cdnURL>/_locales/...`。
+
+- CDN 必須在該路徑下、於 `_nuxt/` 旁保有 `_locales/`。
+- 由於檔案是透過 `fetch` 取得，它必須允許你網站的來源（CORS）。
+- 只有伺服器路由才能回應的字典（`source` 模式、沒有公開副本）會留在應用程式的來源上。
+
+在 `cloudflare-module` 上於執行階段設定 `NUXT_APP_BASE_URL` 需要 Node 相容性（`nodejs_compat`）。當 `nitro.cloudflare.nodeCompat` 關閉時（在沒有旗標的舊日期上，Nitro 也會退回此狀態），它看不到該變數並會提供 `/`（純 Nuxt 也是如此），而語系重新導向仍會前往 base。在這種情況下，請在建置時設定 `app.baseURL`。
+
+若要從其他來源提供 payload，請將用戶端與伺服器指向它，並關閉本機輸出：
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    apiBaseClientHost: 'https://cdn.example.com',
+    apiBaseServerHost: 'https://cdn.example.com',
+    translationPayloads: {
+      serverHandler: false,
+      publicAssets: false,
+      serverAssets: false,
+    },
+  },
+})
+```
+
+- 在 Node 上，`serverAssets` 會為伺服器自身的讀取寫出相同的副本，而該檔案會回應 `/_locales`：它也必須關閉，即使你為瀏覽器保留伺服器路由也一樣，因為請求永遠不會抵達該路由。
+- 主機必須提供相同的 `<apiBaseUrl>/<page>/<locale>/data.json` 結構。
+- 當所有本機輸出都關閉且缺少主機時，建置會發出警告。
+
+相同的值也可以在建置時來自 `NUXT_I18N_APP_BASE_URL`、`NUXT_I18N_APP_BASE_CLIENT_HOST` 與 `NUXT_I18N_APP_BASE_SERVER_HOST`。`NUXT_I18N_APP_BASE_SERVER_HOST` 在執行階段也有效，且優先於建置時的值。詳情請參閱 [`apiBaseServerHost`](/zh-TW/api/module-options#apibaseserverhost)。
+
+## 平台 {#platforms}
+
+這裡只列出模組或其輸出所需的內容。帳號、區域與 CLI 登入請參閱各平台的文件。
+
+### Cloudflare Workers {#cloudflare-workers}
+
+Preset `cloudflare_module`。`wrangler deploy` 會使用 esbuild 再次打包 Nitro 的輸出，之後原始的 `defineAsyncComponent(() => import('./X.vue'))` 在伺服器上會呈現為空白。Nuxt 的預設錯誤頁面就是這樣的元件，因此 404 的內容會是空的，瀏覽器會記錄 hydration 不一致。接著用戶端會呈現頁面，狀態碼維持 404，但在沒有 JavaScript 的情況下頁面會是空白的。這是 [nuxt#33270](https://github.com/nuxt/nuxt/issues/33270)：不使用此模組的純 Nuxt 也會如此。頁面路由不受影響。
+
+關閉第二次打包：
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: {
+    preset: 'cloudflare_module',
+    cloudflare: {
+      deployConfig: true, // `wrangler` below applies only with it
+      wrangler: {
+        no_bundle: true,
+        find_additional_modules: true,
+        rules: [{ type: 'ESModule', globs: ['**/*.mjs'] }],
+      },
+    },
+  },
+})
+```
+
+```bash
+npx nuxi build
+cd .output/server && npx wrangler deploy -c wrangler.json
+```
+
+請將 `compatibilityDate` 設為 `2024-09-19` 或更晚：較舊的日期會選用舊版 preset，它不會寫出 `wrangler.json`，也不會產生錯誤。如此一來 404 就能正常呈現，上傳大小也會變小：在測試應用程式上為 gzip 後 190 KiB，原本為 246 KiB。另一個解法是使用你自己的 `error.vue`，但它只涵蓋錯誤頁面。
+
+模組本身不需要 `nodejs_compat`。關於限制，請參閱[套件大小限制](#bundle-limits-on-edge)。
+
+### Cloudflare Pages {#cloudflare-pages}
+
+請使用 `cloudflare-pages-static` preset。`nuxi generate --preset cloudflare-pages` 是不含 `index.html` 的伺服器建置。
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: {
+    preset: 'cloudflare-pages-static',
+    prerender: { autoSubfolderIndex: false },
+  },
+})
+```
+
+```bash
+npx nuxi generate
+npx wrangler pages project create my-site --production-branch main --force
+npx wrangler pages deploy dist --project-name my-site --branch main
+```
+
+- **輸出。**此 preset 會寫入 `dist/`，而非 `.output/public`。
+- **`--force`。**若沒有它，新版 wrangler（此處為 4.156）會將 `pages project create` 轉交給 Workers。加上它則會得到傳統的 Pages 專案。只有建立時需要一次。
+- **`autoSubfolderIndex: false`。**Pages 會以 308 將 `/de` 導向 `/de/`，而 canonical 與 `hreflang` 指向的是 `/de`，因此它們會指向一個重新導向。使用此選項後，檔案會是 `de.html`，重新導向就會消失。
+- **404 時主控台中的 `NUXT_E1005`** 是正常的 404。Nuxt 會這樣回報，是因為 `404.html` 在應用程式掛載之前就於用戶端啟動。頁面可以正常運作，純 Nuxt 也會印出同樣的訊息。
+
+### Vercel 與 Vercel Edge {#vercel-and-vercel-edge}
+
+Preset `vercel` 與 `vercel_edge`，應用程式無需任何變更。標籤無需 `metaBaseUrl` 即可運作，會使用平台轉送的標頭。Vercel Edge 的套件大小限制較小：請參閱[套件大小限制](#bundle-limits-on-edge)。若需要共用快取，請使用 [`upstash` 驅動程式](/zh-TW/guide/performance#upstash-on-vercel-and-vercel-edge)。
+
+### Netlify {#netlify}
+
+Preset `netlify` 與 `netlify_edge`。
+
+```bash
+npx nuxi build --preset netlify
+npx netlify deploy --prod --no-build --dir dist --functions .netlify/functions-internal
+```
+
+- **不要設定 `nitro.output`。**此 preset 會自行寫出 `.netlify/` 與 `dist/`。
+- **在你部署的資料夾中保留 `package.json`。**若沒有它，CLI 會查看上層資料夾，並且不會部署任何函式，也不會產生錯誤。
+- **Netlify Edge** 只需使用 `--dir dist` 部署。請參閱 [Edge 執行環境上的日期](#dates-on-edge-runtimes)。
+
+### Cloud Run {#cloud-run}
+
+使用預設的 `node-server` 建置。當本機未執行 docker 時，`gcloud run deploy --source` 需要輸出資料夾中有 `Dockerfile`：
+
+```dockerfile
+# .output/Dockerfile
+FROM node:22-slim
+WORKDIR /app
+COPY . .
+ENV NODE_ENV=production
+CMD ["node", "server/index.mjs"]
+```
+
+```bash
+cd .output && gcloud run deploy my-app --source .
+```
+
+標籤無需 `metaBaseUrl` 即可運作，會使用平台轉送的標頭。
+
+### Deno Deploy {#deno-deploy}
+
+Preset `deno_deploy`。`deno deploy` 取代了 `deployctl`。建立一個進入點為 `server/index.ts` 的動態應用程式，並從輸出資料夾部署。
+
+### Firebase {#firebase}
+
+| 產品 | 設定 |
+| --- | --- |
+| App Hosting | 執行 Node 建置：使用預設 preset 或 `firebase-app-hosting`，以及 Node 20+ |
+| Cloud Functions | `firebase` preset 會嵌入 payload，並需要 `firebase-functions` |
+| Hosting（靜態） | 將 `.output/public` 作為檔案提供，因此 `/_locales/**` 會取得 Hosting 的標頭 |
+
+在靜態 Hosting 上，若 JSON 回傳的 `Content-Type` 或快取設定不正確，請在 `firebase.json` 中為 `/_locales/**` 加入 `headers` 項目。Nuxt `routeRules` 的標頭不會套用到由 Hosting 自行提供的檔案；對於確實抵達伺服器的回應，payload 路由會自行設定 `Content-Type` 與 `Cache-Control`。
+
+### AWS Amplify {#aws-amplify}
+
+`aws-amplify` 將靜態檔案放在其運算資料夾旁，而非伺服器旁，因此 payload 會像在函式平台上一樣被嵌入。
+
+### 同一建置的多個實例 {#several-instances-of-one-build}
+
+同一個產出物可以透過環境變數，讓每個實例使用不同的預設語系或停用語系：請參閱[執行階段覆寫](/zh-TW/guide/runtime-overrides)。僅在執行階段停用的語系，其靜態檔案仍存在於 `public/` 中；若這些檔案不得被存取，請在建置時停用該語系。
+
+從遠端主機載入字典的多個實例，可以透過 Redis、Upstash、Cloudflare KV 或 D1、Deno KV 或其他 Nitro storage 共用字典，讓後端只收到一次請求，而不是每個實例各一次。這是快取，而非翻譯來源：請參閱[多個實例的共用快取](/zh-TW/guide/performance#shared-cache-for-several-instances)。
+
+## 在代理伺服器或 CDN 後方 {#behind-a-proxy-or-cdn}
+
+應用程式必須從請求中得知公開的主機與協定。
+
+| 代理伺服器傳送的內容                         | 一般建置                                         | 語系上設有 `baseUrl` 的建置                                                       |
+| -------------------------------------------- | ------------------------------------------------ | --------------------------------------------------------------------------------- |
+| 真實的 `Host`                                | 無需設定                                         | 無需設定                                                                          |
+| 來源的 `Host`，加上 `X-Forwarded-Host`       | 無需設定                                         | [`trustForwardedHost: true`](/zh-TW/api/module-options#trustforwardedhost)        |
+| 兩者皆無                                     | [`metaBaseUrl`](/zh-TW/api/module-options#metabaseurl) | 沒有任何設定有幫助：每個請求看起來都像是來源的主機，因此請修改代理伺服器    |
+
+- **位於 `swr` 或 `cache` 下的路由。**上表在此不適用：請參閱[快取 HTML](#caching-html)。請設定 `metaBaseUrl` 或 `site.url`。
+- **`X-Forwarded-Proto`。**請傳送它，否則在 HTTPS 代理伺服器後方，canonical URL 會變成 `http://`。`metaBaseUrl` 也能修正此問題。
+- **在網域建置中**，由網域決定標籤的基礎 URL。在那裡 `metaTrustForwardedHost` 不會選擇網域，只有 `trustForwardedHost` 會。
+- **重新導向是相對的，且語系 cookie 沒有 `Domain`，**因此兩者都會停留在公開主機上。
+
+<Warning>
+
+**當來源仍可直接存取時，請固定 `metaBaseUrl`** — 在未設定 `metaBaseUrl` 或 `site.url` 的一般建置中，canonical、`hreflang` 與 `og:url` 會從請求取得主機。[`metaTrustForwardedHost`](/zh-TW/api/module-options#metatrustforwardedhost) 預設為開啟，因此帶有 `X-Forwarded-Host: evil.example` 的直接請求，會在這些標籤中得到 `https://evil.example`，而前方的快取會散布該頁面。像 `*.workers.dev` 這樣的平台主機正是這種來源。`metaBaseUrl` 也能針對 `Host` 堵住這個漏洞。網域建置的已知主機會保留其自身的 `baseUrl`。使用 `trustForwardedHost: true` 時，直接連線的用戶端可以選擇另一個網域的頁面，因此只有在會覆寫該標頭的代理伺服器後方才開啟它。
+
+</Warning>
+
+## 快取 HTML {#caching-html}
+
+大多數 URL 都可以安全地快取，因為它們會標明自己的語系。以下則取決於訪客：
+
+| 設定                           | URL                                               |
+| ------------------------------ | ------------------------------------------------- |
+| 預設，`autoDetectPath: '/'`    | `/`                                               |
+| `prefix`                       | `/` 以及每個無前綴的 URL（它們只會重新導向）      |
+| `autoDetectPath: '*'`          | 每個 URL                                          |
+| `no_prefix`                    | 每個頁面                                          |
+
+- **`Vary`。**當設定了 [`localeCookie`](/zh-TW/api/module-options#localecookie) 時，這些回應會在 `Vary` 中帶有 `Cookie`；當 `autoDetectLanguage` 開啟時，則帶有 `Accept-Language`。遵循它的快取會將不同的回應分開保存。
+- **忽略 `Vary` 的快取**（例如「依 URL 快取所有內容」）必須略過這些 URL。否則某位訪客的 `302 /de` 會傳給下一位訪客，而已儲存的預設頁面會讓所有人都失去重新導向。在 `/` 上，你也可以設定 `redirects: false`。Nitro 的路由快取以路徑及其 `varies` 清單為鍵，因此也請將 `/` 排除在 `swr` 與 `cache` 規則之外。
+- **`Set-Cookie`。**設定 `localeCookie` 時，前綴下每個伺服器渲染的頁面都會帶有 `Set-Cookie`，而正確的 CDN 不會儲存它。若要快取 HTML，請關閉 `localeCookie`，或在邊緣移除該標頭。
+- **`swr` 與 `cache` 規則需要 `metaBaseUrl` 或 `site.url`。**Nitro 只會以 `cache.varies` 中的標頭來呈現這類路由，因此 `Host`、`X-Forwarded-Host` 與 `X-Forwarded-Proto` 都會消失，請求 URL 會變成 `http://localhost`。若沒有固定的來源，這些路由上的 canonical、`hreflang` 與 `og:url` 在每個平台上都會指向 `http://localhost`。純 Nuxt 的 `useRequestURL()` 在那裡也會讀到相同的值。若改從訪客取得主機，則會把某位訪客的 `X-Forwarded-Host` 放進每位訪客都會拿到的頁面中。網域建置不受影響：它的標籤使用語系的 `baseUrl`。
+
+  如果同一個建置服務多個主機，且沒有單一來源適用，請讓規則看到這些標頭，並為每個值保留一份副本：`'/blog/**': { swr: 60, cache: { varies: ['host', 'x-forwarded-host', 'x-forwarded-proto'] } }`。每個不同的值都是新的快取項目，因此傳送捏造標頭的用戶端會塞滿快取：請將來源放在會設定這些標頭的代理伺服器後方。
+- **網域建置上的 `swr` 與 `cache` 規則。**模組會將 `host` 加入每個此類規則的 `cache.varies`，並在使用 `trustForwardedHost` 時加入 `x-forwarded-host`，讓某個網域不會把它的頁面提供給另一個網域。設有 `cache: false` 的規則會維持原樣。`isr` 是平台的快取：請確認它以主機作為鍵。當主機成為鍵的一部分時，傳送捏造主機的用戶端會增加快取項目。
+
+關於 payload 檔案，請參閱[快取標頭與 dateBuild](#cache-headers-and-datebuild)。
+
+## 相關內容 {#related}
+
+<CardGroup cols={2}>
+
+<Card title="效能調校" icon="book-open" href="/zh-TW/guide/performance">
+
+</Card>
+
+<Card title="執行階段覆寫" icon="book-open" href="/zh-TW/guide/runtime-overrides">
+
+</Card>
+
+<Card title="translationPayloads 參考" icon="brackets-curly" href="/zh-TW/api/module-options#translationpayloads">
+
+</Card>
+
+<Card title="分層與網域" icon="book-open" href="/zh-TW/guide/layers">
+
+</Card>
+
+<Card title="SEO" icon="book-open" href="/zh-TW/guide/seo">
+
+</Card>
+
+</CardGroup>

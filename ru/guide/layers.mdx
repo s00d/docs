@@ -1,0 +1,128 @@
+---
+title: "Слои и домены"
+description: "Делитесь конфигурацией i18n и файлами переводов через слои Nuxt и обслуживайте локали на собственных доменах."
+---
+
+Слой Nuxt может содержать конфигурацию i18n и папку `locales/` для нескольких приложений, а каждое приложение добавляет или переопределяет то, что ему нужно. На этой странице показано, как это сделать и как одна сборка обслуживает несколько доменов.
+
+## Общая конфигурация и переводы {#share-config-and-translations}
+
+```ts
+// base/nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    locales: [
+      { code: 'en', iso: 'en-US' },
+      { code: 'de', iso: 'de-DE' },
+      { code: 'fr', iso: 'fr-FR' },
+    ],
+    defaultLocale: 'en',
+  },
+})
+```
+
+```ts
+// shop/nuxt.config.ts
+export default defineNuxtConfig({
+  extends: ['../base'], // a layer directory or package, not a nuxt.config file
+  i18n: {
+    locales: [
+      { code: 'es', iso: 'es-ES' }, // added
+      { code: 'fr', disabled: true }, // the base layer's fr, switched off here
+    ],
+  },
+})
+```
+
+- **Конфигурация:** скалярные опции приложения заменяют опции слоя. Массивы `locales` всех слоёв объединяются, а записи с одинаковым `code` сливаются в одну, причём поля приложения имеют приоритет, так что приложение может добавить локаль или задать поля вроде `disabled: true` для унаследованной.
+- **Переводы:** папки `locales/` всех слоёв объединяются по ключам — сначала слой, последним приложение, поэтому ключ в `shop/locales/en.json` переопределяет тот же ключ в `base/locales/en.json`. Файлы страниц (`locales/pages/<page>/`) объединяются так же.
+- **Страницы:** `$defineI18nRoute` читается из страниц всех слоёв.
+
+Чтобы объединить папки, не входящие в слой, перечислите их в [`additionalTranslationDirs`](/ru/api/module-options#additionaltranslationdirs).
+
+## Несколько доменов {#multiple-domains}
+
+Одна сборка обслуживает все домены. Укажите для каждой локали её домен; `baseDefault` делает её локалью по умолчанию для этого хоста:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    strategy: 'prefix_except_default',
+    defaultLocale: 'en',
+    locales: [
+      { code: 'en', iso: 'en-US', baseUrl: 'https://example.com', baseDefault: true },
+      { code: 'de', iso: 'de-DE', baseUrl: 'https://example.de', baseDefault: true },
+      { code: 'nl', iso: 'nl-NL', baseUrl: 'https://example.de' },
+      { code: 'fr', iso: 'fr-FR' },
+    ],
+  },
+})
+```
+
+Направьте оба домена на один и тот же сервер. Остальное решает хост запроса:
+
+- **По умолчанию:** локаль хоста с `baseDefault`. Если её нет — локаль по умолчанию из сборки, если хост её обслуживает, иначе первая локаль хоста.
+- **Обслуживаемые локали:** локали этого хоста плюс все локали без `baseUrl`. На `example.de` это `de`, `nl` и `fr`.
+- **Локали других доменов** — цели ссылок. `$localePath`, `$localeRoute`, `$switchLocalePath`, `<i18n-switcher>` и `hreflang` дают абсолютные URL на их `baseUrl`, а `$switchLocale` переходит туда. На этом хосте их URL возвращают 404, и cookie или `Accept-Language` не могут их выбрать.
+- **Ссылка на другой домен** создаётся через `$localePath` или `<i18n-link>`: `<NuxtLink :to="$localePath('/contact', 'de')">`, `<i18n-link :to="$localeRoute('/contact', 'de')">`. Роутер не принимает абсолютный объект, поэтому `<NuxtLink :to="$localeRoute(...)">` и `router.push($localeRoute(...))` остаются на текущем origin. На `localhost` или хосте предпросмотра такой ссылкой является каждая локаль с `baseUrl`, включая текущую. В коде используйте `navigateTo($localePath('/contact', 'de'), { external: true })` или `$switchRoute`.
+- **Любой другой хост** получает конфигурацию сборки, где все локали с `baseUrl` — цели ссылок. Ничего из запроса не повторяется в ответе: canonical и `hreflang` используют `metaBaseUrl`, иначе `baseUrl` локали по умолчанию из сборки (локали по умолчанию без `baseUrl` нужен `metaBaseUrl` или `site.url`, см. [SEO](/ru/guide/seo#set-the-public-origin)).
+- **Файлы payload** в `public/` статичны: любой хост отдаёт файл любой локали. [Generate](/ru/guide/deployment#static-site-(nuxi-generate)) для каждого домена публикует только файлы этого домена.
+
+`example.de` при каждой стратегии, где `de: '/kontakt'` — пользовательский путь для `contact`:
+
+| Стратегия | `/` | Страница локали по умолчанию | Другие URL |
+| --- | --- | --- | --- |
+| `prefix_except_default` | `de` | `/kontakt` | `/de/kontakt` и `/en/contact` возвращают 404, `/contact` перенаправляет на `/kontakt` |
+| `prefix_and_default` | `de` | `/kontakt` и `/de/kontakt`, ссылки используют `/kontakt` | `/en/contact` и `/contact` возвращают 404 |
+| `prefix` | перенаправляет на `/de` | `/de/kontakt` | `/kontakt` перенаправляет на `/de/kontakt`, `/en/contact` возвращает 404 |
+| `no_prefix` | `de` | `/kontakt` | пользовательский путь локали другого домена возвращает 404 |
+
+При `prefix` ссылка с другого домена сохраняет префикс, поскольку URL без префикса привёл бы лишь к редиректу. При `no_prefix` ссылка на другой домен ведёт на локаль по умолчанию этого хоста: URL не может указать вторую.
+
+Что нужно знать:
+
+- **За прокси** хост берётся из `Host`. Если прокси передаёт публичный хост в `X-Forwarded-Host`, задайте [`trustForwardedHost`](/ru/api/module-options#trustforwardedhost), и только если прокси перезаписывает этот заголовок. Прокси, который не передаёт ни того, ни другого, не может обслуживать доменную сборку. См. [За прокси или CDN](/ru/guide/deployment#behind-a-proxy-or-cdn).
+- **`app.baseURL`** тоже должен входить в `baseUrl`: `baseUrl: 'https://example.de/shop'` вместе с `app.baseURL: '/shop'`.
+- **Хосты сравниваются точно.** `www.example.de` — другой хост: перенаправляйте его на edge или задайте этот `baseUrl` для локали. Только один хост на локаль.
+- **Кэши должны учитывать хост в ключе.** CDN обычно так и делает. Кэш маршрутов Nitro использует в ключе путь, поэтому в доменной сборке модуль добавляет `host` в `cache.varies` каждого правила `swr` и `cache`, а также `x-forwarded-host` при `trustForwardedHost`. Правило с `cache: false` остаётся как есть. `isr` — это кэш платформы: проверьте, что он учитывает хост.
+- **Пользовательские пути локалей по умолчанию двух хостов не должны пересекаться.** Записи без префикса используют один роутер, поэтому `/x` не может быть одной страницей на `example.de` и другой на `example.com`.
+- **Пререндеренные страницы:** правило маршрута `prerender: true` в `nuxt build` рендерит страницу один раз, без хоста, и этот файл отвечает на всех доменах. Оставьте страницы, различающиеся по доменам, серверу или [генерируйте для каждого домена](/ru/guide/deployment#static-site-(nuxi-generate)).
+- **`noPrefixRedirect`** ориентируется на локаль хоста и посетителя на каждом хосте.
+- **`hashMode`:** хост выбирает рендер, как описано выше; ссылки на другой домен передают маршрут в хеше (`https://example.com/#/contact`).
+- **`ssr: false`:** браузер читает домен из `location.host`, поэтому хост без сервера тоже разрешается.
+- **[Переопределения во время выполнения](/ru/guide/runtime-overrides)** применяются первыми. Заданный во время выполнения `disabledLocales` действует на каждом хосте за одним исключением: при `prefix_except_default` и `prefix_and_default` локаль по умолчанию хоста остаётся включённой на своём хосте, так как её страницы — это записи без префикса. При `prefix` и `no_prefix` хост переходит к следующей обслуживаемой локали. Заданный во время выполнения `defaultLocale` применяется только к неизвестным хостам.
+
+Для [статического сайта](/ru/guide/deployment#static-site-(nuxi-generate)) выполняйте генерацию один раз для каждого домена.
+
+### Одно приложение на домен {#one-app-per-domain}
+
+Общий слой с отдельным небольшим приложением для каждого домена по-прежнему работает, если доменам нужны разные страницы или модули. Каждое приложение задаёт собственный `defaultLocale` поверх общего списка `locales`. Локаль другого домена в таком приложении возвращает 404, как описано выше.
+
+### Выбор локали в коде {#choosing-the-locale-in-code}
+
+О едином экземпляре, отвечающем на всех доменах с собственным origin запроса в SEO-тегах, см. [SEO](/ru/guide/seo#set-the-public-origin); о выборе локали по хосту в коде см. [Пользовательское определение локали](/ru/guide/custom-auto-detect).
+
+## См. также {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Файлы переводов" icon="book-open" href="/ru/guide/translations">
+
+</Card>
+
+<Card title="Переопределения во время выполнения" icon="book-open" href="/ru/guide/runtime-overrides">
+
+</Card>
+
+<Card title="SEO" icon="book-open" href="/ru/guide/seo">
+
+</Card>
+
+<Card title="Слои Nuxt" icon="arrow-up-right-from-square" href="https://nuxt.com/docs/getting-started/layers">
+
+</Card>
+
+</CardGroup>

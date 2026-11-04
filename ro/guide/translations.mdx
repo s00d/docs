@@ -1,0 +1,132 @@
+---
+title: "Fișiere de traducere"
+description: "Unde se află cheile de traducere, cum se combină fișierele rădăcină și de pagină cu fallback-urile și cum își încarcă o pagină dicționarul."
+---
+
+Traducerile sunt fișiere JSON simple: un fișier rădăcină per limbă pentru cheile comune și un fișier per pagină și limbă pentru cheile acelei pagini. Citiți această pagină când adăugați pagini, partajați chei între ele sau configurați fallback-uri. Veți afla în ce fișier trebuie să ajungă o cheie, ce poate vedea o pagină și când este încărcat fiecare fișier.
+
+## Structură {#layout}
+
+```text
+locales/
+├── en.json                 # root: menus, footer, buttons
+├── de.json
+└── pages/
+    ├── index/              # pages/index.vue
+    │   ├── en.json
+    │   └── de.json
+    ├── about/              # pages/about.vue
+    │   ├── en.json
+    │   └── de.json
+    └── products-id/        # pages/products/[id].vue
+        ├── en.json
+        └── de.json
+```
+
+- Folderul de sub `locales/pages/` este **numele de rută** Nuxt al paginii: `pages/products/[id].vue` este `products-id`, `pages/blog/[slug]/comments.vue` este `blog-slug-comments`.
+- Cheile pot fi imbricate la orice adâncime; `$t('auth.form.login')` citește `{ "auth": { "form": { "login": … } } }`.
+- `translationDir` mută folderul (implicit `'locales'`, relativ la rădăcina proiectului, inclusiv în structura `app/` din Nuxt 4).
+- Fișierele lipsă sunt create ca `{}` când Nuxt rezolvă paginile, cu excepția cazului în care este setat [`disableWatcher`](/ro/api/module-options#disablewatcher).
+
+## Ce vede o pagină {#what-a-page-sees}
+
+![Ordinea de căutare a unei chei pe /about în de: pages/about/de.json, de.json, pages/about/en.json, en.json. Acestea se îmbină într-un singur about/de/data.json pe care îl citește $t](/images/diagrams/page-dictionary.svg)
+
+Dicționarul unei pagini este fișierul ei rădăcină îmbinat în profunzime (la fiecare nivel) cu fișierul paginii. La conflict, fișierul paginii are prioritate:
+
+```json
+// locales/en.json
+{ "title": "My shop", "nav": { "home": "Home", "cart": "Cart" } }
+```
+
+```json
+// locales/pages/about/en.json
+{ "title": "About us", "nav": { "cart": "Basket" } }
+```
+
+```ts
+// on /about
+t('title') // 'About us'
+t('nav.home') // 'Home'   (root)
+t('nav.cart') // 'Basket' (page wins)
+// on any other page
+t('title') // 'My shop'
+```
+
+O pagină fără folder propriu primește doar dicționarul rădăcină. Cheile altor pagini nu sunt vizibile.
+
+### Limbi de fallback {#fallback-locales}
+
+O cheie care lipsește în limba activă este preluată din limba ei de fallback înainte ca însăși cheia să fie afișată:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    locales: [
+      { code: 'en', iso: 'en-US' },
+      { code: 'de', iso: 'de-DE' },
+      { code: 'de-at', iso: 'de-AT', fallbackLocale: 'de' },
+    ],
+    defaultLocale: 'en',
+    fallbackLocale: 'en', // global, for every locale
+  },
+})
+```
+
+- `fallbackLocale`-ul propriu al unei limbi este urmat până la capăt: `de-at` → `de` → `en`.
+- `fallbackLocale`-ul global este stratul cel mai slab, sub fiecare lanț.
+- Fiecare limbă din lanț adaugă fișierul ei rădăcină, apoi fișierul ei de pagină, de la fallback-ul cel mai slab până la limba activă. Astfel, fișierul rădăcină al limbii active are prioritate față de fișierul de pagină al unei limbi de fallback.
+
+Fără fallback, o cheie lipsă este randată ca cheia însăși (`'nav.home'`) și generează un avertisment în consola browserului în dezvoltare ([`missingWarn`](/ro/api/module-options#missingwarn)).
+
+## Partajare și alte surse {#sharing-and-other-sources}
+
+| Nevoie | Opțiune |
+| --- | --- |
+| Doar fișiere rădăcină, fără foldere `pages/` | [`disablePageLocales: true`](/ro/api/module-options#disablepagelocales) |
+| Două pagini citesc un singur folder de pagină | [`routesLocaleLinks`](/ro/api/module-options#routeslocalelinks): `{ 'about-us': 'about' }` |
+| Fișiere rădăcină comune într-un alt folder | [`additionalTranslationDirs`](/ro/api/module-options#additionaltranslationdirs): `['common']` (`translationDir`-ul principal are prioritate) |
+| Chei dintr-un strat Nuxt | Fișierele straturilor se îmbină, fișierele proprii ale proiectului au prioritate. Consultați [Straturi](/ro/guide/layers) |
+| Chei adăugate la rulare | hook-ul [`i18n:register`](/ro/api/events), `$mergeTranslations`, `$setTranslation` |
+| Chei inline într-o componentă de pagină | `$defineI18nRoute({ locales: { en: { … } } })`, consultați [Configurarea paginii](/ro/guide/per-component-translations) |
+
+## Cum își încarcă o pagină dicționarul {#how-a-page-loads-its-dictionary}
+
+![Fișierele JSON de limbă sunt construite într-un arbore de payload-uri, stocat în public/ pe Node sau în asset-urile serverului pe Edge, citit de un loader de server, apoi folosit de $t pe server și preluat pentru $t în browser](/images/diagrams/translation-pipeline.svg)
+
+Modulul construiește un payload per pagină și limbă: `/{apiBaseUrl}/{page}/{locale}/data.json` (implicit `/_locales/about/de/data.json`).
+
+1. **Randarea pe server.** Nitro detectează limba, iar pagina își încarcă payload-ul direct din loader-ul de server, fără nicio cerere HTTP. Dicționarul nu este scris în payload-ul HTML, așa că paginile rămân mici.
+2. **Hidratarea.** Browserul preia același payload. Serverul a emis deja un `<link rel="preload">` pentru el, așa că preluarea începe odată cu HTML-ul.
+3. **Navigarea.** Payload-ul paginii următoare înlocuiește dicționarul. Cheile paginii care se închide se rezolvă în continuare până când aceasta dispare (sfârșitul tranziției de pagină sau `page:finish`), astfel încât o pagină care se estompează nu afișează chei brute. Un chunk care nu se încarcă (eroare de rețea, 4xx sau 5xx, un corp care nu este obiect) lasă dicționarul curent pe loc, iar următoarea navigare îl încarcă din nou. La fel se întâmplă cu o schimbare de limbă eșuată: `$switchLocale` se rezolvă cu `false`, iar apelarea sa din nou, sau un nou clic pe selector, reîncearcă. Sub strategiile cu prefix, URL-ul s-a schimbat deja până atunci, așa că `lang` și `$getLocale()` indică limba din URL, în timp ce textele vechi rămân pe ecran.
+4. **Cache.** Payload-urile încărcate sunt păstrate în cache pe server și în browser; pagina [Performanță](/ro/guide/performance) conține opțiunile pentru dimensiune și TTL.
+
+`translationPayloads.mode` decide cum sunt construite payload-urile. `'premerged'` (implicit) scrie fiecare fișier pagină × limbă la build. `'source'` păstrează fișierele sursă și le îmbină la fiecare cerere, ceea ce este mai compact pentru cataloage mari pe ținte Edge. Ambele produc aceleași dicționare. Unde ajung fișierele pentru fiecare țintă de implementare găsiți în [Implementare](/ro/guide/deployment).
+
+## Editarea în dezvoltare {#editing-in-development}
+
+`nuxt dev` citește fișierele în timp real. Salvarea unui fișier de traducere reîmprospătează pe loc dicționarul paginii deschise: fără reîncărcare, cheile eliminate dispar, iar o modificare a unui fișier rădăcină ajunge la fiecare pagină. Un fișier JSON defect generează un avertisment cu calea sa și este tratat ca gol. Setați [`hmr: false`](/ro/api/module-options#hmr) pentru a reîmprospăta manual.
+
+## Pagini conexe {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Configurarea paginii" icon="book-open" href="/ro/guide/per-component-translations">
+
+Limbi per pagină și traduceri inline
+
+</Card>
+
+<Card title="Metode" icon="brackets-curly" href="/ro/api/methods">
+
+`$t`, `$tc`, `$tn`, `$td`
+
+</Card>
+
+<Card title="Implementare" icon="book-open" href="/ro/guide/deployment">
+
+</Card>
+
+</CardGroup>

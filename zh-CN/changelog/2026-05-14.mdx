@@ -1,0 +1,83 @@
+---
+title: "v3.20.0 — 运行时层重构与重定向拆分"
+description: "发布说明：v3.20.0 — 运行时层重构与重定向拆分"
+---
+
+**日期**：2026-05-14
+
+**版本**：`v3.20.0`
+
+![v3.20.0 发布](/images/3.20.0.png)
+
+本次发布将 Nuxt 运行时重构为独立的 **`NuxtI18n`** 层，拆分了服务器/客户端的重定向处理，并修复了若干 SSR/水合回归问题。对于典型应用，公共组合式函数和 `nuxt.config` 选项保持不变。
+
+## 有哪些新内容？ {#what’s-new}
+
+### `NuxtI18n` 与 `NuxtTranslationLoader` {#nuxti18n-&-nuxttranslationloader}
+
+运行时 i18n 逻辑从单体插件中移出，拆分为职责明确的类：
+
+- **`NuxtI18n`** — 活动翻译视图层（`$t`、`$has`、语言环境/路由上下文、过渡期间的合并/清理）
+- **`NuxtTranslationLoader`** — 加载分块、在导航时切换上下文、为 SSR 负载提供初始数据
+- **`createNuxtI18nPluginApi`** — 精简的插件接口（`$switchLocale`、`$localeRoute` 等）
+
+请参阅更新后的[缓存与存储架构](https://s00d.github.io/nuxt-i18n-micro/v3/api/i18n-cache-api)和[性能](/zh-CN/guide/performance)。
+
+### 通过 `useState('i18n-ssr-chunks')` 传递 SSR 负载 {#ssr-payload-via-usestate‘i18n-ssr-chunks’}
+
+SSR 翻译通过 **Nuxt 状态**进行序列化，而不是通过 `window.__I18N__` script 标签：
+
+1. 服务器加载分块 → `useState('i18n-ssr-chunks')`
+2. 客户端水合 → `translationStorage.seedFromSsrChunks()`
+3. 首次绘制时零额外请求
+
+旧的 `window.__I18N__` 读取路径已被**移除**。
+
+### 重定向架构拆分 {#redirect-architecture-split}
+
+重定向现在按环境区分，行为更清晰，客户端卡顿更少：
+
+| 环境    | 组件                      | 职责                                       |
+| -------------- | ------------------------------ | ------------------------------------------ |
+| **服务器 SSR** | `06.redirect.ts`（仅服务器） | 渲染前 302、404 检查、cookie 同步 |
+| **客户端 SPA** | `i18n-redirect.global.ts`      | 导航时的全局路由中间件      |
+
+客户端重定向从**目标路由**推导语言环境，保留**查询字符串和哈希**，并遵循 `redirects: false`（不注册中间件）。请参阅[语言环境检测 — 各策略的重定向](/zh-CN/guide/locale-detection#redirects-per-strategy)。
+
+### `i18n:register` 钩子时机 {#i18nregister-hook-timing}
+
+**`05.hooks`** 插件（`dependsOn: i18n-plugin-loader`）会在加载器就绪后触发 `i18n:register` — 在启动时和导航时都会触发 — 因此用户插件能够可靠地接收到该事件。使用 `hooks: false` 禁用。请参阅[事件](/zh-CN/api/events)。
+
+### 构建时提取 `defineI18nRoute` {#build-time-definei18nroute-extraction}
+
+一个 Vite unplugin 会在构建时扫描页面 `.vue` 文件，并为 `@i18n-micro/route-strategy` 写入路由元数据。`script setup` 中的运行时 `$defineI18nRoute` 仍保留，用于开发和内联配置。请参阅[组件级翻译](/zh-CN/guide/per-component-translations)。
+
+## 问题修复 {#bug-fixes}
+
+- **SSR 水合** — 在 `Object.freeze` 之前克隆响应式 SSR 分块（修复客户端 `#locale` / 404 崩溃）
+- **语言环境切换** — 语言环境变化时替换视图层（不再残留上一个语言环境的键）
+- **客户端重定向** — 语言环境取自目标路由；重定向时保留查询/哈希
+- **`has()`** — 只检查活动语言环境；回退只在 `$t()` 中生效，不在 `$has()` 中生效
+- **`defineI18nRoute` 元数据** — 按插件实例缓存；匹配最长的 `rootDir`；正确区分 `pages/index` 与 `pages/index/index` 路径
+
+## 文档 {#documentation}
+
+指南和 API 参考已针对新架构更新：
+
+- [策略](/zh-CN/guide/strategy)、[v3 升级](https://s00d.github.io/nuxt-i18n-micro/v3/guide/v3-upgrade)、[自定义语言检测](/zh-CN/guide/custom-auto-detect)
+- [常见问题 — 在不更改 URL 的情况下切换语言环境](/zh-CN/guide/faq#can-i-switch-locale-without-changing-the-url?)
+- [配置](https://s00d.github.io/nuxt-i18n-micro/v3/guide/configuration) — `redirects` 和 `hooks` 的行为
+
+## 破坏性变更 {#breaking-changes}
+
+对于标准的 `nuxt.config` + 组合式函数用法，没有破坏性变更。内部路径和 SSR 注入机制已更改；依赖手动注入 `window.__I18N__` 的应用必须改用 Nuxt 负载 / 模块 API。
+
+## 为什么重要 {#why-it-matters}
+
+- **更可靠的 SSR → 客户端交接** — 使用 Nuxt 原生状态，而不是临时的全局变量
+- **更清晰的重定向模型** — 服务器在绘制前返回 302；客户端中间件只在需要时使用
+- **更易于维护** — 运行时拆分为可测试的单元，并配有针对性的回归测试
+
+完整的变更日志将随版本发布在 [GitHub](https://github.com/s00d/nuxt-i18n-micro/blob/main/CHANGELOG.md) 上。
+
+---

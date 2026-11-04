@@ -1,0 +1,440 @@
+---
+title: "Implementare"
+description: "Implementează pe un server Node, serverless sau Edge, ori ca site static — unde ajung payload-urile de traduceri, de ce are nevoie fiecare platformă, proxy-uri și caching."
+---
+
+Modulul funcționează cu orice preset Nitro fără configurație suplimentară: alege locul fișierelor de traducere în funcție de presetul pentru care construiești. Valorile implicite sunt potrivite pentru majoritatea aplicațiilor; citește secțiunea pentru platforma ta. Această pagină explică:
+
+- ce ajunge în `.output/` și ce headere primesc payload-urile;
+- ce trebuie schimbat pentru găzduire statică, cataloage mari, o subcale, un proxy sau un CDN.
+
+<Note>
+
+Implementat și verificat pe host-uri reale: Cloudflare Workers și Pages, Vercel și Vercel Edge, Netlify și Netlify Edge, Cloud Run și Deno Deploy, fiecare cu ceea ce listează [Platforme](#platforms). Celelalte preseturi au fost construite și rulate local.
+
+</Note>
+
+## Cum sunt livrate traducerile {#how-translations-are-delivered}
+
+La momentul build-ului, modulul transformă `locales/` (toate straturile îmbinate) în **payload-uri**: câte un fișier JSON pentru fiecare pagină și limbă. Două componente le citesc:
+
+- **SSR** încarcă payload-ul paginii randate în proces — fără cerere HTTP, iar dicționarul nu este încorporat în HTML.
+- **Browserul** descarcă `/_locales/<page>/<locale>/data.json?v=<dateBuild>` la hidratare și la navigare.
+
+`_locales` este [`apiBaseUrl`](/ro/api/module-options#apibaseurl). Ruta de server încorporată răspunde la acel URL; copia statică din `public/` îi răspunde fără server.
+
+## Server Node {#node-server}
+
+```bash
+npx nuxi build
+node .output/server/index.mjs
+```
+
+Cu `node-server` (presetul implicit), `node-cluster`, `bun`, `deno-server` sau orice alt preset care servește `public/` de pe disc, cu `public/` lângă folderul `server/`:
+
+- payload-urile sunt copiate în `.output/public/_locales/<page>/<locale>/data.json`;
+- SSR le citește din acel folder cu `fs` (nimic nu este inclus în bundle-ul serverului);
+- browserul le primește ca fișiere statice sau de la ruta de server.
+
+Implementează întregul director `.output/`. Modulul necesită Node 20 sau mai nou, iar Nuxt are propriul minim: Nuxt 4.5 declară `^22.19.0 || ^24.11.0 || >=26.0.0`.
+
+Un proces aflat sub sarcină constantă poate ocupa mult mai multă memorie decât heap-ul său activ. Vezi [Memoria pe un server Node](/ro/guide/performance#memory-on-a-node-server) înainte de a seta o limită pentru container.
+
+Cu o altă structură, modulul încorporează payload-urile așa cum este descris în secțiunea următoare. Aceasta acoperă:
+
+- un `nitro.output.publicDir` personalizat, pe care build-ul îl citește o singură dată;
+- `serveStatic: true` pe un preset care păstrează fișierele statice în altă parte.
+
+<Warning>
+
+Dacă un build citește `public/` și folderul nu ajunge la server, ca în cazul `aws-lambda` și `serveStatic: true`, serverul înregistrează o eroare, iar paginile afișează chei brute. Setează `nitro.serveStatic: false` pentru a încorpora payload-urile.
+
+</Warning>
+
+## Serverless și Edge {#serverless-and-edge}
+
+Aceste preseturi nu pot citi `public/` la runtime:
+
+- preseturi de funcții care livrează `public/` către un CDN sau nu îl servesc: `vercel`, `netlify`, `aws-lambda`, `aws-amplify`, `azure-swa`, `firebase`, `stormkit`, `zeabur`, `node-listener`;
+- preseturi Edge fără sistem de fișiere: `cloudflare-module`, `cloudflare-pages`, `vercel-edge`, `netlify-edge`, `deno_deploy`;
+- `serveStatic: 'inline'`, precum `winterjs`.
+
+Acolo modulul încorporează payload-urile în bundle-ul serverului ca server assets Nitro (`assets:i18n`) și scrie în continuare copia publică pentru browser.
+
+Încorporarea întregii matrice pagină × limbă face bundle-ul mare. Peste limita unei platforme Edge, build-ul avertizează și o numește, vezi [Limitele bundle-ului](#bundle-limits-on-edge). Pentru cataloage mari, treci la modul `source`, care încorporează fișierele sursă compacte și îmbină traducerile rădăcină, de pagină și de fallback la runtime:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    translationPayloads: {
+      mode: 'source',
+    },
+  },
+})
+```
+
+În modul `source`, browserul descarcă întotdeauna payload-urile de la ruta de server, care le îmbină la cerere (orice copie publică conține arborele sursă compact pe care doar serverul îl citește). Acest lucru necesită un server care rulează, așa că nu folosi `source` pentru un site pur static.
+
+### Limitele bundle-ului pe Edge {#bundle-limits-on-edge}
+
+| Platformă          | Limită                                                                                 |
+| ------------------ | -------------------------------------------------------------------------------------- |
+| Cloudflare Workers | 64 MiB necomprimat, pe Free și Paid. Fără limită pentru varianta comprimată. Pornire în 1 s, memorie 128 MB |
+| Vercel Edge        | 1 MB gzip pe Hobby, 2 MB pe Pro, 4 MB pe Enterprise                                    |
+| Netlify Edge       | 20 MB comprimat                                                                        |
+
+Build-ul însumează dicționarele pe care le încorporează și avertizează doar peste cea mai mică limită a platformei. Numără doar dicționarele, așa că aplicația se adaugă peste. De exemplu, 120 de pagini × 4 limbi cu un fișier rădăcină de 60 KB încorporează:
+
+| Mod | Încorporat | Încape |
+| --- | --- | --- |
+| `premerged` | 34.9 MiB | Cloudflare; nu Vercel Edge sau Netlify Edge |
+| `source` | 5.7 MiB | Tot 3 MB gzip pe Vercel Edge |
+
+Un catalog de această mărime pe Vercel Edge are nevoie de un [host pentru payload-uri](#app-baseurl-and-payload-hosts).
+
+`source` plătește o îmbinare pentru fiecare pagină și limbă în fiecare izolat, aproximativ 1 ms în acel exemplu și 7 ms de CPU într-unul rece. Crește odată cu dimensiunea lanțului de fallback: aproximativ 43 ms pentru 4 MB de fișiere în lanț. Netlify Edge permite 50 ms de CPU per cerere, iar planul Free al Cloudflare 10 ms.
+
+### Datele calendaristice pe runtime-urile Edge {#dates-on-edge-runtimes}
+
+`$td` folosește `Intl` al runtime-ului, iar datele sale ICU pot diferi de cele ale browserului. Pe Netlify Edge, o dată formatată poate conține U+202F (spațiu îngust neseparabil) acolo unde Chrome are un spațiu normal, așa că Vue înregistrează o nepotrivire de hidratare, iar textul se corectează singur la hidratare. Nuxt simplu cu `Intl` simplu face la fel acolo; Deno Deploy nu.
+
+<Tip>
+
+`<i18n-t>` cu `date` sau `relativeDate` permite deja nepotrivirea. Pentru `$td` într-un șablon, pune `data-allow-mismatch="text"` pe element.
+
+</Tip>
+
+## Site static (nuxi generate) {#static-site-nuxi-generate}
+
+```bash
+npx nuxi generate
+```
+
+`nuxi build --preset <static preset>` face același lucru.
+
+- Modul implicit `premerged` scrie fiecare payload în `.output/public/_locales/`, astfel încât orice host static le poate servi.
+- Paginile sunt prerandate pentru fiecare limbă: în `prefix`, modulul inițializează fiecare rădăcină localizată (`/en`, `/de`), iar `/` este păstrat ca stub de redirecționare.
+- Lasă [`prerenderRoutes`](/ro/api/module-options#translationpayloads) dezactivat: copia publică conține deja fișierele payload.
+- Cu modul `source` sau `publicAssets: false` nu există nimic de citit pentru browser, iar build-ul avertizează.
+
+<Note>
+
+Nu există un server care să citească un cookie sau `Accept-Language`, așa că o limbă salvată nu redirecționează `/` la prima încărcare. În `no_prefix`, HTML-ul conține limba implicită, iar un cookie salvat nu este aplicat la încărcare: `$switchLocale` funcționează în continuare în pagina deschisă.
+
+</Note>
+
+Pentru Cloudflare Pages vezi [Cloudflare Pages](#cloudflare-pages).
+
+Pentru un build cu [domenii per limbă](/ro/guide/layers#multiple-domains), rulează generate o dată pentru fiecare domeniu, cu `NUXT_I18N_DOMAIN` ca host al rulării. Fiecare arbore conține atunci paginile și payload-urile acelui domeniu. Nitro nu are o variabilă pentru folderul de ieșire, așa că citește-o pe a ta din configurație:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: { output: { publicDir: process.env.PUBLIC_DIR } },
+})
+```
+
+```bash
+NUXT_I18N_DOMAIN=example.de PUBLIC_DIR=sites/example.de npx nuxi generate
+NUXT_I18N_DOMAIN=example.com PUBLIC_DIR=sites/example.com npx nuxi generate
+```
+
+- Păstrează folderele în afara `.output`: fiecare rulare îl golește.
+- Linkurile absolute către celelalte domenii nu sunt parcurse.
+- Fără variabilă, un build cu o limbă care are `baseUrl` avertizează și generează configurația build-ului, unde acele limbi sunt linkuri și nu primesc pagini.
+- Pe un server Node, aceeași variabilă fixează procesul pe un singur domeniu, indiferent ce spune `Host`.
+
+Un host static aplică propriile headere acestor fișiere; setează caching-ul în configurația host-ului. Regula modulului pentru `/_locales/*` ajunge totuși la Cloudflare Pages prin `_headers` și la Vercel prin `config.json`, ca `public, max-age=60`. Pentru a livra fișiere însoțitoare `.gz` / `.br`, activează `nitro.compressPublicAssets`: modulul comprimă copia payload-urilor cu aceleași setări.
+
+## Headerele de cache și dateBuild {#cache-headers-and-datebuild}
+
+| Cerere                                                                                   | `Cache-Control`                                                                                                 |
+| ---------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Server Node sau rută, `?v=` egal cu `dateBuild` curent, un dicționar nevid               | `private, max-age=<httpCacheDuration>, immutable`                                                               |
+| Server Node sau rută, fără `?v=`, cu unul vechi sau un dicționar gol                     | `public, max-age=0, must-revalidate`                                                                            |
+| Copia lui `public/` de pe un host, orice `?v=`                                           | `public, max-age=60` ([`httpCacheControl`](/ro/api/module-options#other)) |
+| Modul `source`, `cacheTtl` sau `apiBaseServerHost`: un dicționar se poate schimba fără build | header-ul `httpCacheControl`, întotdeauna                                                                   |
+| Ruta de server, dicționarul nu a putut fi citit                                          | `503`, `no-store`                                                                                               |
+| server de dezvoltare                                                                     | niciunul                                                                                                        |
+
+De ce arată tabelul așa:
+
+- URL-ul cu `v` curent este fixat ca un asset cu hash, și doar ceea ce vede query-ul poate spune asta: ruta de server și un server Node, care setează header-ul pe fișierele sale statice.
+- Este `private`, astfel încât un CDN care ignoră query-ul nu poate răspunde la următorul `v` din acest răspuns.
+- Fișierele statice ale unui host primesc un header pentru întreaga cale dintr-o regulă de rută `/_locales/**`, care nu poate vedea query-ul, așa că rămâne scurt; o încărcare repetată tot nu se blochează în nimic.
+- Un `v` vechi rămâne servibil, deoarece HTML-ul din cache îl menționează.
+
+`httpCacheControl: false` păstrează fiecare fișier static pe `max-age=0, must-revalidate`. [`httpCacheDuration`](/ro/api/module-options#httpcacheduration) are implicit un an; `0` nu trimite niciun header. `$clearCache()` revalidează orice încarcă în continuare.
+
+Safari cere din nou un payload preîncărcat când nu poate reutiliza răspunsul: cu `no-cache` și un `ETag`, a doua cerere este un `304`; fără header de cache și fără validator, este o a doua descărcare completă. Un `max-age` mai mare decât `0` duce la o singură cerere. Doar `httpCacheDuration: 0` pe un host care nu adaugă validator plătește acest cost.
+
+[`dateBuild`](/ro/api/module-options#datebuild) este valoarea `?v=`. Implicit este un hash al fișierelor tale de traducere, așa că se schimbă doar când se schimbă traducerile, iar browserele își păstrează payload-urile din cache între implementările care nu le-au atins. Se modifică și odată cu lanțul de fallback.
+
+- Setează-l tu pentru a fixa o valoare.
+- Setează `0` sau `''` pentru a elimina complet `?v=`; payload-urile nu mai sunt atunci niciodată `immutable`.
+
+<Tip>
+
+După înlocuirea pe loc a unui dicționar pe un server Node, repornește cu `NUXT_I18N_DATE_BUILD=<new value>`: nimic altceva nu schimbă `v` fără un rebuild.
+
+</Tip>
+
+### Fișierele rădăcină și delta {#root-and-delta-files}
+
+`premerged` scrie o rădăcină pentru fiecare limbă, `__root/<locale>/data.json`, iar în fișierul fiecărei pagini doar ceea ce diferă de aceasta.
+
+- Fișierul paginii marchează rădăcina față de care a fost creat cu o cheie `__i18n_root`.
+- Browserul le descarcă pe amândouă, pagina nu afișează nimic până când ambele sunt disponibile, iar SSR le îmbină o dată pentru fiecare chunk.
+- Un fișier fără marcaj este un dicționar întreg și stă de sine stătător: dezvoltarea, modul `source`, ruta de server și un host care încă păstrează fișiere mai vechi răspund toate cu unul, fără nicio setare.
+
+Așadar, oricine citește direct `_locales/*/data.json` citește o deltă. Setează `translationPayloads.rootDelta: false` pentru a păstra fișiere întregi.
+
+Un tab deschis în timpul unei implementări care cere o deltă nouă vede că aceasta a fost creată față de o altă rădăcină și descarcă acea rădăcină înainte de a o afișa.
+
+### Când un dicționar nu poate fi citit {#when-a-dictionary-cannot-be-read}
+
+O descărcare eșuată de pe un host (orice în afară de 404), un fișier ilizibil sau corupt ori un 200 care nu este un obiect JSON nu ajunge în niciun cache, iar următoarea cerere citește din nou:
+
+- randarea unei pagini înregistrează un avertisment, afișează chei brute pentru acel dicționar și răspunde cu `503` și `Cache-Control: no-store`, la fel în fiecare header CDN (`CDN-Cache-Control`, `Cloudflare-CDN-Cache-Control`, `Netlify-CDN-Cache-Control`, `Vercel-CDN-Cache-Control`, `Surrogate-Control`, peste oricare provenit dintr-o regulă de rută) și `Retry-After: 60`;
+- `/_locales/...` răspunde cu `503` și `no-store`;
+- `useTranslationServerMiddleware` oferă un `t` care returnează cheia sau valoarea implicită.
+
+Ce se întâmplă în timpul întreruperii:
+
+- **Vizitatori:** corpul acelui 503 este pagina însăși. La hidratare, browserul citește din nou dicționarul, iar textul apare odată ce host-ul revine, cu o singură eroare Vue în consolă despre o nepotrivire de hidratare, deoarece HTML-ul serverului conținea cheile.
+- **Crawlerelor** li se spune să revină mai târziu.
+- **Cache-uri:** o regulă de rută `swr` sau `cache` nu stochează nimic cu un status de 400 sau mai mare, iar un CDN primește `no-store`, așa că niciun cache nu păstrează cheile brute, iar prima cerere după recuperare randează textul real.
+- **Paginile deja stocate în cache** de o regulă rămân așa cum sunt: revalidarea eșuează și nu stochează nimic. Pe Vercel, o revalidare `isr` eșuată păstrează ultima pagină în același mod.
+
+Acest lucru acoperă fiecare chunk pe care îl încarcă o randare, inclusiv un chunk de pagină eșuat care are rădăcina la îndemână și un chunk îmbinat mai târziu în randare. O pagină cu un dicționar sănătos, o redirecționare și o pagină de eroare își păstrează statusul. O [insulă de componentă](/ro/guide/server-side-translations) este excepția: rămâne 200, deoarece un 503 ar scoate-o din pagină, așa că o pagină al cărei propriu dicționar se încarcă poate fi păstrată cu cheile brute ale unei insule. Cererile din timpul unei întreruperi ajung fiecare la host, fără un timeout propriu al modulului dincolo de cele 60 de secunde pentru headerele răspunsului.
+
+Un 404 de la host înseamnă că nu are un astfel de fișier, ceea ce nu este un eșec. Randarea unei pagini afișează dicționarul rădăcină, la fel ca browserul, iar `/_locales/...` răspunde cu același 404. Niciun cache nu păstrează vreunul dintre ele, așa că un fișier care apare este citit la următoarea cerere, cu costul unei cereri către host la fiecare randare a unei astfel de pagini. Fără niciun fișier rădăcină, dicționarul este gol, iar o [prerandare](/ro/guide/upgrade#server,-build-and-deployment) eșuează.
+
+Serverul păstrează payload-urile încărcate într-un cache LRU în proces de până la `cacheMaxSize` intrări (implicit 1000), care reîncarcă o intrare după `cacheTtl` când este setat; [Optimizarea performanței](/ro/guide/performance) acoperă ambele, iar [`cacheStorage`](/ro/guide/performance#shared-cache-for-several-instances) adaugă un cache partajat între instanțe. Nu adăuga peste o regulă de rută Nitro `cache` pe `/_locales/**`: aceasta folosește drept cheie URL-ul complet, inclusiv query-ul, și stochează o a treia copie.
+
+## baseURL-ul aplicației și host-uri pentru payload-uri {#app-baseurl-and-payload-hosts}
+
+**`app.baseURL`** nu are nevoie de nimic altceva. Cu `app.baseURL: '/shop/'`, browserul descarcă `/shop/_locales/...`; copia rămâne în `.output/public/_locales/`, pe care Nitro o servește sub bază (un host static trebuie să monteze rezultatul la `/shop/`). Prefixele de limbă și [căile excluse](/ro/guide/excluding-static-files) sunt potrivite fără bază.
+
+**`app.cdnURL`** mută și payload-urile, când acestea sunt fișiere în `public/`: browserul descarcă și preîncarcă `<cdnURL>/_locales/...`.
+
+- CDN-ul trebuie să conțină `_locales/` alături de `_nuxt/`, la acea cale.
+- Trebuie să permită originea site-ului tău (CORS), deoarece fișierul sosește prin `fetch`.
+- Un dicționar la care răspunde doar ruta de server (modul `source`, fără copie publică) rămâne pe originea aplicației.
+
+Un `NUXT_APP_BASE_URL` la runtime pe `cloudflare-module` necesită compatibilitate Node (`nodejs_compat`). Cu `nitro.cloudflare.nodeCompat` dezactivat, la care Nitro revine și pentru o dată veche fără flag, nu vede variabila și servește `/`, inclusiv Nuxt simplu, în timp ce o redirecționare de limbă tot merge către bază. Setează acolo `app.baseURL` la build.
+
+Pentru a servi payload-urile de pe altă origine, îndreaptă clientul și serverul către ea și dezactivează ieșirile locale:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    apiBaseClientHost: 'https://cdn.example.com',
+    apiBaseServerHost: 'https://cdn.example.com',
+    translationPayloads: {
+      serverHandler: false,
+      publicAssets: false,
+      serverAssets: false,
+    },
+  },
+})
+```
+
+- Pe Node, `serverAssets` scrie aceeași copie pentru citirile proprii ale serverului, iar acel fișier răspunde la `/_locales`: trebuie dezactivat și el, chiar dacă păstrezi ruta de server pentru browser, la care acesta nu ar ajunge niciodată.
+- Host-ul trebuie să servească aceeași structură `<apiBaseUrl>/<page>/<locale>/data.json`.
+- Build-ul avertizează când fiecare ieșire locală este dezactivată și lipsește un host.
+
+Aceleași valori pot proveni din `NUXT_I18N_APP_BASE_URL`, `NUXT_I18N_APP_BASE_CLIENT_HOST` și `NUXT_I18N_APP_BASE_SERVER_HOST` la momentul build-ului. `NUXT_I18N_APP_BASE_SERVER_HOST` funcționează și la runtime și are prioritate față de valoarea din build. Vezi [`apiBaseServerHost`](/ro/api/module-options#apibaseserverhost) pentru detalii.
+
+## Platforme {#platforms}
+
+Doar ceea ce necesită modulul sau rezultatul său. Conturile, regiunile și autentificările CLI se află în documentația platformei.
+
+### Cloudflare Workers {#cloudflare-workers}
+
+Presetul `cloudflare_module`. `wrangler deploy` împachetează rezultatul Nitro a doua oară cu esbuild, iar după aceea un `defineAsyncComponent(() => import('./X.vue'))` brut se randează gol pe server. Pagina de eroare implicită a Nuxt este una astfel, așa că un 404 are corpul gol, iar browserul înregistrează o nepotrivire de hidratare. Clientul randează apoi pagina, iar statusul rămâne 404, dar fără JavaScript pagina este goală. Aceasta este [nuxt#33270](https://github.com/nuxt/nuxt/issues/33270): Nuxt simplu fără modul face la fel. Rutele paginilor nu sunt afectate.
+
+Dezactivează al doilea bundle:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: {
+    preset: 'cloudflare_module',
+    cloudflare: {
+      deployConfig: true, // `wrangler` below applies only with it
+      wrangler: {
+        no_bundle: true,
+        find_additional_modules: true,
+        rules: [{ type: 'ESModule', globs: ['**/*.mjs'] }],
+      },
+    },
+  },
+})
+```
+
+```bash
+npx nuxi build
+cd .output/server && npx wrangler deploy -c wrangler.json
+```
+
+Setează `compatibilityDate` la `2024-09-19` sau mai târziu: una mai veche alege presetul legacy, care nu scrie niciun `wrangler.json` și nu dă nicio eroare. 404-ul se randează atunci, iar încărcarea devine mai mică: 190 KiB gzip față de 246 KiB în aplicația de test. Propriul `error.vue` este cealaltă soluție, dar acoperă doar pagina de eroare.
+
+Modulul în sine nu are nevoie de `nodejs_compat`. Pentru limite vezi [Limitele bundle-ului](#bundle-limits-on-edge).
+
+### Cloudflare Pages {#cloudflare-pages}
+
+Folosește presetul `cloudflare-pages-static`. `nuxi generate --preset cloudflare-pages` este un build de server fără `index.html`.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: {
+    preset: 'cloudflare-pages-static',
+    prerender: { autoSubfolderIndex: false },
+  },
+})
+```
+
+```bash
+npx nuxi generate
+npx wrangler pages project create my-site --production-branch main --force
+npx wrangler pages deploy dist --project-name my-site --branch main
+```
+
+- **Ieșirea.** Presetul scrie în `dist/`, nu în `.output/public`.
+- **`--force`.** Fără el, un wrangler nou (aici 4.156) predă `pages project create` către Workers. Cu el obții un proiect Pages clasic. Este necesar o singură dată, pentru creare.
+- **`autoSubfolderIndex: false`.** Pages răspunde la `/de` cu un 308 către `/de/`, în timp ce canonical și `hreflang` indică `/de`, așa că ele trimit către o redirecționare. Cu această opțiune fișierul este `de.html`, iar redirecționarea dispare.
+- **`NUXT_E1005` în consolă la un 404** este un 404 normal. Nuxt îl raportează astfel deoarece `404.html` pornește pe client, înainte ca aplicația să fie montată. Pagina funcționează, iar Nuxt simplu afișează aceeași linie.
+
+### Vercel și Vercel Edge {#vercel-and-vercel-edge}
+
+Preseturile `vercel` și `vercel_edge`, fără nicio modificare a aplicației. Tag-urile funcționează fără `metaBaseUrl`, pe baza headerelor redirecționate de platformă. Vercel Edge are o limită mică pentru bundle: vezi [Limitele bundle-ului](#bundle-limits-on-edge). Pentru un cache partajat folosește [driverul `upstash`](/ro/guide/performance#upstash-on-vercel-and-vercel-edge).
+
+### Netlify {#netlify}
+
+Preseturile `netlify` și `netlify_edge`.
+
+```bash
+npx nuxi build --preset netlify
+npx netlify deploy --prod --no-build --dir dist --functions .netlify/functions-internal
+```
+
+- **Lasă `nitro.output` nesetat.** Presetul scrie singur `.netlify/` și `dist/`.
+- **Păstrează un `package.json` în folderul din care implementezi.** Fără el, CLI-ul se uită în folderul părinte și nu implementează nicio funcție, fără nicio eroare.
+- **Netlify Edge** se implementează doar cu `--dir dist`. Vezi [Datele calendaristice pe runtime-urile Edge](#dates-on-edge-runtimes).
+
+### Cloud Run {#cloud-run}
+
+Folosește build-ul implicit `node-server`. `gcloud run deploy --source` necesită un `Dockerfile` în folderul de ieșire când docker nu rulează local:
+
+```dockerfile
+# .output/Dockerfile
+FROM node:22-slim
+WORKDIR /app
+COPY . .
+ENV NODE_ENV=production
+CMD ["node", "server/index.mjs"]
+```
+
+```bash
+cd .output && gcloud run deploy my-app --source .
+```
+
+Tag-urile funcționează fără `metaBaseUrl`, pe baza headerelor redirecționate de platformă.
+
+### Deno Deploy {#deno-deploy}
+
+Presetul `deno_deploy`. `deno deploy` înlocuiește `deployctl`. Creează o aplicație dinamică cu punctul de intrare `server/index.ts` și implementează din folderul de ieșire.
+
+### Firebase {#firebase}
+
+| Produs | Configurare |
+| --- | --- |
+| App Hosting | Rulează build-ul Node: folosește presetul implicit sau `firebase-app-hosting` și Node 20+ |
+| Cloud Functions | Presetul `firebase` încorporează payload-urile și necesită `firebase-functions` |
+| Hosting (static) | Servește `.output/public` ca fișiere, așa că `/_locales/**` primește headerele Hosting |
+
+Pe Hosting static, dacă JSON-ul revine cu `Content-Type` sau caching greșit, adaugă o intrare `headers` pentru `/_locales/**` în `firebase.json`. Headerele din `routeRules` ale Nuxt nu se aplică fișierelor pe care Hosting le servește singur; ruta payload-urilor își setează propriile `Content-Type` și `Cache-Control` pe răspunsurile care ajung la server.
+
+### AWS Amplify {#aws-amplify}
+
+`aws-amplify` păstrează fișierele statice lângă folderul său de calcul, nu lângă server, așa că payload-urile sunt încorporate ca pe o platformă de funcții.
+
+### Mai multe instanțe ale aceluiași build {#several-instances-of-one-build}
+
+Un singur artefact poate rula cu o limbă implicită sau dezactivată diferită pentru fiecare instanță, prin variabile de mediu: vezi [Suprascrieri la runtime](/ro/guide/runtime-overrides). O limbă dezactivată doar la runtime are în continuare fișierele statice în `public/`; dezactiveaz-o la build dacă acestea nu trebuie să fie accesibile.
+
+Instanțele care încarcă dicționare de pe un host la distanță le pot partaja în Redis, Upstash, Cloudflare KV sau D1, Deno KV ori alt storage Nitro, astfel încât backend-ul primește o singură cerere în loc de câte una pentru fiecare instanță. Este un cache, nu o sursă de traduceri: vezi [Cache partajat pentru mai multe instanțe](/ro/guide/performance#shared-cache-for-several-instances).
+
+## În spatele unui proxy sau CDN {#behind-a-proxy-or-cdn}
+
+Aplicația trebuie să afle host-ul public și schema din cerere.
+
+| Proxy-ul trimite                             | Build simplu                                     | Build cu `baseUrl` pe limbi                                                       |
+| -------------------------------------------- | ------------------------------------------------ | --------------------------------------------------------------------------------- |
+| `Host`-ul real                               | Nimic de setat                                   | Nimic de setat                                                                    |
+| `Host`-ul originii, plus `X-Forwarded-Host`  | Nimic de setat                                   | [`trustForwardedHost: true`](/ro/api/module-options#trustforwardedhost)           |
+| Niciunul                                     | [`metaBaseUrl`](/ro/api/module-options#metabaseurl) | Nicio setare nu ajută: fiecare cerere arată ca host-ul originii, așa că schimbă proxy-ul |
+
+- **Rute sub `swr` sau `cache`.** Tabelul nu se aplică acolo: vezi [Caching-ul HTML](#caching-html). Setează `metaBaseUrl` sau `site.url`.
+- **`X-Forwarded-Proto`.** Trimite-l, altfel URL-urile canonice vor fi `http://` în spatele unui proxy HTTPS. `metaBaseUrl` rezolvă și acest lucru.
+- **Într-un build cu domenii**, domeniul alege URL-ul de bază al tag-urilor. Acolo `metaTrustForwardedHost` nu alege domeniul, doar `trustForwardedHost` o face.
+- **Redirecționările sunt relative, iar cookie-ul de limbă nu are `Domain`,** așa că ambele rămân pe host-ul public.
+
+<Warning>
+
+**Fixează `metaBaseUrl` când originea rămâne accesibilă** — Pe un build simplu fără `metaBaseUrl` sau `site.url`, canonical, `hreflang` și `og:url` își iau host-ul din cerere. [`metaTrustForwardedHost`](/ro/api/module-options#metatrustforwardedhost) este activat implicit, așa că o cerere directă cu `X-Forwarded-Host: evil.example` primește `https://evil.example` în acele tag-uri, iar un cache din față răspândește acea pagină. Un host de platformă precum `*.workers.dev` este exact o astfel de origine. `metaBaseUrl` închide această problemă și pentru `Host`. Un host cunoscut al unui build cu domenii își păstrează propriul `baseUrl`. Cu `trustForwardedHost: true`, un client direct poate alege pagina altui domeniu, așa că activează-l doar în spatele unui proxy care suprascrie header-ul.
+
+</Warning>
+
+## Caching-ul HTML {#caching-html}
+
+Majoritatea URL-urilor pot fi stocate în cache în siguranță, deoarece își numesc limba. Acestea depind de vizitator:
+
+| Configurare                    | URL-uri                                           |
+| ------------------------------ | ------------------------------------------------- |
+| Implicit, `autoDetectPath: '/'` | `/`                                              |
+| `prefix`                       | `/` și fiecare URL fără prefix, care doar redirecționează |
+| `autoDetectPath: '*'`          | Fiecare URL                                       |
+| `no_prefix`                    | Fiecare pagină                                    |
+
+- **`Vary`.** Aceste răspunsuri conțin `Vary` cu `Cookie` când [`localeCookie`](/ro/api/module-options#localecookie) este setat și `Accept-Language` când `autoDetectLanguage` este activat. Un cache care îl respectă păstrează răspunsurile separate.
+- **Un cache care ignoră `Vary`,** precum „cache everything by URL”, trebuie să sară peste aceste URL-uri. Altfel, `302 /de` al unui vizitator ajunge la următorul vizitator, iar o pagină implicită stocată elimină redirecționarea pentru toată lumea. Pe `/` poți seta și `redirects: false`. Cache-ul de rute al Nitro folosește drept cheie calea și lista sa `varies`, așa că ține `/` și în afara regulilor `swr` și `cache`.
+- **`Set-Cookie`.** Cu `localeCookie` setat, fiecare pagină randată pe server sub un prefix conține `Set-Cookie`, iar un CDN corect nu o va stoca. Pentru HTML în cache, lasă `localeCookie` dezactivat sau elimină header-ul la edge.
+- **Regulile `swr` și `cache` necesită `metaBaseUrl` sau `site.url`.** Nitro randează o astfel de rută doar cu headerele din `cache.varies`, așa că `Host`, `X-Forwarded-Host` și `X-Forwarded-Proto` dispar, iar URL-ul cererii devine `http://localhost`. Fără o origine fixă, canonical, `hreflang` și `og:url` de pe acele rute indică `http://localhost`, pe orice platformă. `useRequestURL()` din Nuxt simplu citește la fel acolo. Preluarea host-ului de la vizitator ar pune în schimb `X-Forwarded-Host`-ul unui vizitator în pagina pe care o primește fiecare vizitator. Un build cu domenii nu este afectat: tag-urile sale folosesc `baseUrl`-ul limbilor.
+
+  Dacă un singur build servește mai multe host-uri și nicio origine unică nu se potrivește, lasă regula să vadă headerele și păstrează câte o copie pentru fiecare valoare: `'/blog/**': { swr: 60, cache: { varies: ['host', 'x-forwarded-host', 'x-forwarded-proto'] } }`. Fiecare valoare distinctă este o nouă intrare în cache, așa că un client care trimite headere inventate umple cache-ul: pune originea în spatele unui proxy care le setează.
+- **Regulile `swr` și `cache` într-un build cu domenii.** Modulul adaugă `host` la `cache.varies` al fiecărei astfel de reguli, și `x-forwarded-host` cu `trustForwardedHost`, astfel încât un domeniu nu servește altuia pagina sa. O regulă cu `cache: false` rămâne așa cum este scrisă. `isr` este cache-ul platformei: verifică dacă folosește host-ul în cheie. Cu host-ul în cheie, un client care trimite host-uri inventate adaugă intrări în cache.
+
+Pentru fișierele payload vezi [Headerele de cache și dateBuild](#cache-headers-and-datebuild).
+
+## Vezi și {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Optimizarea performanței" icon="book-open" href="/ro/guide/performance">
+
+</Card>
+
+<Card title="Suprascrieri la runtime" icon="book-open" href="/ro/guide/runtime-overrides">
+
+</Card>
+
+<Card title="Referința translationPayloads" icon="brackets-curly" href="/ro/api/module-options#translationpayloads">
+
+</Card>
+
+<Card title="Straturi și domenii" icon="book-open" href="/ro/guide/layers">
+
+</Card>
+
+<Card title="SEO" icon="book-open" href="/ro/guide/seo">
+
+</Card>
+
+</CardGroup>

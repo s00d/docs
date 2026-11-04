@@ -1,0 +1,132 @@
+---
+title: "Oversættelsesfiler"
+description: "Hvor oversættelsesnøgler ligger, hvordan rod- og sidefiler kombineres med fallbacks, og hvordan en side indlæser sin ordbog."
+---
+
+Oversættelser er almindelige JSON-filer: én rodfil pr. locale til fælles nøgler og én fil pr. side og locale til den sides nøgler. Læs dette, når du tilføjer sider, deler nøgler mellem dem eller opsætter fallbacks. Du lærer, hvilken fil en nøgle skal ligge i, hvad en side kan se, og hvornår hver fil indlæses.
+
+## Struktur {#layout}
+
+```text
+locales/
+├── en.json                 # root: menus, footer, buttons
+├── de.json
+└── pages/
+    ├── index/              # pages/index.vue
+    │   ├── en.json
+    │   └── de.json
+    ├── about/              # pages/about.vue
+    │   ├── en.json
+    │   └── de.json
+    └── products-id/        # pages/products/[id].vue
+        ├── en.json
+        └── de.json
+```
+
+- Mappen under `locales/pages/` er sidens Nuxt-**route-navn**: `pages/products/[id].vue` er `products-id`, `pages/blog/[slug]/comments.vue` er `blog-slug-comments`.
+- Nøgler kan indlejres i vilkårlig dybde; `$t('auth.form.login')` læser `{ "auth": { "form": { "login": … } } }`.
+- `translationDir` flytter mappen (`'locales'` som standard, relativt til projektets rod, også under Nuxt 4's `app/`-struktur).
+- Manglende filer oprettes som `{}`, når Nuxt opløser siderne, medmindre [`disableWatcher`](/da/api/module-options#disablewatcher) er sat.
+
+## Hvad en side ser {#what-a-page-sees}
+
+![Opslagsrækkefølge for en nøgle på /about i de: pages/about/de.json, de.json, pages/about/en.json, en.json. De flettes sammen til én about/de/data.json, som $t læser](/images/diagrams/page-dictionary.svg)
+
+En sides ordbog er dens rodfil flettet dybt (på alle niveauer) sammen med dens sidefil. Sidefilen vinder ved en konflikt:
+
+```json
+// locales/en.json
+{ "title": "My shop", "nav": { "home": "Home", "cart": "Cart" } }
+```
+
+```json
+// locales/pages/about/en.json
+{ "title": "About us", "nav": { "cart": "Basket" } }
+```
+
+```ts
+// on /about
+t('title') // 'About us'
+t('nav.home') // 'Home'   (root)
+t('nav.cart') // 'Basket' (page wins)
+// on any other page
+t('title') // 'My shop'
+```
+
+En side uden sin egen mappe får kun rodordbogen. Nøgler fra andre sider er ikke synlige.
+
+### Fallback-locales {#fallback-locales}
+
+En nøgle, der mangler i den aktive locale, hentes fra dens fallback-locale, før selve nøglen vises:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    locales: [
+      { code: 'en', iso: 'en-US' },
+      { code: 'de', iso: 'de-DE' },
+      { code: 'de-at', iso: 'de-AT', fallbackLocale: 'de' },
+    ],
+    defaultLocale: 'en',
+    fallbackLocale: 'en', // global, for every locale
+  },
+})
+```
+
+- En locales egen `fallbackLocale` følges helt til enden: `de-at` → `de` → `en`.
+- Den globale `fallbackLocale` er det svageste lag, under alle kæder.
+- Hver locale i kæden tilføjer sin rodfil og derefter sin sidefil, fra den svageste fallback op til den aktive locale. Den aktive locales rodfil slår altså en fallback-locales sidefil.
+
+Uden en fallback renderes en manglende nøgle som nøglen selv (`'nav.home'`), og der logges en advarsel i browserkonsollen under udvikling ([`missingWarn`](/da/api/module-options#missingwarn)).
+
+## Deling og andre kilder {#sharing-and-other-sources}
+
+| Behov | Indstilling |
+| --- | --- |
+| Kun rodfiler, ingen `pages/`-mapper | [`disablePageLocales: true`](/da/api/module-options#disablepagelocales) |
+| To sider læser én sidemappe | [`routesLocaleLinks`](/da/api/module-options#routeslocalelinks): `{ 'about-us': 'about' }` |
+| Fælles rodfiler i en anden mappe | [`additionalTranslationDirs`](/da/api/module-options#additionaltranslationdirs): `['common']` (hoved-`translationDir` vinder) |
+| Nøgler fra et Nuxt-lag | Lagenes filer flettes sammen, projektets egne filer vinder. Se [Lag](/da/guide/layers) |
+| Nøgler tilføjet under kørsel | hooket [`i18n:register`](/da/api/events), `$mergeTranslations`, `$setTranslation` |
+| Nøgler inline i en sidekomponent | `$defineI18nRoute({ locales: { en: { … } } })`, se [Sidekonfiguration](/da/guide/per-component-translations) |
+
+## Sådan indlæser en side sin ordbog {#how-a-page-loads-its-dictionary}
+
+![Locale-JSON-filer bygges til et payload-træ, gemmes i public/ på Node eller i server-assets på Edge, læses af en server-loader og bruges derefter af $t på serveren og hentes til $t i browseren](/images/diagrams/translation-pipeline.svg)
+
+Modulet bygger én payload pr. side og locale: `/{apiBaseUrl}/{page}/{locale}/data.json` (`/_locales/about/de/data.json` som standard).
+
+1. **Serverrendering.** Nitro registrerer localen, og siden indlæser sin payload direkte fra server-loaderen uden en HTTP-forespørgsel. Ordbogen skrives ikke ind i HTML-payloaden, så siderne forbliver små.
+2. **Hydrering.** Browseren henter den samme payload. Serveren har allerede udsendt et `<link rel="preload">` til den, så hentningen starter sammen med HTML'en.
+3. **Navigation.** Den næste sides payload erstatter ordbogen. Nøglerne fra den side, der forlades, opløses stadig, indtil den er væk (slutningen af sideovergangen eller `page:finish`), så en side, der toner ud, ikke viser rå nøgler. En chunk, der ikke kan indlæses (netværksfejl, 4xx eller 5xx, en body, der ikke er et objekt), lader den aktuelle ordbog blive, og den næste navigation indlæser den igen. Et mislykket skift af locale er det samme: `$switchLocale` resolver til `false`, og et nyt kald eller et nyt klik på sprogvælgeren prøver igen. Under præfiks-strategierne har URL'en allerede skiftet på det tidspunkt, så `lang` og `$getLocale()` angiver URL'ens locale, mens de gamle tekster bliver på skærmen.
+4. **Cache.** Indlæste payloads caches på serveren og i browseren; [Ydeevne](/da/guide/performance) beskriver indstillingerne for størrelse og TTL.
+
+`translationPayloads.mode` bestemmer, hvordan payloads bygges. `'premerged'` (standard) skriver alle side × locale-filer ved build. `'source'` beholder kildefilerne og fletter pr. forespørgsel, hvilket er mindre for store kataloger på Edge-mål. Begge giver de samme ordbøger. Hvor filerne ender for hvert udrulningsmål, står under [Udrulning](/da/guide/deployment).
+
+## Redigering under udvikling {#editing-in-development}
+
+`nuxt dev` læser filerne live. Når du gemmer en oversættelsesfil, opdateres den åbne sides ordbog på stedet: ingen genindlæsning, fjernede nøgler forsvinder, og en ændring i en rodfil når ud til alle sider. En ødelagt JSON-fil logger en advarsel med sin sti og behandles som tom. Sæt [`hmr: false`](/da/api/module-options#hmr) for i stedet at opdatere manuelt.
+
+## Relateret {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Sidekonfiguration" icon="book-open" href="/da/guide/per-component-translations">
+
+Locales pr. side og inline-oversættelser
+
+</Card>
+
+<Card title="Metoder" icon="brackets-curly" href="/da/api/methods">
+
+`$t`, `$tc`, `$tn`, `$td`
+
+</Card>
+
+<Card title="Udrulning" icon="book-open" href="/da/guide/deployment">
+
+</Card>
+
+</CardGroup>

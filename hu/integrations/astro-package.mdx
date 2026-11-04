@@ -1,0 +1,249 @@
+---
+title: "Astro"
+description: "Szerveroldali fordítások, locale-előtagos útvonalak, kezdőoldali felismerés és SEO-tagek Astróhoz az @i18n-micro/astro segítségével."
+---
+
+Az `@i18n-micro/astro` a szerveren fordítja le az Astro oldalakat: egy middleware az URL-ből választja ki a locale-t, és kérésenkénti példányt helyez az `Astro.locals`-ba, amelyet a `useI18n(Astro)` olvas ki. Olyan Astro webhelyen használd, amelynek locale-előtagos URL-ekre (`/about`, `/fr/about`) és közös JSON-szótárakra van szüksége. Kapsz `.astro` komponenseket, a kezdőoldalról a látogató nyelvére történő átirányítást, `hreflang` tageket, valamint propokat az [islandekhez](/hu/integrations/astro-islands).
+
+## Telepítés {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add @i18n-micro/astro
+```
+
+```bash npm
+npm install @i18n-micro/astro
+```
+
+```bash yarn
+yarn add @i18n-micro/astro
+```
+
+</CodeGroup>
+
+Peer-függőségek: `astro` `^5.0.0 || ^6.0.0 || ^7.0.0`. Opcionálisan, csak az [islandekhez](/hu/integrations/astro-islands): `vue` `^3.3.0`, `react` `^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0`, `preact` `^10.0.0 || ^11.0.0`, `svelte` `^4.0.0 || ^5.0.0`.
+
+## Beállítás {#setup}
+
+Add hozzá az integrációt. Ez beépíti a szótáraidat a szerverbe és telepíti a middleware-t, így nincs szükség `src/middleware.ts` fájlra:
+
+```ts
+// astro.config.mjs
+import { defineConfig } from 'astro/config'
+import node from '@astrojs/node'
+import { i18nIntegration } from '@i18n-micro/astro'
+
+export default defineConfig({
+  output: 'server',
+  adapter: node({ mode: 'standalone' }),
+  integrations: [
+    i18nIntegration({
+      locale: 'en',
+      fallbackLocale: 'en',
+      locales: [
+        { code: 'en', iso: 'en-US', displayName: 'English' },
+        { code: 'de', iso: 'de-DE', displayName: 'Deutsch' },
+        { code: 'fr', iso: 'fr-FR', displayName: 'Français' },
+      ],
+      translationDir: 'src/locales',
+    }),
+  ],
+})
+```
+
+A szótárak build-időben kóddá válnak: a szerver nem olvas a lemezről, így az edge-en (Cloudflare, Vercel Edge) is fut. `astro dev` alatt egy fájl módosítása a következő kérésnél érvényesül.
+
+### Integrációs opciók {#integration-options}
+
+| Opció | Alapértelmezés | Megjegyzések |
+| --- | --- | --- |
+| `locale` | kötelező | Alapértelmezett locale. |
+| `fallbackLocale` | `locale` | |
+| `locales` | `[]` | Teljes `Locale` objektumok. Egy `disabled` locale egyetlen URL locale-ja sem, és nem átirányítási cél. Az `iso` az a címke, amely alapján a többes szám működik, ha a kód nem az (`ua` → `uk-UA`). |
+| `translationDir` | nincs | A szerverbe beépített mappa, a projekt gyökeréhez viszonyítva. |
+| `disablePageLocales` | `false` | Az oldalfájlok gyökérfordításnak számítanak. |
+| `autoDetect` | `true` | Kezdőoldali átirányítás, lásd: [Locale-felismerés](#locale-detection). |
+| `redirectToDefault` | `false` | A `/` akkor is átirányít, ha semmi sem részesít előnyben más locale-t. |
+| `localeCookie` | `'i18n-locale'` | A `null` kikapcsolja a cookie-t. |
+| `missingWarn` | `false` | |
+| `middleware` | `true` | `false`: a middleware-t magad írod, lásd lent. |
+
+A futásidejű beállítások a `virtual:i18n-micro/config` modulban érhetők el (a `config.base` az Astro `base` értéke, a `config.localeCodes` az engedélyezett kódok), a szótárak pedig a `virtual:i18n-micro/messages` modulban.
+
+### Saját middleware {#your-own-middleware}
+
+Egy többesszám-szabály, egy hiányzókulcs-kezelő és egy router-adapter nem juthat át a konfigurációs folyamatból a szervercsomagba. Ezekhez add meg a `middleware: false` értéket, és írd meg a `src/middleware.ts` fájlt. Ekkor az Astro `i18n` konfigurációja automatikusan `routing: 'manual'` értékre áll be, így az `Astro.currentLocale` és az `astro:i18n` működik. Az Astro ezt a beállítást nem engedi `src/middleware.ts` nélkül, így az integráció saját middleware-jével ezek nem működnek.
+
+```ts
+// src/middleware.ts
+import { config } from 'virtual:i18n-micro/config'
+import { messages } from 'virtual:i18n-micro/messages'
+import { createAstroRouterAdapter, createI18n, createI18nMiddleware, localeIsoMap } from '@i18n-micro/astro'
+
+const i18n = createI18n({
+  locale: config.defaultLocale,
+  fallbackLocale: config.fallbackLocale,
+  localeIso: localeIsoMap(config.locales),
+  messages: messages.root,
+  routeMessages: messages.routes,
+  plural: myPluralRule,
+})
+
+export const onRequest = createI18nMiddleware({
+  i18n,
+  defaultLocale: config.defaultLocale,
+  locales: config.localeCodes,
+  localeObjects: config.locales,
+  autoDetect: config.autoDetect,
+  redirectToDefault: config.redirectToDefault,
+  localeCookie: config.localeCookie,
+  base: config.base,
+  routingStrategy: createAstroRouterAdapter(config.locales, config.defaultLocale),
+})
+```
+
+Ha inkább futásidőben olvasnád a mappát, a `loadTranslationsFromDir` és a `loadTranslationsIntoI18n` az `@i18n-micro/astro/node` modulban található (csak Node).
+
+### Middleware-opciók {#middleware-options}
+
+| Opció | Alapértelmezés | Megjegyzések |
+| --- | --- | --- |
+| `i18n` | kötelező | Globális példány; minden kérés `i18n.fork(locale)`-t kap, amelynek költsége a szótárak számától függetlenül ugyanannyi. |
+| `defaultLocale` | kötelező | |
+| `locales` | kötelező | Locale-kódok. |
+| `localeObjects` | `locales` `{ code }` formában | Teljes `Locale` objektumok a komponensekhez és a SEO-hoz. |
+| `autoDetect` | `true` | Kezdőoldali átirányítás, lásd: [Locale-felismerés](#locale-detection). |
+| `redirectToDefault` | `false` | A `/` akkor is átirányít, ha semmi sem részesít előnyben más locale-t: az alapértelmezett locale kezdőoldalára, ahogy az útválasztási stratégia feloldja. |
+| `localeCookie` | `'i18n-locale'` | A `null` kikapcsolja a cookie-t. |
+| `routingStrategy` | előtag, kivéve az alapértelmezettet | Router-adapter. Az általa kihagyott metódusok az alapértelmezett adapterből származnak. |
+| `base` | nincs | Az Astro `base` értéke: `config.base`. |
+
+Az oldalfájlok (`src/locales/pages/blog/post/de.json`) a `blog-post` útvonalhoz tartoznak: az oldal útvonala `-` jellel összefűzve.
+
+## Fordítás {#translate}
+
+```astro
+---
+// src/pages/index.astro
+import { useI18n } from '@i18n-micro/astro'
+import I18nT from '@i18n-micro/astro/i18n-t'
+
+const { t, tc, locale } = useI18n(Astro)
+---
+
+<h1>{t('greeting', { name: 'Ada' })}</h1>
+<p>{tc('apples', 3)}</p>
+<I18nT keypath="welcome" tag="p" />
+<p>{locale}</p>
+```
+
+A `useI18n(Astro)` a következőket adja vissza: `locale`, `defaultLocale`, `locales`, `t`, `ts`, `tc`, `tn`, `td`, `tdr`, `has`, `getRoute`, `getRouteName(path?)`, `getLocaleFromPath(path?)`, `switchLocalePath(locale)`, `localizePath(path, locale?)`, `getBasePath(url?)`, `getI18n`, `addTranslations`, `addRouteTranslations`, `mergeTranslations` és `clearCache`. Hibát dob, ha a middleware nem futott le. A `getI18n`, `getLocale`, `getDefaultLocale` és `getLocales` segédfüggvények ugyanazt az `Astro.locals`-t olvassák.
+
+Az útvonal neve a locale nélküli útvonalból származik: `/fr/blog/post` → `blog-post`, és a `src/pages/blog/[slug].astro` minden URL-je → `blog-slug`, így egyetlen `locales/pages/blog-slug/` mappa szolgálja ki mindegyiket. A `[...path]` neve `path`. Az Astro `base` beállítása esetén a segédfüggvények a webhely URL-jeit fogadják és adják vissza: a `switchLocalePath` és a `localizePath` tartalmazza a base-t, a `getBasePath` nem, mert az `Astro.rewrite` nélküle várja az útvonalat.
+
+### Komponensek {#components}
+
+Importáld őket az `@i18n-micro/astro/<name>` (vagy az `@i18n-micro/astro/components/<name>.astro`) útvonalról:
+
+| Komponens | Propok |
+| --- | --- |
+| `i18n-t` | `keypath`, `params`, `plural`, `number`, `date`, `relativeDate`, `tag` (`span`, bármely tag), `html`, `hideIfEmpty`, `defaultValue`; a többi attribútum továbbadódik. `html` esetén minden ág eredménye HTML-ként jelenik meg, a `params` pedig escape-elve van. Slotok nincsenek |
+| `i18n-link` | `href`, `locale` (cél-locale, alapértelmezés az aktuális), `class`; a többi attribútum továbbadódik. A külső URL-ek, a `#hash` és a `?query` változatlanok maradnak; egy útvonal megtartja a query-t, a hasht és a záró perjelet |
+| `i18n-switcher` | `class`, `activeClass` (`'active'`), `customLabels`; linkeket jelenít meg az aktuális oldalra minden engedélyezett locale-ban, a query-vel együtt |
+| `i18n-group` | nincs a kimenetet befolyásoló prop: egy `<div>` a slotja körül, előtag nélkül |
+
+## Locale-előtagos útvonalak {#locale-prefixed-routes}
+
+Tarts útvonalanként egy oldalt a `src/pages/` mappában, és adj hozzá vékony rewrite-csonkokat a `src/pages/[locale]/` alá:
+
+```
+src/pages/
+  index.astro
+  about.astro
+  [locale]/
+    index.astro
+    about.astro
+```
+
+```astro
+---
+// src/pages/[locale]/about.astro
+import { prepareLocaleRewrite } from '@i18n-micro/astro'
+
+const target = prepareLocaleRewrite(Astro)
+if (target instanceof Response) return target
+return Astro.rewrite(target)
+---
+```
+
+A `prepareLocaleRewrite` ismeretlen `:locale` esetén `404` választ ad vissza, egyébként beállítja a locale-t az `Astro.locals`-on, és az előtag nélküli útvonalat adja vissza. A middleware megtartja a `locals`-ban már szereplő locale-t, így az átírt oldal azon jelenik meg. A `getLocaleRewritePath(Astro)` csak az útvonalat adja vissza, ha a locale-t magad validálod.
+
+## Locale-felismerés {#locale-detection}
+
+Az URL dönti el az oldal locale-ját:
+
+1. Egy locale-előtag (`/fr/about` → `fr`; a `/en/about` is `en`).
+2. Egyébként az, amit a router-adapter `getLocaleFromPath` metódusa visszaad, ha az nem az alapértelmezett.
+3. Egyébként az alapértelmezett locale. A `/about` mindig az alapértelmezett locale oldala, bármit is mond a cookie.
+
+Az `autoDetect` csak a kezdőoldalon ad átirányítási javaslatot:
+
+- Egy `/` kérés, amelynek cookie-ja vagy `Accept-Language` fejléce más locale-t részesít előnyben, `302`-t kap az adott locale kezdőoldalára (`/de`). A q-súlyok figyelembe vételre kerülnek; a `de-DE` illeszkedik egy `de` locale-ra, és a `de` egy `de-DE` locale-ra.
+- `redirectToDefault` esetén a `/` mindig átirányít: az előnyben részesített locale kezdőoldalára, egyébként az alapértelmezett locale-éra.
+- A `/` válasz `Vary: Cookie, Accept-Language` fejlécet tartalmaz (csak `Accept-Language`-et, ha a `localeCookie` értéke `null`).
+- Az előre renderelt oldalak soha nem irányítanak át.
+
+A `detectLocale(pathname, cookies, headers, defaultLocale, locales, localeCookie?, routingStrategy?, autoDetect?)` ugyanazt az előnyben részesített locale-t adja vissza a saját logikádhoz.
+
+A cookie megjegyzi a választást. Egy oldalmegtekintés, amely egy másik locale azonos eredetű oldaláról érkezik, a látogató váltásának minősül, bármelyik link is vitte oda: a HTML-válasz az új locale-ra állítja a cookie-t, és a `/` nem irányít át, így egy nyelvváltó eléri az alapértelmezett locale kezdőoldalát. Egy végpont, egy kép, egy 404, egy űrlapküldés és egy prefetch nem változtat semmin. Az „azonos eredet” az, amit a böngésző a `Sec-Fetch-Site` fejlécben közöl; e fejléc nélkül a `Referer` hostja kerül összevetésre a kérésével, ezért proxy mögött állítsd be az Astro `security.allowedDomains` opcióját.
+
+Egy [server island](https://docs.astro.build/en/guides/server-islands/) vagy egy action URL-jében nincs locale. Annak az oldalnak a számára renderelődik, amely kérte, a `Referer` alapján, amelynek csak az útvonala számít, így a szerver előtti proxy nem változtat semmin, és soha nem irányít át. A válasza `Vary: Referer` fejlécet tartalmaz. `Referer` nélkül (`no-referrer` szabályzat esetén) az alapértelmezett locale-ban van, dinamikus oldalon pedig az útvonala az URL-ből származik, így az oldalszótárak nem jutnak el hozzá.
+
+## Router-adapter {#router-adapter}
+
+A `createAstroRouterAdapter(locales, defaultLocale)` az alapértelmezett kivételével minden locale-t előtaggal lát el. Egy Astro adapternek csak a `getCurrentPath` szükséges; a többi tag opcionális, és az alapértelmezett adapterre esik vissza: `getRouteName(path, locales, routePattern?)`, `getLocaleFromPath`, `switchLocalePath`, `localizePath`, `removeLocaleFromPath`, `resolvePath` (kezdőoldali átirányítási cél), `push`, `replace`, `getRoute`. Aldomaines vagy utótagos URL-ekhez írj sajátot, és add át a `createI18nMiddleware`-nek.
+
+## SEO {#seo}
+
+```astro
+---
+// src/layouts/Layout.astro
+import { useLocaleHead } from '@i18n-micro/astro'
+
+const head = useLocaleHead(Astro, { baseUrl: 'https://example.com' })
+---
+
+<html lang={head.htmlAttrs.lang} dir={head.htmlAttrs.dir}>
+  <head>
+    {head.link.map((l) => <link rel={l.rel} href={l.href} hreflang={l.hreflang} />)}
+    {head.meta.map((m) => <meta property={m.property} content={m.content} />)}
+  </head>
+  <body><slot /></body>
+</html>
+```
+
+Visszaadja a `htmlAttrs` értéket (`lang` az `iso`-ból, `dir`), egy canonical linket (query nélküli útvonal), `hreflang` alternatívákat minden `seo !== false` beállítású engedélyezett locale-hoz, valamint `x-default`, `og:locale`, `og:locale:alternate` és `og:url` értékeket. Opciók: `baseUrl` (az Astro konfiguráció `site` értéke, egyébként gyökérrelatív URL-ek), `addDirAttribute` (`true`), `addSeoAttributes` (`true`), `hreflangBaseLanguage` (`false`).
+
+## Kapcsolódó {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Astro islandek" icon="book-open" href="/hu/integrations/astro-islands">
+
+Fordítások Vue, React, Preact és Svelte islandekben
+
+</Card>
+
+<Card title="Keretrendszerek" icon="book-open" href="/hu/integrations/overview">
+
+Példányopciók és formázás
+
+</Card>
+
+<Card title="Csomagreferencia" icon="brackets-curly" href="/hu/api/packages/astro">
+
+</Card>
+
+</CardGroup>

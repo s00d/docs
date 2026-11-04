@@ -1,0 +1,131 @@
+---
+title: "Node.js"
+description: "@i18n-micro/node ile çeviri dosyalarını diskten yükleyin ve Node.js sunucularında, betiklerde ve CLI'larda çeviri yapın."
+---
+
+`@i18n-micro/node`, [runtime](/tr/integrations/runtime-package) örneğine ek olarak bir çeviri klasörünü diskten okuyan bir yükleyicidir. Bunu bir Express veya Fastify sunucusunda, bir CLI'da, bir e-posta veya PDF oluşturucuda ya da Nuxt uygulamanızla aynı JSON dosyalarına ihtiyaç duyan herhangi bir betikte kullanın. Dosyaları bir kez yüklersiniz ve istekler arasında değiştirilebilir durum paylaşmadan her istek için çeviri yaparsınız.
+
+## Kurulum {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add @i18n-micro/node @i18n-micro/utils
+```
+
+```bash npm
+npm install @i18n-micro/node @i18n-micro/utils
+```
+
+```bash yarn
+yarn add @i18n-micro/node @i18n-micro/utils
+```
+
+</CodeGroup>
+
+Peer bağımlılığı yoktur; Node.js `>=20`. `@i18n-micro/utils` yalnızca aşağıdaki `Accept-Language` yardımcısı için gereklidir.
+
+## Yapılandırma {#setup}
+
+Yükleyici [Nuxt klasör düzenini](/tr/guide/translations) okur: `locales/en.json` bir kök sözlüktür, `locales/pages/blog/post/en.json` ise `blog-post` rotasına aittir.
+
+```ts
+import { createI18n } from '@i18n-micro/node'
+
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', translationDir: './locales' })
+await i18n.loadTranslations()
+
+i18n.t('greeting', { name: 'Ada' }) // 'Hello, Ada!'
+i18n.t('title', undefined, undefined, 'blog-post') // from locales/pages/blog/post/en.json
+```
+
+Seçenekler runtime seçenekleridir (bkz. [örnek](/tr/integrations/overview#the-instance)), bunlara ek olarak `translationDir` ve `disablePageLocales` (`pages/**` dosyalarını kök sözlük olarak ele alır) bulunur. `i18n.reload()` her sözlüğü temizler ve klasörü yeniden okur; geliştirme ortamında bir dosya izleyici için kullanışlıdır.
+
+`loadTranslations(dir, disablePageLocales?)` ayrıca tek başına da dışa aktarılır ve `{ root, routes }` döndürür:
+
+```ts
+import { loadTranslations } from '@i18n-micro/node'
+
+const { root, routes } = await loadTranslations('./locales')
+// root:   { en: {...}, de: {...} }
+// routes: { 'blog-post': { en: {...}, de: {...} } }
+```
+
+## İstek başına {#per-request}
+
+Bir örnek tek bir yerel ayar ve tek bir rota tutar. Bir istek işleyicisi içinde paylaşılan bir örnekte `i18n.locale` değerini değiştirmek, eşzamanlı isteklerle yarış durumuna yol açar. `run`, bir isteğe kendi örneğini verir:
+
+```ts
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', translationDir: './locales' })
+await i18n.loadTranslations()
+
+// `() => next()`: `run` hands its callback the fork, and Express reads an argument of `next` as an error
+app.use((req, res, next) => i18n.run(pickLocale(req), () => next()))
+
+app.get('/', (req, res) => {
+  res.send(i18n.t('greeting')) // the request's locale, in everything it awaits
+})
+```
+
+`run` içinde paylaşılan örnek, isteğin yerel ayarını ve rotasını okur ve ayarlar (`AsyncLocalStorage`); fork geçerli rotada başlar ve callback içindeki `i18n.setRoute(...)` o isteğin rotasını değiştirir. Callback ayrıca isteğin fork'unu da alır: ona yazılan sözlükler istekte kalır, paylaşılan örneğe yazılan sözlükler herkese ulaşır.
+
+`AsyncLocalStorage` olmadan, `i18n.fork(locale)` etrafta iletilebilecek aynı türden bir örnek döndürür.
+
+`reload()` dizini yeniden okur; yeni sözlükler yüklenene kadar eski sözlükler yanıt verir.
+
+## Yerel ayarı seçin {#pick-the-locale}
+
+`detectLocaleFromAcceptLanguage(header, locales)`, `q` ağırlıklarını dikkate alır ve `de-DE`'yi bir `de` yerel ayarıyla (ve `de`'yi `de-DE` ile) eşleştirir. Hiçbir şey eşleşmediğinde `null` döndürür.
+
+```ts
+import express from 'express'
+import { detectLocaleFromAcceptLanguage } from '@i18n-micro/utils/accept-language'
+
+const app = express()
+
+app.get('/hello', (req, res) => {
+  const locale = detectLocaleFromAcceptLanguage(req.headers['accept-language'], locales) ?? 'en'
+  const i18n = byLocale.get(locale)!
+  res.json({ message: i18n.t('greeting', { name: 'Ada' }) })
+})
+```
+
+URL öneki, çerez ve başlığı birlikte kullanmak için `@i18n-micro/utils/resolve-locale` içindeki `resolveLocale({ defaultLocale, validLocales, url, cookie, acceptLanguage, autoDetectLanguage: true })` modülün öncelik sırasını uygular: önce URL, sonra çerez, sonra `Accept-Language`, ardından varsayılan. Geçersiz değerler atlanır.
+
+Bir Nuxt uygulaması içinde sunucuda bu pakete ihtiyacınız yoktur: modülün [sunucu tarafı çevirilerini](/tr/guide/server-side-translations) kullanın.
+
+## API {#api}
+
+| Dışa aktarım | Notlar |
+| --- | --- |
+| `createI18n(options)`, `I18n` | runtime örneği + `translationDir`, `loadTranslations(dir?)`, `reload()` |
+| `loadTranslations(dir, disablePageLocales?)` | `{ root, routes }` |
+| `loadRootTranslations(dir, disablePageLocales?)` | yalnızca `root` |
+| `FormatService`, `interpolate` | core'dan |
+| Türler: `I18nOptions`, `LoadedTranslations`, `Translations`, `Locale`, `PluralFunc`, `Params` | |
+
+Örnek metotları [Runtime](/tr/integrations/runtime-package#api) sayfasında listelenmiştir. Tam imzalar: [paket referansı](/tr/api/packages/node).
+
+## İlgili {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Runtime" icon="book-open" href="/tr/integrations/runtime-package">
+
+`fs` olmadan örnek
+
+</Card>
+
+<Card title="Çeviriler" icon="book-open" href="/tr/guide/translations">
+
+Klasör düzeni
+
+</Card>
+
+<Card title="Yerel ayar algılama" icon="book-open" href="/tr/guide/locale-detection">
+
+Nuxt modülündeki öncelik sırası
+
+</Card>
+
+</CardGroup>

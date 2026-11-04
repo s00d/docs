@@ -1,0 +1,147 @@
+---
+title: "Testování aplikace"
+description: "Unit testujte komponenty používající $t pomocí @i18n-micro/test-utils a Vitestu a ověřujte lokalizované stránky end-to-end."
+---
+
+Komponenty, které volají `useI18n()`, potřebují v unit testech instanci i18n. `@i18n-micro/test-utils` vám poskytne falešné `useI18n()` se skutečnou logikou překladů, pluralizace a formátování, takže můžete připojit komponentu s vlastními slovníky a bez serveru Nuxt. Pro routing a přesměrování spusťte skutečný modul end-to-end pomocí `@nuxt/test-utils`.
+
+Tato stránka se týká testování vaší aplikace. Jak tento repozitář testuje samotný modul, najdete na stránce [Testování modulu](https://s00d.github.io/nuxt-i18n-micro/contributing/testing).
+
+## Instalace {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add -D @i18n-micro/test-utils @nuxt/test-utils vitest @vue/test-utils happy-dom
+```
+
+```bash npm
+npm install -D @i18n-micro/test-utils @nuxt/test-utils vitest @vue/test-utils happy-dom
+```
+
+</CodeGroup>
+
+## Mock useI18n {#mock-usei18n}
+
+```ts
+// tests/unit-setup.ts
+import { setupNuxtI18nMock } from '@i18n-micro/test-utils'
+import { mockNuxtImport } from '@nuxt/test-utils/runtime'
+import { beforeEach, vi } from 'vitest'
+
+export const { i18n, useI18n, setTranslationsFromJson } = setupNuxtI18nMock({
+  spy: vi.fn, // every method becomes a vi.fn, so you can assert calls
+  beforeEach, // reset state and reseed `translations` before each test
+  translations: { welcome: 'Welcome' },
+})
+
+mockNuxtImport('useI18n', () => useI18n)
+```
+
+```ts
+// vitest.config.ts
+import { defineVitestConfig } from '@nuxt/test-utils/config'
+
+export default defineVitestConfig({
+  test: {
+    environment: 'nuxt',
+    setupFiles: ['./tests/unit-setup.ts'],
+  },
+})
+```
+
+Ponechte `mockNuxtImport` v souboru setup: `@nuxt/test-utils` ho musí transformovat. `setupNuxtI18nMock` používá soukromou cache překladů, takže paralelní testovací soubory nesdílejí stav.
+
+## Napsání testu {#write-a-test}
+
+```vue
+<!-- components/Greeting.vue -->
+<script setup lang="ts">
+const { $t } = useI18n()
+</script>
+
+<template>
+  <p>{{ $t('welcome') }}</p>
+</template>
+```
+
+```ts
+// tests/greeting.spec.ts
+import { mountSuspended } from '@nuxt/test-utils/runtime'
+import { expect, it } from 'vitest'
+import Greeting from '~/components/Greeting.vue'
+import de from '~/locales/de.json'
+import { i18n, setTranslationsFromJson } from './unit-setup'
+
+it('renders the German greeting', async () => {
+  await setTranslationsFromJson('de', de)
+  i18n.setLocale('de')
+
+  const wrapper = await mountSuspended(Greeting)
+  expect(wrapper.text()).toBe('Willkommen') // de.json: { "welcome": "Willkommen" }
+})
+```
+
+Falešná instance poskytuje stejné metody jako skutečné `useI18n()` (`$t`, `$tc`, `$tn`, `$td`, `$has`, `$localePath`, …, s `$` i bez něj) a navíc settery pro testy: `setLocale`, `setLocales`, `setDefaultLocale`, `setRouteName`, `setTranslationsFromJson`, `loadPageTranslations`, `mergeTranslations`, `setMissingHandler`.
+
+`$localePath` a `$switchLocalePath` jsou stuby, které cestě přidají prefix podle možnosti `strategy` (bez skutečného routeru). Skutečné odkazy a přesměrování testujte end-to-end.
+
+## Pomocné funkce nižší úrovně {#lower-level-helpers}
+
+| Pomocná funkce | Použití |
+| --- | --- |
+| `createIsolatedFakeI18n(options)` | Izolovaná falešná instance bez napojení na `useI18n` z Nuxtu, např. pro čisté `mount` z `@vue/test-utils` s `global.mocks`. |
+| `createFakeI18n(options)` | Falešná instance nad sdílenou cache modulu (v `beforeEach` volejte `resetI18n()`), nebo izolovaná s `isolated: true`. |
+| `createI18nTestContext(options)` | Kontext v pozadí obou, když potřebujete více falešných instancí. |
+| `t`, `tc`, `ts`, `tn`, `td`, `tdr`, `has` | Přímá volání nad sdíleným kontextem pro testování obyčejných funkcí. |
+
+Mock je `BaseI18n`: `t`, `tc`, `tn`, `td`, `tdr` a `has` jsou skutečné, nad skutečnými slovníky, takže test vidí to, co zobrazuje aplikace.
+
+Výše uvedené tovární pomocné funkce přijímají `locale`, `defaultLocale`, `locales`, `routeName`, `strategy`, `translations` a `messages` (slovníky pro jednotlivá locale). Kompletní ukázkový projekt najdete v [`packages/test-utils/example`](https://github.com/s00d/nuxt-i18n-micro/tree/main/packages/test-utils/example).
+
+## End-to-end testy {#end-to-end-tests}
+
+Routing, přesměrování, SEO tagy a načítání payloadů potřebují skutečný modul. Spusťte aplikaci pomocí `@nuxt/test-utils/e2e`:
+
+```ts
+// tests/e2e/locales.test.ts
+import { $fetch, fetch, setup } from '@nuxt/test-utils/e2e'
+import { describe, expect, it } from 'vitest'
+
+describe('locales', async () => {
+  await setup({ server: true })
+
+  it('serves the German page', async () => {
+    expect(await $fetch('/de')).toContain('lang="de-DE"')
+  })
+
+  it('redirects / for a German browser', async () => {
+    const res = await fetch('/', { headers: { 'accept-language': 'de' }, redirect: 'manual' })
+    expect(res.headers.get('location')).toBe('/de')
+  })
+})
+```
+
+Druhý test předpokládá `prefix` (nebo `prefix_except_default` s jiným výchozím locale); kdy `/` přesměrovává, najdete v [Detekci locale](/cs/guide/locale-detection).
+
+## Související {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Testování modulu" icon="code-pull-request" href="https://s00d.github.io/nuxt-i18n-micro/contributing/testing">
+
+</Card>
+
+<Card title="useI18n" icon="brackets-curly" href="/cs/composables/useI18n">
+
+</Card>
+
+<Card title="Detekce locale" icon="book-open" href="/cs/guide/locale-detection">
+
+</Card>
+
+<Card title="Storybook" icon="book-open" href="/cs/guide/storybook">
+
+</Card>
+
+</CardGroup>

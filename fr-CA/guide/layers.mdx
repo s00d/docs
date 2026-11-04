@@ -1,0 +1,128 @@
+---
+title: "Couches et domaines"
+description: "Partagez la configuration i18n et les fichiers de traduction au moyen des couches Nuxt, et servez les langues sur leurs propres domaines."
+---
+
+Une couche Nuxt peut porter la configuration i18n et le dossier `locales/` pour plusieurs applications, et chaque application ajoute ou remplace ce dont elle a besoin. Cette page montre comment faire, et comment une seule compilation sert plusieurs domaines.
+
+## Partager la configuration et les traductions {#share-config-and-translations}
+
+```ts
+// base/nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    locales: [
+      { code: 'en', iso: 'en-US' },
+      { code: 'de', iso: 'de-DE' },
+      { code: 'fr', iso: 'fr-FR' },
+    ],
+    defaultLocale: 'en',
+  },
+})
+```
+
+```ts
+// shop/nuxt.config.ts
+export default defineNuxtConfig({
+  extends: ['../base'], // a layer directory or package, not a nuxt.config file
+  i18n: {
+    locales: [
+      { code: 'es', iso: 'es-ES' }, // added
+      { code: 'fr', disabled: true }, // the base layer's fr, switched off here
+    ],
+  },
+})
+```
+
+- **Configuration :** les options scalaires de l’application remplacent celles de la couche. Les tableaux `locales` de toutes les couches sont combinés, et les entrées ayant le même `code` sont fusionnées en une seule où les champs de l’application l’emportent; une application peut donc ajouter une langue ou définir des champs comme `disabled: true` sur une langue héritée.
+- **Traductions :** les dossiers `locales/` de toutes les couches sont fusionnés clé par clé, la couche d’abord et l’application en dernier; une clé dans `shop/locales/en.json` remplace donc la même clé dans `base/locales/en.json`. Les fichiers de page (`locales/pages/<page>/`) sont fusionnés de la même façon.
+- **Pages :** `$defineI18nRoute` est lu dans les pages de toutes les couches.
+
+Pour fusionner des dossiers qui ne font pas partie d’une couche, indiquez-les dans [`additionalTranslationDirs`](/fr-CA/api/module-options#additionaltranslationdirs).
+
+## Plusieurs domaines {#multiple-domains}
+
+Une seule compilation sert tous les domaines. Indiquez chaque langue avec son domaine; `baseDefault` en fait la langue par défaut de cet hôte :
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    strategy: 'prefix_except_default',
+    defaultLocale: 'en',
+    locales: [
+      { code: 'en', iso: 'en-US', baseUrl: 'https://example.com', baseDefault: true },
+      { code: 'de', iso: 'de-DE', baseUrl: 'https://example.de', baseDefault: true },
+      { code: 'nl', iso: 'nl-NL', baseUrl: 'https://example.de' },
+      { code: 'fr', iso: 'fr-FR' },
+    ],
+  },
+})
+```
+
+Pointez les deux domaines vers le même serveur. L’hôte de la requête détermine le reste :
+
+- **Langue par défaut :** la langue `baseDefault` de l’hôte. À défaut, la langue par défaut de la compilation si l’hôte la sert, sinon la première langue de l’hôte.
+- **Langues servies :** les langues de cet hôte, plus toutes les langues sans `baseUrl`. Sur `example.de`, ce sont `de`, `nl` et `fr`.
+- **Les langues des autres domaines** sont des cibles de liens. `$localePath`, `$localeRoute`, `$switchLocalePath`, `<i18n-switcher>` et `hreflang` donnent des URL absolues sur leur `baseUrl`, et `$switchLocale` y navigue. Sur cet hôte, leurs URL renvoient une erreur 404, et ni un témoin ni `Accept-Language` ne peuvent les sélectionner.
+- **Un lien vers un autre domaine** passe par `$localePath` ou `<i18n-link>` : `<NuxtLink :to="$localePath('/contact', 'de')">`, `<i18n-link :to="$localeRoute('/contact', 'de')">`. Le routeur n’accepte pas d’objet absolu, donc `<NuxtLink :to="$localeRoute(...)">` et `router.push($localeRoute(...))` restent sur cette origine. Sur `localhost` ou sur un hôte de prévisualisation, toute langue ayant un `baseUrl` est un tel lien, y compris la langue courante. Dans le code, utilisez `navigateTo($localePath('/contact', 'de'), { external: true })`, ou `$switchRoute`.
+- **Tout autre hôte** reçoit la configuration de compilation, avec chaque langue à `baseUrl` comme cible de lien. Rien de la requête n’est repris : les balises canonique et `hreflang` utilisent `metaBaseUrl`, sinon le `baseUrl` de la langue par défaut de la compilation (une langue par défaut sans `baseUrl` nécessite `metaBaseUrl` ou `site.url`, consultez [SEO](/fr-CA/guide/seo#set-the-public-origin)).
+- **Les fichiers de charge utile** dans `public/` sont statiques : n’importe quel hôte renvoie le fichier de n’importe quelle langue. Une [génération](/fr-CA/guide/deployment#static-site-(nuxi-generate)) par domaine ne publie que ceux de ce domaine.
+
+`example.de` selon chaque stratégie, avec `de: '/kontakt'` comme chemin personnalisé de `contact` :
+
+| Stratégie | `/` | Page de la langue par défaut | Autres URL |
+| --- | --- | --- | --- |
+| `prefix_except_default` | `de` | `/kontakt` | `/de/kontakt` et `/en/contact` renvoient une 404, `/contact` redirige vers `/kontakt` |
+| `prefix_and_default` | `de` | `/kontakt` et `/de/kontakt`, les liens utilisent `/kontakt` | `/en/contact` et `/contact` renvoient une 404 |
+| `prefix` | redirige vers `/de` | `/de/kontakt` | `/kontakt` redirige vers `/de/kontakt`, `/en/contact` renvoie une 404 |
+| `no_prefix` | `de` | `/kontakt` | un chemin personnalisé d’une langue d’un autre domaine renvoie une 404 |
+
+Avec `prefix`, un lien depuis un autre domaine conserve le préfixe, puisque l’URL sans préfixe ne ferait que rediriger. Avec `no_prefix`, un lien vers un autre domaine aboutit à la langue par défaut de cet hôte : l’URL ne peut pas en désigner une deuxième.
+
+À savoir :
+
+- **Derrière un mandataire**, l’hôte provient de `Host`. Si le mandataire place plutôt l’hôte public dans `X-Forwarded-Host`, définissez [`trustForwardedHost`](/fr-CA/api/module-options#trustforwardedhost), et seulement si le mandataire écrase cet en-tête. Un mandataire qui n’envoie ni l’un ni l’autre ne peut pas servir une compilation multidomaine. Consultez [Derrière un mandataire ou un CDN](/fr-CA/guide/deployment#behind-a-proxy-or-cdn).
+- **`app.baseURL`** doit aussi figurer dans `baseUrl` : `baseUrl: 'https://example.de/shop'` avec `app.baseURL: '/shop'`.
+- **Les hôtes doivent correspondre exactement.** `www.example.de` est un autre hôte : redirigez-le en périphérie, ou définissez ce `baseUrl` sur la langue. Un seul hôte par langue.
+- **Les caches doivent tenir compte de l’hôte.** Un CDN le fait normalement. Le cache de routes de Nitro utilise le chemin comme clé; dans une compilation multidomaine, le module ajoute donc `host` à `cache.varies` de chaque règle `swr` et `cache`, ainsi que `x-forwarded-host` avec `trustForwardedHost`. Une règle avec `cache: false` reste telle quelle. `isr` est le cache de la plateforme : vérifiez qu’il tient compte de l’hôte.
+- **Les chemins personnalisés des langues par défaut de deux hôtes ne doivent pas entrer en conflit.** Les enregistrements sans préfixe partagent un même routeur, donc `/x` ne peut pas être une page sur `example.de` et une autre sur `example.com`.
+- **Pages prérendues :** une règle de route `prerender: true` dans `nuxt build` effectue un seul rendu, sans hôte, et le fichier répond à tous les domaines. Laissez au serveur les pages qui diffèrent selon le domaine, ou [générez par domaine](/fr-CA/guide/deployment#static-site-(nuxi-generate)).
+- **`noPrefixRedirect`** se fonde sur la langue de l’hôte et du visiteur, sur chaque hôte.
+- **`hashMode` :** l’hôte choisit le rendu comme ci-dessus; les liens vers un autre domaine portent la route dans l’ancre (`https://example.com/#/contact`).
+- **`ssr: false` :** le navigateur lit le domaine depuis `location.host`, donc un hôte sans serveur est quand même résolu.
+- **Les [substitutions à l’exécution](/fr-CA/guide/runtime-overrides)** s’appliquent en premier. Un `disabledLocales` défini à l’exécution s’applique sur chaque hôte, à une exception près : avec `prefix_except_default` et `prefix_and_default`, la langue par défaut d’un hôte reste activée sur cet hôte, puisque ses pages sont les enregistrements sans préfixe. Avec `prefix` et `no_prefix`, l’hôte passe à la langue suivante qu’il sert. Un `defaultLocale` défini à l’exécution s’applique uniquement aux hôtes inconnus.
+
+Pour un [site statique](/fr-CA/guide/deployment#static-site-(nuxi-generate)), générez une fois par domaine.
+
+### Une application par domaine {#one-app-per-domain}
+
+Une couche partagée avec une petite application par domaine fonctionne toujours, lorsque les domaines ont besoin de pages ou de modules différents. Chaque application définit son propre `defaultLocale` par-dessus la même liste `locales`. Une langue d’un autre domaine renvoie une 404 dans cette application, comme ci-dessus.
+
+### Choisir la langue dans le code {#choosing-the-locale-in-code}
+
+Pour une seule instance qui répond à tous les domaines avec l’origine propre à la requête dans les balises SEO, consultez [SEO](/fr-CA/guide/seo#set-the-public-origin); pour choisir la langue selon l’hôte dans le code, consultez [Détection personnalisée de la langue](/fr-CA/guide/custom-auto-detect).
+
+## Voir aussi {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Fichiers de traduction" icon="book-open" href="/fr-CA/guide/translations">
+
+</Card>
+
+<Card title="Substitutions à l’exécution" icon="book-open" href="/fr-CA/guide/runtime-overrides">
+
+</Card>
+
+<Card title="SEO" icon="book-open" href="/fr-CA/guide/seo">
+
+</Card>
+
+<Card title="Couches Nuxt" icon="arrow-up-right-from-square" href="https://nuxt.com/docs/getting-started/layers">
+
+</Card>
+
+</CardGroup>

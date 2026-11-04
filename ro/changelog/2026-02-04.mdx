@@ -1,0 +1,115 @@
+---
+title: "v3.0.0 — Optimizarea performanței, pachetele Route & Path Strategy"
+description: "Note de lansare: v3.0.0 — Optimizarea performanței, pachetele Route & Path Strategy"
+---
+
+**Data**: 2026-02-04
+
+**Versiunea**: `v3.0.0`
+
+![Lansarea v3.0.0](/images/3.0.0.png)
+
+Anunțăm **v3.0.0** cu o **revizuire arhitecturală majoră**: rescrierea completă a sistemului de stocare a traducerilor pentru performanță maximă, generarea rutelor și logica căilor la runtime sunt acum separate în pachete dedicate, iar fluxul de redirecționare a fost reproiectat pentru o fiabilitate mai bună și compatibilitate cu Serverless.
+
+## Ce este nou? {#what’s-new}
+
+### Optimizarea performanței — Noua arhitectură de stocare a traducerilor {#performance-optimization-—-new-translation-storage-architecture}
+
+Sistemul de încărcare și de cache al traducerilor a fost rescris complet pentru performanță maximă:
+
+- **Clasa centralizată TranslationStorage** — O nouă clasă `TranslationStorage` (`src/runtime/utils/storage.ts`) oferă o stocare unificată atât pentru client, cât și pentru server. Folosește `globalThis` cu `Symbol.for` pentru a garanta un singleton real în întregul proces Node.js, prevenind duplicarea cache-ului între modulele incluse în bundle.
+
+- **Funcția `$t()` optimizată (tFast)** — Funcția de traducere folosește o căutare directă într-un singur dicționar activ:
+  1. Toate traducerile (root + specifice paginii + fallback) sunt pre-îmbinate la build într-un singur fișier per pagină
+  2. La navigarea în același locale, traducerile noii pagini sunt îmbinate cumulativ în dicționarul activ (previne pâlpâirea cheilor în timpul animațiilor de tranziție)
+  3. Suportă chei imbricate (`key.subkey.subsubkey`) cu rezolvare optimizată a căii
+  4. Fără căutări în Map sau calcule de locale/rută la fiecare apel — folosește un context pre-calculat
+
+- **Injectare pe server prin `window.__I18N__`** — Traducerile încărcate în timpul SSR sunt injectate în HTML ca tag script. Clientul citește direct din `window.__I18N__` la încărcarea inițială, evitând cererile duplicate.
+
+- **Cache local de chunk-uri în plugin** — Plugin-ul menține un Map local `loadedChunks` care stochează toate chunk-urile de traduceri încărcate. Odată încărcate, traducerile nu mai sunt niciodată cerute din nou în timpul ciclului de viață al paginii.
+
+- **Pre-îmbinare la build** — Un pas `preMergeLocales` din `module.ts` îmbină toate layer-ele, lanțurile de locale fallback și traducerile de nivel root în fiecare fișier de pagină la build. Server-loader-ul citește pur și simplu un singur fișier pre-construit — nu este necesară nicio îmbinare la runtime.
+
+**Îmbunătățiri de performanță:**
+
+- Alocare de memorie redusă per cerere (fără recrearea obiectelor la fiecare apel `$t()`)
+- Presiune mai mică asupra garbage collector-ului
+- Timpi de răspuns mai rapizi sub sarcină
+- Model stabil de utilizare a memoriei (fără grafice care „sar”)
+
+### Pachetele Route & Path Strategy {#route-&-path-strategy-packages}
+
+- **@i18n-micro/route-strategy** — Generarea rutelor la build: extinde paginile Nuxt cu rute localizate, gestionează aliasuri, rute imbricate și căi personalizate pentru fiecare strategie. Un singur punct de intrare: `new RouteGenerator(options)` și `extendPages(pages)`. Strategiile (`no_prefix`, `prefix`, `prefix_except_default`, `prefix_and_default`) sunt implementate ca clase separate și selectate printr-un factory.
+- **@i18n-micro/path-strategy** — Gestionarea căilor și a locale-ului la runtime: oferă `PathStrategy` pentru construirea căilor localizate, rezolvarea redirecționărilor și schimbarea locale-ului. Exporturi subpath tree-shakeable (`/prefix`, `/no-prefix` etc.), astfel încât doar strategia selectată ajunge în bundle. Folosește funcții pure pentru rezolvarea rutelor și flaguri de context pre-calculate pentru alocări minime.
+- **Structură organizată a pachetelor** — Logica rutelor în `@i18n-micro/route-strategy`, cu `core/`, `strategies/`. Strategia de căi în `@i18n-micro/path-strategy`, cu o structură `src/` plată: `types.ts`, `path.ts`, `resolver.ts`, `helpers.ts` și `strategies/`.
+- **Comportament consecvent** — Gestionarea aliasurilor, îmbinarea căilor părinte–copil, `globalLocaleRoutes` / `filesLocaleRoutes` / `routeLocales` personalizate și garanțiile de imutabilitate sunt acoperite de o suită de teste dedicată.
+
+### Revizuirea arhitecturii de redirecționare {#redirect-architecture-overhaul}
+
+- **Middleware de server** — Redirecționările și gestionarea 404 rulează într-un middleware Nitro (`i18n.global.ts`). Acesta se execută înainte de randarea Nuxt, astfel încât redirecționările de la `/` la `/<locale>/` au loc fără o eroare afișată momentan când există un cookie de locale.
+- **Plugin client (pe partea de client)** — Un plugin doar pentru client (`06.client-redirect.client.ts`) rulează după hidratare și gestionează redirecționările când `useI18nLocale()` sau cookie-ul setează un locale diferit de cel implicit. Nitro rulează înaintea Nuxt, așa că serverul nu poate vedea modificările de cookie/stare făcute de plugin-urile utilizatorului; plugin-ul client acoperă acest caz.
+- **Fără componentă fallback** — Componenta fallback `locale-redirect.vue` și opțiunea `fallbackRedirectComponentPath` au fost eliminate. Logica de redirecționare este gestionată complet de middleware-ul de server și de plugin-ul client.
+- **Suport pentru căi personalizate** — Căile precum `/kontakt` pentru germană (prin `globalLocaleRoutes`) sunt recunoscute corect ca valide fără prefix de locale, evitând 404-uri incorecte în timpul prerender-ului.
+- **Corecție pentru customRegexMatcher** — Când folosiți `customRegexMatcher`, modelul se potrivește acum cu **întregul** prim segment al căii (cu ancorele `^` și `$`). Acest lucru previne 404-uri false pentru rute precum `/locale-test`, când modelul `[a-z]{2}-[a-z]{2}` se potrivea anterior cu subșiruri.
+- **Corecție pentru autoDetectPath** — Opțiunea `autoDetectPath` compară acum corect cu calea URL originală, prevenind redirecționările nedorite la navigarea explicită către URL-uri cu prefix de locale.
+
+### Composable-ul useI18nLocale {#usei18nlocale-composable}
+
+- **Gestionare centralizată a locale-ului** — Noul composable `useI18nLocale()` înlocuiește `useLocaleCookies` și oferă un singur punct de intrare pentru starea locale-ului, cookie-uri și utilitare de sincronizare.
+- **API** — `locale`, `localeCookie`, `hashCookie`, `getLocale()`, `getPreferredLocale()`, `setLocale()`, `syncLocale()`, `isValidLocale()`, `getEffectiveLocale()`, `resolveInitialLocale()`.
+- **Locale programatic** — Folosiți `useI18nLocale().setLocale(locale)` în plugin-urile de server în loc de `useState('i18n-locale')`, pentru o gestionare a locale-ului mai curată și centralizată.
+
+### Auto-detectare personalizată și configurare {#custom-auto-detection-&-configuration}
+
+- **`getI18nConfig()`** — Plugin-urile personalizate (de ex. pentru detectarea locale-ului) ar trebui să folosească `getI18nConfig()` din `#build/i18n.strategy.mjs` în loc de `useRuntimeConfig().public.i18nConfig`. Acesta oferă acces direct la configurația i18n rezolvată (de ex. `localeCookie`), fără a depinde de runtime config.
+- **Numele cookie-ului** — Folosiți `getI18nConfig().localeCookie ?? 'user-locale'` când implementați o logică de detectare personalizată.
+
+### Pachete de integrare simplificate {#simplified-integration-packages}
+
+Toate pachetele de integrare (`@i18n-micro/vue`, `@i18n-micro/astro`, `@i18n-micro/node`, `@i18n-micro/react`, `@i18n-micro/preact`, `@i18n-micro/solid`) au fost simplificate și optimizate și partajează aceeași logică de traducere de bază.
+
+### Modificări de configurare {#configuration-changes}
+
+- **`previousPageFallback` eliminat** — Această opțiune nu mai este necesară. Noua strategie de îmbinare cumulativă păstrează automat disponibile traducerile paginii anterioare în timpul animațiilor de tranziție, apoi le curăță prin hook-ul `page:transition:finish`.
+- **`hmr`** — Mutat din `experimental.hmr` într-o opțiune de nivel superior. Controlează HMR-ul pe server pentru fișierele de traduceri (activat implicit în development).
+
+```typescript
+// Before (v2.x)
+export default defineNuxtConfig({
+  i18n: {
+    experimental: {
+      hmr: true,
+    },
+  },
+})
+
+// After (v3.0.0)
+export default defineNuxtConfig({
+  i18n: {
+    hmr: true,
+  },
+})
+```
+
+## Modificări incompatibile {#breaking-changes}
+
+- **`fallbackRedirectComponentPath`** — Eliminat. Modulul nu mai folosește o componentă de rută fallback pentru redirecționări. Dacă aveați configurată o cale de componentă personalizată, eliminați-o din configurație.
+- **`useLocaleCookies`** — Eliminat. Folosiți `useI18nLocale()` în schimb. Noul composable oferă `locale`, `localeCookie`, `hashCookie`, `setLocale()`, `syncLocale()` și altele.
+- **`experimental.i18nPreviousPageFallback` / `previousPageFallback`** — Eliminat complet. Strategia de îmbinare cumulativă gestionează automat pâlpâirea din timpul tranzițiilor. Eliminați această opțiune din configurație.
+- **`experimental.hmr`** — Mutat în `hmr`. Actualizați configurația dacă foloseați această opțiune.
+- **Plugin-uri personalizate** — Dacă plugin-ul dvs. personalizat de detectare a locale-ului folosea `useRuntimeConfig().public.i18nConfig`, treceți la `getI18nConfig()` din `#build/i18n.strategy.mjs`. Preferați `useI18nLocale().setLocale()` în locul `useState('i18n-locale')`. Consultați [Detectarea personalizată a limbii](/ro/guide/custom-auto-detect) pentru exemple actualizate.
+- **Modificări ale fișierelor interne** — `load-from-storage.ts` și `translation-loader.ts` au fost eliminate și înlocuite cu `storage.ts` și `server-loader.ts`. Dacă importați direct din aceste fișiere (nerecomandat), actualizați importurile.
+
+## De ce contează {#why-it-matters}
+
+- **Performanță**: Cache-ul singleton centralizat elimină crearea de obiecte per cerere și reduce presiunea asupra GC.
+- **Mentenabilitate**: Logica rutelor și a căilor se află în pachete dedicate, cu limite și tipuri clare.
+- **Testare**: Comportamentul strategiilor și cazurile limită sunt testate izolat.
+- **Fiabilitate**: Separarea logicii de redirecționare între server (Nitro) și client evită problemele de sincronizare când cookie/useState sunt setate de plugin-urile utilizatorului.
+- **Pregătit pentru Serverless**: Plugin-ul Nitro rulează în același context ca handler-ele Nitro, compatibil cu Edge/Workers.
+- **Documentație**: Comportamentul rutării este documentat în [ghidul Strategii](/ro/guide/strategy) și în pachetele [path-strategy](https://github.com/s00d/nuxt-i18n-micro/tree/main/packages/path-strategy) și [route-strategy](https://github.com/s00d/nuxt-i18n-micro/tree/main/packages/route-strategy).
+
+Pentru note de actualizare și lista completă a modificărilor, consultați [changelog-ul](https://github.com/s00d/nuxt-i18n-micro/blob/main/CHANGELOG.md).
+
+---

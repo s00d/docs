@@ -1,0 +1,440 @@
+---
+title: "Triển khai"
+description: "Triển khai lên server Node, serverless hoặc Edge, hoặc dưới dạng site tĩnh — payload bản dịch nằm ở đâu, mỗi nền tảng cần gì, proxy và cache."
+---
+
+Module hoạt động với mọi preset Nitro mà không cần cấu hình thêm: nó chọn nơi đặt các tệp bản dịch dựa trên preset bạn build. Các giá trị mặc định phù hợp với hầu hết ứng dụng; hãy đọc phần dành cho nền tảng của bạn. Trang này giải thích:
+
+- những gì nằm trong `.output/` và payload nhận những header nào;
+- cần thay đổi gì cho hosting tĩnh, catalog lớn, sub-path, proxy hoặc CDN.
+
+<Note>
+
+Đã được triển khai và kiểm tra trên các host thực: Cloudflare Workers và Pages, Vercel và Vercel Edge, Netlify và Netlify Edge, Cloud Run và Deno Deploy, mỗi nền tảng với những gì [Nền tảng](#platforms) liệt kê. Các preset khác được build và chạy cục bộ.
+
+</Note>
+
+## Cách bản dịch được phân phối {#how-translations-are-delivered}
+
+Lúc build, module biến `locales/` (đã hợp nhất mọi layer) thành các **payload**: mỗi trang và locale một tệp JSON. Có hai bên đọc chúng:
+
+- **SSR** tải payload của trang đang render ngay trong tiến trình — không có request HTTP, và từ điển không được nhúng vào HTML.
+- **Trình duyệt** tải `/_locales/<page>/<locale>/data.json?v=<dateBuild>` khi hydrate và khi điều hướng.
+
+`_locales` là [`apiBaseUrl`](/vi/api/module-options#apibaseurl). Server route tích hợp sẵn trả lời URL đó; bản sao tĩnh trong `public/` trả lời nó mà không cần server.
+
+## Server Node {#node-server}
+
+```bash
+npx nuxi build
+node .output/server/index.mjs
+```
+
+Với `node-server` (preset mặc định), `node-cluster`, `bun`, `deno-server` hoặc bất kỳ preset nào khác phục vụ `public/` từ đĩa, với `public/` nằm cạnh thư mục `server/`:
+
+- payload được sao chép vào `.output/public/_locales/<page>/<locale>/data.json`;
+- SSR đọc chúng từ thư mục đó bằng `fs` (không có gì được đóng gói vào server);
+- trình duyệt nhận chúng dưới dạng tệp tĩnh, hoặc từ server route.
+
+Hãy triển khai toàn bộ thư mục `.output/`. Module cần Node 20 trở lên, và Nuxt có yêu cầu tối thiểu riêng: Nuxt 4.5 khai báo `^22.19.0 || ^24.11.0 || >=26.0.0`.
+
+Một tiến trình chịu tải ổn định có thể giữ nhiều bộ nhớ hơn nhiều so với heap đang dùng. Xem [Bộ nhớ trên server Node](/vi/guide/performance#memory-on-a-node-server) trước khi đặt giới hạn cho container.
+
+Với bố cục khác, module nhúng payload như mô tả ở phần tiếp theo. Điều đó bao gồm:
+
+- một `nitro.output.publicDir` tùy chỉnh, mà quá trình build đọc một lần;
+- `serveStatic: true` trên một preset giữ tệp tĩnh ở nơi khác.
+
+<Warning>
+
+Nếu một bản build đọc `public/` và thư mục đó không đến được server, như với `aws-lambda` và `serveStatic: true`, server ghi log một lỗi và các trang hiển thị khóa thô. Đặt `nitro.serveStatic: false` để nhúng payload.
+
+</Warning>
+
+## Serverless và Edge {#serverless-and-edge}
+
+Các preset sau không thể đọc `public/` lúc runtime:
+
+- các preset function đưa `public/` lên CDN hoặc không phục vụ nó: `vercel`, `netlify`, `aws-lambda`, `aws-amplify`, `azure-swa`, `firebase`, `stormkit`, `zeabur`, `node-listener`;
+- các preset Edge không có hệ thống tệp: `cloudflare-module`, `cloudflare-pages`, `vercel-edge`, `netlify-edge`, `deno_deploy`;
+- `serveStatic: 'inline'`, chẳng hạn `winterjs`.
+
+Ở đó module nhúng payload vào bundle server dưới dạng server asset của Nitro (`assets:i18n`) và vẫn ghi bản sao công khai cho trình duyệt.
+
+Nhúng toàn bộ ma trận trang × locale làm bundle lớn. Khi vượt quá giới hạn của một nền tảng Edge, quá trình build sẽ cảnh báo và nêu tên nền tảng đó, xem [Giới hạn bundle](#bundle-limits-on-edge). Với catalog lớn, hãy chuyển sang chế độ `source`, chế độ này nhúng các tệp nguồn gọn và hợp nhất bản dịch gốc, trang và fallback lúc runtime:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    translationPayloads: {
+      mode: 'source',
+    },
+  },
+})
+```
+
+Ở chế độ `source`, trình duyệt luôn tải payload từ server route, nơi hợp nhất chúng theo request (mọi bản sao công khai chứa cây nguồn gọn mà chỉ server đọc). Điều đó cần một server đang chạy, nên đừng dùng `source` cho một site tĩnh thuần.
+
+### Giới hạn bundle trên Edge {#bundle-limits-on-edge}
+
+| Nền tảng           | Giới hạn                                                                               |
+| ------------------ | -------------------------------------------------------------------------------------- |
+| Cloudflare Workers | 64 MiB chưa nén, trên gói Free và Paid. Không có giới hạn nén. Khởi động 1 s, bộ nhớ 128 MB |
+| Vercel Edge        | 1 MB gzip trên Hobby, 2 MB trên Pro, 4 MB trên Enterprise                              |
+| Netlify Edge       | 20 MB đã nén                                                                           |
+
+Quá trình build cộng tổng các từ điển mà nó nhúng và chỉ cảnh báo khi vượt quá giới hạn thấp nhất của nền tảng. Nó chỉ đếm từ điển, nên ứng dụng còn cộng thêm vào. Ví dụ, 120 trang × 4 locale với tệp gốc 60 KB sẽ nhúng:
+
+| Chế độ | Đã nhúng | Vừa với |
+| --- | --- | --- |
+| `premerged` | 34.9 MiB | Cloudflare; không vừa Vercel Edge hay Netlify Edge |
+| `source` | 5.7 MiB | Vẫn 3 MB gzip trên Vercel Edge |
+
+Một catalog cỡ đó trên Vercel Edge cần một [host payload](#app-baseurl-and-payload-hosts).
+
+`source` tốn một lần hợp nhất cho mỗi trang và locale trong mỗi isolate, khoảng 1 ms trong ví dụ đó và 7 ms CPU khi khởi động lạnh. Chi phí tăng theo kích thước chuỗi fallback: khoảng 43 ms cho 4 MB tệp trong chuỗi. Netlify Edge cho phép 50 ms CPU mỗi request và gói Free của Cloudflare là 10 ms.
+
+### Ngày tháng trên runtime Edge {#dates-on-edge-runtimes}
+
+`$td` dùng `Intl` của runtime, và dữ liệu ICU của nó có thể khác với của trình duyệt. Trên Netlify Edge, một ngày đã định dạng có thể chứa U+202F (dấu cách hẹp không ngắt) trong khi Chrome dùng dấu cách thường, nên Vue ghi log một lỗi hydration mismatch và văn bản tự sửa khi hydrate. Nuxt thuần với `Intl` thuần cũng như vậy ở đó; Deno Deploy thì không.
+
+<Tip>
+
+`<i18n-t>` với `date` hoặc `relativeDate` đã cho phép mismatch này. Với `$td` trong template, hãy đặt `data-allow-mismatch="text"` trên phần tử.
+
+</Tip>
+
+## Site tĩnh (nuxi generate) {#static-site-nuxi-generate}
+
+```bash
+npx nuxi generate
+```
+
+`nuxi build --preset <static preset>` cũng làm điều tương tự.
+
+- Chế độ `premerged` mặc định ghi mọi payload vào `.output/public/_locales/`, nên bất kỳ host tĩnh nào cũng có thể phục vụ chúng.
+- Các trang được prerender cho từng locale: với `prefix`, module gieo mọi gốc đã bản địa hóa (`/en`, `/de`), và `/` được giữ làm stub chuyển hướng.
+- Để tắt [`prerenderRoutes`](/vi/api/module-options#translationpayloads): bản sao công khai đã chứa các tệp payload.
+- Với chế độ `source` hoặc `publicAssets: false`, không có gì để trình duyệt đọc, và quá trình build sẽ cảnh báo.
+
+<Note>
+
+Không có server để đọc cookie hay `Accept-Language`, nên locale đã lưu không chuyển hướng `/` ở lần tải đầu. Với `no_prefix`, HTML chứa locale mặc định, và cookie đã lưu không được áp dụng khi tải: `$switchLocale` vẫn hoạt động trong trang đang mở.
+
+</Note>
+
+Với Cloudflare Pages, xem [Cloudflare Pages](#cloudflare-pages).
+
+Với một bản build có [domain theo locale](/vi/guide/layers#multiple-domains), hãy chạy generate một lần cho mỗi domain, với `NUXT_I18N_DOMAIN` là host của lần chạy. Mỗi cây khi đó chứa các trang và payload của domain đó. Nitro không có biến cho thư mục đầu ra, nên hãy tự đọc biến của bạn từ cấu hình:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: { output: { publicDir: process.env.PUBLIC_DIR } },
+})
+```
+
+```bash
+NUXT_I18N_DOMAIN=example.de PUBLIC_DIR=sites/example.de npx nuxi generate
+NUXT_I18N_DOMAIN=example.com PUBLIC_DIR=sites/example.com npx nuxi generate
+```
+
+- Giữ các thư mục bên ngoài `.output`: mỗi lần chạy sẽ làm trống nó.
+- Các liên kết tuyệt đối tới domain khác không được crawl.
+- Không có biến này, một bản build có locale với `baseUrl` sẽ cảnh báo và tạo cấu hình build, trong đó các locale đó là liên kết và không có trang.
+- Trên server Node, cùng biến đó ghim tiến trình vào một domain, bất kể `Host` nói gì.
+
+Host tĩnh áp dụng header riêng cho các tệp này; hãy đặt cache trong cấu hình của host. Quy tắc `/_locales/*` của module có đến được Cloudflare Pages qua `_headers` và Vercel qua `config.json`, dưới dạng `public, max-age=60`. Để phát hành các tệp anh em `.gz` / `.br`, hãy bật `nitro.compressPublicAssets`: module nén bản sao payload với cùng thiết lập.
+
+## Header cache và dateBuild {#cache-headers-and-datebuild}
+
+| Request                                                                                  | `Cache-Control`                                                                                                 |
+| ---------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Server Node hoặc route, `?v=` bằng `dateBuild` hiện tại, từ điển không rỗng              | `private, max-age=<httpCacheDuration>, immutable`                                                               |
+| Server Node hoặc route, không có `?v=`, có `?v=` cũ, hoặc từ điển rỗng                   | `public, max-age=0, must-revalidate`                                                                            |
+| Bản sao `public/` của một host, bất kỳ `?v=` nào                                         | `public, max-age=60` ([`httpCacheControl`](/vi/api/module-options#other)) |
+| Chế độ `source`, `cacheTtl`, hoặc `apiBaseServerHost`: từ điển có thể thay đổi mà không cần build | header `httpCacheControl`, luôn luôn                                                                   |
+| Server route, không đọc được từ điển                                                     | `503`, `no-store`                                                                                               |
+| dev server                                                                               | không có                                                                                                        |
+
+Tại sao bảng lại như vậy:
+
+- URL với `v` hiện tại được ghim như một asset có hash, và chỉ những gì thấy được query mới có thể nói vậy: server route, và server Node, vốn đặt header trên các tệp tĩnh của nó.
+- Nó là `private`, nên một CDN bỏ qua query không thể trả lời `v` tiếp theo bằng response này.
+- Tệp tĩnh của host nhận header áp dụng cho cả đường dẫn từ một route rule `/_locales/**`, vốn không thấy query, nên nó được giữ ngắn; một lần tải lặp lại vẫn không bị chặn bởi gì.
+- Một `v` cũ vẫn phục vụ được, vì HTML đã cache có nhắc đến nó.
+
+`httpCacheControl: false` giữ mọi tệp tĩnh ở `max-age=0, must-revalidate`. [`httpCacheDuration`](/vi/api/module-options#httpcacheduration) mặc định là một năm; `0` không gửi header. `$clearCache()` xác thực lại bất cứ thứ gì nó tải tiếp theo.
+
+Safari yêu cầu lại một payload đã preload khi nó không được dùng lại response: với `no-cache` và một `ETag`, request thứ hai là `304`, khi không có cả header cache lẫn validator thì đó là một lần tải đầy đủ thứ hai. Một `max-age` lớn hơn `0` cho ra một request duy nhất. Chỉ `httpCacheDuration: 0` trên một host không thêm validator mới phải trả giá này.
+
+[`dateBuild`](/vi/api/module-options#datebuild) là giá trị `?v=`. Mặc định nó là hash của các tệp bản dịch, nên nó chỉ thay đổi khi bản dịch thay đổi, và trình duyệt giữ các payload đã cache qua những lần triển khai không động đến chúng. Nó cũng thay đổi theo chuỗi fallback.
+
+- Tự đặt nó để ghim một giá trị.
+- Đặt `0` hoặc `''` để bỏ hoàn toàn `?v=`; khi đó payload không bao giờ là `immutable`.
+
+<Tip>
+
+Sau khi thay thế một từ điển tại chỗ trên server Node, hãy khởi động lại với `NUXT_I18N_DATE_BUILD=<new value>`: không có gì khác thay đổi `v` nếu không build lại.
+
+</Tip>
+
+### Tệp gốc và tệp delta {#root-and-delta-files}
+
+`premerged` ghi một tệp gốc cho mỗi locale, `__root/<locale>/data.json`, và trong tệp của mỗi trang chỉ ghi phần khác biệt so với nó.
+
+- Tệp trang đánh dấu tệp gốc mà nó được tạo dựa trên bằng khóa `__i18n_root`.
+- Trình duyệt tải cả hai, trang không hiển thị gì cho đến khi cả hai đã về, và SSR hợp nhất chúng một lần cho mỗi chunk.
+- Một tệp không có dấu là một từ điển đầy đủ và đứng độc lập: dev, chế độ `source`, server route và một host vẫn giữ tệp cũ đều trả lời bằng tệp như vậy, không cần thiết lập.
+
+Vì vậy bất kỳ ai đọc trực tiếp `_locales/*/data.json` sẽ đọc một delta. Đặt `translationPayloads.rootDelta: false` để giữ tệp đầy đủ.
+
+Một tab mở xuyên qua một lần triển khai và yêu cầu delta mới sẽ thấy rằng nó được tạo dựa trên một tệp gốc khác, và tải tệp gốc đó trước khi hiển thị.
+
+### Khi không đọc được từ điển {#when-a-dictionary-cannot-be-read}
+
+Một lần tải thất bại từ host (bất cứ lỗi nào trừ 404), một tệp không đọc được hoặc bị hỏng, hoặc một response 200 không phải đối tượng JSON sẽ không vào cache nào, và request tiếp theo sẽ đọc lại:
+
+- một lần render trang ghi log cảnh báo, hiển thị khóa thô cho từ điển đó và trả lời `503` với `Cache-Control: no-store`, giống nhau trong mọi header CDN (`CDN-Cache-Control`, `Cloudflare-CDN-Cache-Control`, `Netlify-CDN-Cache-Control`, `Vercel-CDN-Cache-Control`, `Surrogate-Control`, đè lên mọi giá trị từ route rule) và `Retry-After: 60`;
+- `/_locales/...` trả lời `503` với `no-store`;
+- `useTranslationServerMiddleware` cung cấp một `t` trả về khóa hoặc giá trị mặc định.
+
+Những gì xảy ra trong thời gian gián đoạn:
+
+- **Khách truy cập:** phần thân của response 503 đó chính là trang. Khi hydrate, trình duyệt đọc lại từ điển, và văn bản xuất hiện khi host hoạt động trở lại, kèm một lỗi console của Vue về hydration mismatch, vì HTML của server chứa các khóa.
+- **Crawler** được yêu cầu quay lại sau.
+- **Cache:** một route rule `swr` hoặc `cache` không lưu gì với trạng thái từ 400 trở lên, và CDN nhận `no-store`, nên không cache nào giữ các khóa thô và request đầu tiên sau khi khôi phục sẽ render văn bản thật.
+- **Các trang đã được cache** bởi một rule vẫn giữ nguyên: lần xác thực lại thất bại và không lưu gì. Trên Vercel, một lần xác thực lại `isr` thất bại cũng giữ trang cuối cùng theo cách tương tự.
+
+Điều này áp dụng cho mọi chunk mà một lần render tải, kể cả một chunk trang thất bại trong khi đã có tệp gốc, và một chunk được hợp nhất muộn hơn trong lần render. Một trang có từ điển bình thường, một chuyển hướng và một trang lỗi giữ nguyên trạng thái của chúng. Một [component island](/vi/guide/server-side-translations) là ngoại lệ: nó vẫn là 200, vì 503 sẽ loại nó khỏi trang, nên một trang có từ điển riêng tải được có thể được giữ lại cùng các khóa thô của island. Mỗi request trong thời gian gián đoạn đều đến host, không có timeout riêng của module ngoài 60 giây cho header response.
+
+Một 404 từ host nghĩa là nó không có tệp đó, và đó không phải là lỗi. Một lần render trang sẽ hiển thị từ điển gốc, như trình duyệt làm, và `/_locales/...` trả lời cùng 404 đó. Không cache nào giữ cả hai, nên một tệp xuất hiện sẽ được đọc ở request tiếp theo, với chi phí một request tới host cho mỗi lần render trang như vậy. Nếu cũng không có tệp gốc thì từ điển rỗng, và một [prerender](/vi/guide/upgrade#server,-build-and-deployment) sẽ thất bại.
+
+Server giữ các payload đã tải trong một LRU cache trong tiến trình với tối đa `cacheMaxSize` mục (mặc định 1000), cache này tải lại một mục sau `cacheTtl` khi được đặt; [Tinh chỉnh hiệu năng](/vi/guide/performance) trình bày cả hai, và [`cacheStorage`](/vi/guide/performance#shared-cache-for-several-instances) thêm một cache dùng chung giữa các instance. Đừng thêm một route rule `cache` của Nitro trên `/_locales/**`: nó dùng khóa là toàn bộ URL, kể cả query, và lưu một bản sao thứ ba.
+
+## App baseURL và host payload {#app-baseurl-and-payload-hosts}
+
+**`app.baseURL`** không cần gì thêm. Với `app.baseURL: '/shop/'`, trình duyệt tải `/shop/_locales/...`; bản sao vẫn nằm trong `.output/public/_locales/`, mà Nitro phục vụ dưới base (một host tĩnh phải mount đầu ra tại `/shop/`). Tiền tố locale và [đường dẫn bị loại trừ](/vi/guide/excluding-static-files) được so khớp không tính base.
+
+**`app.cdnURL`** cũng di chuyển payload, khi chúng là tệp trong `public/`: trình duyệt tải và preload `<cdnURL>/_locales/...`.
+
+- CDN phải chứa `_locales/` bên cạnh `_nuxt/`, tại đường dẫn đó.
+- Nó phải cho phép origin của site bạn (CORS), vì tệp được tải bằng `fetch`.
+- Một từ điển chỉ server route trả lời (chế độ `source`, không có bản sao công khai) vẫn ở trên origin của ứng dụng.
+
+Một `NUXT_APP_BASE_URL` lúc runtime trên `cloudflare-module` cần tương thích Node (`nodejs_compat`). Khi `nitro.cloudflare.nodeCompat` tắt, điều mà Nitro cũng mặc định khi dùng ngày cũ không có cờ, nó không thấy biến này và phục vụ `/`, kể cả Nuxt thuần, trong khi chuyển hướng locale vẫn đi tới base. Hãy đặt `app.baseURL` lúc build ở đó.
+
+Để phục vụ payload từ một origin khác, hãy trỏ client và server tới nó và tắt các đầu ra cục bộ:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    apiBaseClientHost: 'https://cdn.example.com',
+    apiBaseServerHost: 'https://cdn.example.com',
+    translationPayloads: {
+      serverHandler: false,
+      publicAssets: false,
+      serverAssets: false,
+    },
+  },
+})
+```
+
+- Trên Node, `serverAssets` ghi cùng bản sao cho các lần đọc của chính server, và tệp đó trả lời `/_locales`: nó cũng phải tắt, kể cả khi bạn giữ server route cho trình duyệt, vốn sẽ không bao giờ đến được.
+- Host phải phục vụ cùng bố cục `<apiBaseUrl>/<page>/<locale>/data.json`.
+- Quá trình build cảnh báo khi mọi đầu ra cục bộ đều tắt và thiếu host.
+
+Các giá trị tương tự có thể đến từ `NUXT_I18N_APP_BASE_URL`, `NUXT_I18N_APP_BASE_CLIENT_HOST` và `NUXT_I18N_APP_BASE_SERVER_HOST` lúc build. `NUXT_I18N_APP_BASE_SERVER_HOST` cũng hoạt động lúc runtime và thắng giá trị lúc build. Xem [`apiBaseServerHost`](/vi/api/module-options#apibaseserverhost) để biết chi tiết.
+
+## Nền tảng {#platforms}
+
+Chỉ những gì module hoặc đầu ra của nó cần. Tài khoản, vùng và đăng nhập CLI có trong tài liệu của nền tảng.
+
+### Cloudflare Workers {#cloudflare-workers}
+
+Preset `cloudflare_module`. `wrangler deploy` đóng gói đầu ra của Nitro lần thứ hai bằng esbuild, và sau đó một `defineAsyncComponent(() => import('./X.vue'))` thô sẽ render rỗng trên server. Trang lỗi mặc định của Nuxt là một trường hợp như vậy, nên một 404 có phần thân rỗng và trình duyệt ghi log hydration mismatch. Client sau đó render trang và trạng thái vẫn là 404, nhưng không có JavaScript thì trang trống. Đây là [nuxt#33270](https://github.com/nuxt/nuxt/issues/33270): Nuxt thuần không có module cũng như vậy. Các route trang không bị ảnh hưởng.
+
+Tắt lần đóng gói thứ hai:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: {
+    preset: 'cloudflare_module',
+    cloudflare: {
+      deployConfig: true, // `wrangler` below applies only with it
+      wrangler: {
+        no_bundle: true,
+        find_additional_modules: true,
+        rules: [{ type: 'ESModule', globs: ['**/*.mjs'] }],
+      },
+    },
+  },
+})
+```
+
+```bash
+npx nuxi build
+cd .output/server && npx wrangler deploy -c wrangler.json
+```
+
+Đặt `compatibilityDate` thành `2024-09-19` hoặc muộn hơn: một ngày cũ hơn sẽ chọn preset legacy, preset này không ghi `wrangler.json` và không báo lỗi. Khi đó 404 được render, và bản upload nhỏ hơn: 190 KiB gzip so với 246 KiB trên ứng dụng thử nghiệm. `error.vue` của riêng bạn là cách khác, nhưng nó chỉ bao gồm trang lỗi.
+
+Bản thân module không cần `nodejs_compat`. Về giới hạn, xem [Giới hạn bundle](#bundle-limits-on-edge).
+
+### Cloudflare Pages {#cloudflare-pages}
+
+Dùng preset `cloudflare-pages-static`. `nuxi generate --preset cloudflare-pages` là một bản build server không có `index.html`.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: {
+    preset: 'cloudflare-pages-static',
+    prerender: { autoSubfolderIndex: false },
+  },
+})
+```
+
+```bash
+npx nuxi generate
+npx wrangler pages project create my-site --production-branch main --force
+npx wrangler pages deploy dist --project-name my-site --branch main
+```
+
+- **Đầu ra.** Preset ghi vào `dist/`, không phải `.output/public`.
+- **`--force`.** Không có nó, wrangler mới (4.156 ở đây) chuyển `pages project create` sang Workers. Có nó, bạn nhận được một dự án Pages cổ điển. Chỉ cần một lần, khi tạo.
+- **`autoSubfolderIndex: false`.** Pages trả lời `/de` bằng một 308 tới `/de/` trong khi canonical và `hreflang` ghi `/de`, nên chúng trỏ tới một chuyển hướng. Với tùy chọn này, tệp là `de.html`, và chuyển hướng biến mất.
+- **`NUXT_E1005` trong console khi gặp 404** là một 404 bình thường. Nuxt báo như vậy vì `404.html` khởi động trên client, trước khi ứng dụng được mount. Trang vẫn hoạt động, và Nuxt thuần in ra cùng dòng đó.
+
+### Vercel và Vercel Edge {#vercel-and-vercel-edge}
+
+Preset `vercel` và `vercel_edge`, không cần thay đổi ứng dụng. Các thẻ hoạt động mà không cần `metaBaseUrl`, nhờ các header được chuyển tiếp của nền tảng. Vercel Edge có giới hạn bundle nhỏ: xem [Giới hạn bundle](#bundle-limits-on-edge). Để có cache dùng chung, hãy dùng [driver `upstash`](/vi/guide/performance#upstash-on-vercel-and-vercel-edge).
+
+### Netlify {#netlify}
+
+Preset `netlify` và `netlify_edge`.
+
+```bash
+npx nuxi build --preset netlify
+npx netlify deploy --prod --no-build --dir dist --functions .netlify/functions-internal
+```
+
+- **Để `nitro.output` không đặt.** Preset tự ghi `.netlify/` và `dist/`.
+- **Giữ một `package.json` trong thư mục bạn triển khai.** Không có nó, CLI sẽ nhìn vào thư mục cha và không triển khai function nào, mà không báo lỗi.
+- **Netlify Edge** triển khai chỉ với `--dir dist`. Xem [Ngày tháng trên runtime Edge](#dates-on-edge-runtimes).
+
+### Cloud Run {#cloud-run}
+
+Dùng bản build `node-server` mặc định. `gcloud run deploy --source` cần một `Dockerfile` trong thư mục đầu ra khi docker không chạy cục bộ:
+
+```dockerfile
+# .output/Dockerfile
+FROM node:22-slim
+WORKDIR /app
+COPY . .
+ENV NODE_ENV=production
+CMD ["node", "server/index.mjs"]
+```
+
+```bash
+cd .output && gcloud run deploy my-app --source .
+```
+
+Các thẻ hoạt động mà không cần `metaBaseUrl`, nhờ các header được chuyển tiếp của nền tảng.
+
+### Deno Deploy {#deno-deploy}
+
+Preset `deno_deploy`. `deno deploy` thay thế `deployctl`. Tạo một ứng dụng động với entrypoint `server/index.ts`, và triển khai từ thư mục đầu ra.
+
+### Firebase {#firebase}
+
+| Sản phẩm | Thiết lập |
+| --- | --- |
+| App Hosting | Chạy bản build Node: dùng preset mặc định hoặc `firebase-app-hosting`, và Node 20+ |
+| Cloud Functions | Preset `firebase` nhúng payload và cần `firebase-functions` |
+| Hosting (tĩnh) | Phục vụ `.output/public` dưới dạng tệp, nên `/_locales/**` nhận header của Hosting |
+
+Trên Hosting tĩnh, nếu JSON trả về với `Content-Type` hoặc cache sai, hãy thêm một mục `headers` cho `/_locales/**` trong `firebase.json`. Header `routeRules` của Nuxt không áp dụng cho các tệp mà Hosting tự phục vụ; route payload đặt `Content-Type` và `Cache-Control` riêng trên các response thực sự đến được server.
+
+### AWS Amplify {#aws-amplify}
+
+`aws-amplify` giữ tệp tĩnh bên cạnh thư mục compute của nó, không phải cạnh server, nên payload được nhúng như trên một nền tảng function.
+
+### Nhiều instance của một bản build {#several-instances-of-one-build}
+
+Một artifact có thể chạy với locale mặc định hoặc locale bị vô hiệu hóa khác nhau cho mỗi instance thông qua biến môi trường: xem [Ghi đè runtime](/vi/guide/runtime-overrides). Một locale chỉ bị vô hiệu hóa lúc runtime vẫn có tệp tĩnh trong `public/`; hãy vô hiệu hóa nó lúc build nếu những tệp đó không được phép truy cập.
+
+Các instance tải từ điển từ một host từ xa có thể chia sẻ chúng trong Redis, Upstash, Cloudflare KV hoặc D1, Deno KV hoặc một storage Nitro khác, để backend chỉ nhận một request thay vì một request cho mỗi instance. Đó là một cache, không phải nguồn bản dịch: xem [Cache dùng chung cho nhiều instance](/vi/guide/performance#shared-cache-for-several-instances).
+
+## Đứng sau proxy hoặc CDN {#behind-a-proxy-or-cdn}
+
+Ứng dụng phải biết host công khai và scheme từ request.
+
+| Proxy gửi                                    | Bản build thường                                 | Bản build có `baseUrl` trên các locale                                            |
+| -------------------------------------------- | ------------------------------------------------ | --------------------------------------------------------------------------------- |
+| `Host` thật                                  | Không cần đặt gì                                 | Không cần đặt gì                                                                  |
+| `Host` của origin, cùng với `X-Forwarded-Host` | Không cần đặt gì                               | [`trustForwardedHost: true`](/vi/api/module-options#trustforwardedhost)           |
+| Không có cả hai                              | [`metaBaseUrl`](/vi/api/module-options#metabaseurl) | Không thiết lập nào giúp được: mọi request trông như host của origin, nên hãy thay đổi proxy |
+
+- **Route dùng `swr` hoặc `cache`.** Bảng không áp dụng ở đó: xem [Cache HTML](#caching-html). Hãy đặt `metaBaseUrl` hoặc `site.url`.
+- **`X-Forwarded-Proto`.** Hãy gửi nó, nếu không URL canonical sẽ là `http://` khi đứng sau proxy HTTPS. `metaBaseUrl` cũng khắc phục điều này.
+- **Trong một bản build theo domain**, domain chọn base URL của các thẻ. `metaTrustForwardedHost` không chọn domain ở đó, chỉ `trustForwardedHost` mới làm vậy.
+- **Chuyển hướng là tương đối và cookie locale không có `Domain`,** nên cả hai đều ở trên host công khai.
+
+<Warning>
+
+**Ghim `metaBaseUrl` khi origin vẫn có thể truy cập được** — Trên một bản build thường không có `metaBaseUrl` hay `site.url`, canonical, `hreflang` và `og:url` lấy host từ request. [`metaTrustForwardedHost`](/vi/api/module-options#metatrustforwardedhost) bật theo mặc định, nên một request trực tiếp với `X-Forwarded-Host: evil.example` sẽ nhận `https://evil.example` trong các thẻ đó, và một cache đứng trước sẽ lan truyền trang đó. Một host của nền tảng như `*.workers.dev` chính là một origin như vậy. `metaBaseUrl` cũng chặn điều này cho `Host`. Một host đã biết của bản build theo domain giữ `baseUrl` riêng của nó. Với `trustForwardedHost: true`, một client trực tiếp có thể chọn trang của domain khác, nên chỉ bật nó khi đứng sau một proxy ghi đè header.
+
+</Warning>
+
+## Cache HTML {#caching-html}
+
+Hầu hết URL đều an toàn để cache, vì chúng ghi rõ locale. Những URL sau phụ thuộc vào khách truy cập:
+
+| Thiết lập                      | URL                                               |
+| ------------------------------ | ------------------------------------------------- |
+| Mặc định, `autoDetectPath: '/'` | `/`                                              |
+| `prefix`                       | `/` và mọi URL không có tiền tố, vốn chỉ chuyển hướng |
+| `autoDetectPath: '*'`          | Mọi URL                                           |
+| `no_prefix`                    | Mọi trang                                         |
+
+- **`Vary`.** Các response đó mang `Vary` với `Cookie` khi [`localeCookie`](/vi/api/module-options#localecookie) được đặt và `Accept-Language` khi `autoDetectLanguage` bật. Một cache tôn trọng nó sẽ giữ các câu trả lời tách biệt.
+- **Một cache bỏ qua `Vary`,** chẳng hạn "cache mọi thứ theo URL", phải bỏ qua các URL đó. Nếu không, `302 /de` của một khách truy cập sẽ đến với khách tiếp theo, và một trang mặc định đã lưu sẽ bỏ chuyển hướng cho tất cả mọi người. Trên `/` bạn cũng có thể đặt `redirects: false`. Route cache của Nitro dùng khóa là đường dẫn và danh sách `varies` của nó, nên cũng hãy giữ `/` ngoài các rule `swr` và `cache`.
+- **`Set-Cookie`.** Khi `localeCookie` được đặt, mọi trang được render trên server dưới một tiền tố đều mang `Set-Cookie`, và một CDN đúng chuẩn sẽ không lưu nó. Với HTML được cache, hãy tắt `localeCookie`, hoặc loại bỏ header ở edge.
+- **Các rule `swr` và `cache` cần `metaBaseUrl` hoặc `site.url`.** Nitro render route như vậy chỉ với các header trong `cache.varies`, nên `Host`, `X-Forwarded-Host` và `X-Forwarded-Proto` bị mất và URL request là `http://localhost`. Không có origin cố định, canonical, `hreflang` và `og:url` trên các route đó trỏ tới `http://localhost`, trên mọi nền tảng. `useRequestURL()` của Nuxt thuần cũng đọc như vậy ở đó. Lấy host từ khách truy cập thay vào đó sẽ đưa `X-Forwarded-Host` của một khách vào trang mà mọi khách đều nhận. Bản build theo domain không bị ảnh hưởng: các thẻ của nó dùng `baseUrl` của các locale.
+
+  Nếu một bản build phục vụ nhiều host và không có origin đơn lẻ nào phù hợp, hãy để rule thấy các header và giữ một bản sao cho mỗi giá trị: `'/blog/**': { swr: 60, cache: { varies: ['host', 'x-forwarded-host', 'x-forwarded-proto'] } }`. Mỗi giá trị khác nhau là một mục cache mới, nên một client gửi header bịa đặt sẽ làm đầy cache: hãy đặt origin sau một proxy đặt các header đó.
+- **Các rule `swr` và `cache` trên bản build theo domain.** Module thêm `host` vào `cache.varies` của mọi rule như vậy, và `x-forwarded-host` khi có `trustForwardedHost`, để một domain không phục vụ trang của mình cho domain khác. Một rule với `cache: false` giữ nguyên như khi viết. `isr` là cache của nền tảng: hãy kiểm tra rằng nó dùng host làm khóa. Khi host nằm trong khóa, một client gửi host bịa đặt sẽ thêm các mục cache.
+
+Với các tệp payload, xem [Header cache và dateBuild](#cache-headers-and-datebuild).
+
+## Liên quan {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Tinh chỉnh hiệu năng" icon="book-open" href="/vi/guide/performance">
+
+</Card>
+
+<Card title="Ghi đè runtime" icon="book-open" href="/vi/guide/runtime-overrides">
+
+</Card>
+
+<Card title="Tham chiếu translationPayloads" icon="brackets-curly" href="/vi/api/module-options#translationpayloads">
+
+</Card>
+
+<Card title="Layer và domain" icon="book-open" href="/vi/guide/layers">
+
+</Card>
+
+<Card title="SEO" icon="book-open" href="/vi/guide/seo">
+
+</Card>
+
+</CardGroup>

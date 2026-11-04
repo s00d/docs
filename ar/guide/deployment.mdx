@@ -1,0 +1,440 @@
+---
+title: "النشر"
+description: "انشر على خادم Node، أو بيئة serverless أو Edge، أو كموقع ثابت — أين تذهب حمولات الترجمة، وما تحتاجه كل منصة، والوكلاء، والتخزين المؤقت."
+---
+
+تعمل الوحدة مع أي إعداد Nitro مسبق (preset) دون إعدادات إضافية: فهي تختار مكان ملفات الترجمة بناءً على الإعداد المسبق الذي تبني له. القيم الافتراضية مناسبة لمعظم التطبيقات؛ اقرأ القسم الخاص بمنصتك. تشرح هذه الصفحة:
+
+- ما ينتهي في `.output/` وأي ترويسات تحصل عليها الحمولات؛
+- ما يجب تغييره للاستضافة الثابتة، أو الكتالوجات الكبيرة، أو المسار الفرعي، أو الوكيل، أو شبكة CDN.
+
+<Note>
+
+نُشرت وفُحصت على مضيفين حقيقيين: Cloudflare Workers وPages، وVercel وVercel Edge، وNetlify وNetlify Edge، وCloud Run وDeno Deploy، كلٌّ منها مع ما تسرده [المنصات](#platforms). أما الإعدادات المسبقة الأخرى فقد بُنيت وشُغّلت محليًا.
+
+</Note>
+
+## كيف تُسلَّم الترجمات {#how-translations-are-delivered}
+
+وقت البناء تحوّل الوحدة `locales/` (بعد دمج كل الطبقات) إلى **حمولات**: ملف JSON واحد لكل صفحة ولغة. يقرؤها مستهلكان:
+
+- **SSR** يحمّل حمولة الصفحة المعروضة داخل العملية — دون طلب HTTP، ولا يُضمَّن القاموس في HTML.
+- **المتصفح** يجلب `/_locales/<page>/<locale>/data.json?v=<dateBuild>` عند الإماهة (hydration) وعند التنقل.
+
+`_locales` هو [`apiBaseUrl`](/ar/api/module-options#apibaseurl). يجيب مسار الخادم المدمج على عنوان URL هذا؛ وتجيب النسخة الثابتة في `public/` عليه دون خادم.
+
+## خادم Node {#node-server}
+
+```bash
+npx nuxi build
+node .output/server/index.mjs
+```
+
+مع `node-server` (الإعداد المسبق الافتراضي)، أو `node-cluster`، أو `bun`، أو `deno-server`، أو أي إعداد مسبق آخر يخدم `public/` من القرص، مع وجود `public/` بجوار مجلد `server/`:
+
+- تُنسخ الحمولات إلى `.output/public/_locales/<page>/<locale>/data.json`؛
+- يقرؤها SSR من ذلك المجلد باستخدام `fs` (لا يُدمج شيء في الخادم)؛
+- يحصل عليها المتصفح كملفات ثابتة، أو من مسار الخادم.
+
+انشر مجلد `.output/` بالكامل. تحتاج الوحدة إلى Node 20 أو أحدث، ولـ Nuxt حدّه الأدنى الخاص: يعلن Nuxt 4.5 عن `^22.19.0 || ^24.11.0 || >=26.0.0`.
+
+قد تحتفظ العملية تحت حمل مستمر بذاكرة أكبر بكثير من الكومة الحية لديها. راجع [الذاكرة على خادم Node](/ar/guide/performance#memory-on-a-node-server) قبل أن تضبط حدًّا للحاوية.
+
+مع تخطيط آخر، تُضمّن الوحدة الحمولات كما هو موضح في القسم التالي. ويشمل ذلك:
+
+- قيمة مخصصة لـ `nitro.output.publicDir`، تقرؤها عملية البناء مرة واحدة؛
+- `serveStatic: true` على إعداد مسبق يحفظ الملفات الثابتة في مكان آخر.
+
+<Warning>
+
+إذا كانت عملية البناء تقرأ `public/` ولا يصل المجلد إلى الخادم، كما مع `aws-lambda` و`serveStatic: true`، يسجّل الخادم خطأً واحدًا وتعرض الصفحات مفاتيح خامًا. اضبط `nitro.serveStatic: false` لتضمين الحمولات.
+
+</Warning>
+
+## Serverless وEdge {#serverless-and-edge}
+
+لا تستطيع هذه الإعدادات المسبقة قراءة `public/` في وقت التشغيل:
+
+- إعدادات الدوال المسبقة التي ترسل `public/` إلى CDN أو لا تخدمه: `vercel`، `netlify`، `aws-lambda`، `aws-amplify`، `azure-swa`، `firebase`، `stormkit`، `zeabur`، `node-listener`؛
+- إعدادات Edge المسبقة بلا نظام ملفات: `cloudflare-module`، `cloudflare-pages`، `vercel-edge`، `netlify-edge`، `deno_deploy`؛
+- `serveStatic: 'inline'`، مثل `winterjs`.
+
+هناك تُضمّن الوحدة الحمولات في حزمة الخادم كأصول خادم Nitro (`assets:i18n`) وتظل تكتب النسخة العامة للمتصفح.
+
+يؤدي تضمين مصفوفة الصفحات × اللغات الكاملة إلى تضخم الحزمة. عند تجاوز حد منصة Edge تُحذّر عملية البناء وتسمّيها، راجع [حدود الحزمة](#bundle-limits-on-edge). للكتالوجات الكبيرة انتقل إلى وضع `source`، الذي يضمّن ملفات المصدر المضغوطة ويدمج الترجمات الجذرية وترجمات الصفحات والترجمات الاحتياطية في وقت التشغيل:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    translationPayloads: {
+      mode: 'source',
+    },
+  },
+})
+```
+
+في وضع `source` يجلب المتصفح الحمولات دائمًا من مسار الخادم، الذي يدمجها عند الطلب (أي نسخة عامة تحتوي على شجرة المصدر المضغوطة التي لا يقرؤها إلا الخادم). وهذا يتطلب خادمًا قيد التشغيل، لذا لا تستخدم `source` لموقع ثابت بالكامل.
+
+### حدود الحزمة على Edge {#bundle-limits-on-edge}
+
+| المنصة           | الحد                                                                                  |
+| ------------------ | -------------------------------------------------------------------------------------- |
+| Cloudflare Workers | 64 MiB غير مضغوط، في الخطتين المجانية والمدفوعة. لا يوجد حد للحجم المضغوط. بدء تشغيل 1 s، ذاكرة 128 MB |
+| Vercel Edge        | 1 MB gzip في Hobby، و2 MB في Pro، و4 MB في Enterprise                                    |
+| Netlify Edge       | 20 MB مضغوط                                                                       |
+
+تجمع عملية البناء أحجام القواميس التي تضمّنها ولا تُحذّر إلا عند تجاوز أدنى حد للمنصة. وهي تحسب القواميس وحدها، لذا يُضاف التطبيق فوقها. على سبيل المثال، 120 صفحة × 4 لغات مع ملف جذري بحجم 60 KB تضمّن:
+
+| الوضع | المُضمَّن | يتسع في |
+| --- | --- | --- |
+| `premerged` | 34.9 MiB | Cloudflare؛ لا Vercel Edge ولا Netlify Edge |
+| `source` | 5.7 MiB | لا يزال 3 MB gzip على Vercel Edge |
+
+يحتاج كتالوج بهذا الحجم على Vercel Edge إلى [مضيف للحمولات](#app-baseurl-and-payload-hosts).
+
+يدفع `source` كلفة دمج لكل صفحة ولغة في كل isolate، نحو 1 ms في ذلك المثال و7 ms من وقت CPU في isolate بارد. وتزداد مع حجم سلسلة القيم الاحتياطية: نحو 43 ms لـ 4 MB من ملفات السلسلة. يسمح Netlify Edge بـ 50 ms من وقت CPU لكل طلب، وخطة Cloudflare المجانية بـ 10 ms.
+
+### التواريخ على بيئات تشغيل Edge {#dates-on-edge-runtimes}
+
+يستخدم `$td` واجهة `Intl` في بيئة التشغيل، وقد تختلف بيانات ICU فيها عن بيانات المتصفح. على Netlify Edge قد يحتوي التاريخ المنسَّق على U+202F (مسافة ضيقة غير قابلة للكسر) حيث يضع Chrome مسافة عادية، فيسجّل Vue عدم تطابق واحدًا في الإماهة ويصحّح النص نفسه عند الإماهة. يفعل Nuxt العادي مع `Intl` العادي الشيء نفسه هناك؛ أما Deno Deploy فلا.
+
+<Tip>
+
+يسمح `<i18n-t>` مع `date` أو `relativeDate` بعدم التطابق مسبقًا. أما لـ `$td` في قالب، فضع `data-allow-mismatch="text"` على العنصر.
+
+</Tip>
+
+## موقع ثابت (nuxi generate) {#static-site-nuxi-generate}
+
+```bash
+npx nuxi generate
+```
+
+يفعل `nuxi build --preset <static preset>` الشيء نفسه.
+
+- يكتب الوضع الافتراضي `premerged` كل حمولة في `.output/public/_locales/`، لذا يمكن لأي مضيف ثابت خدمتها.
+- تُعرض الصفحات مسبقًا لكل لغة: في `prefix` تزرع الوحدة كل جذر مترجم (`/en` و`/de`)، ويُحتفظ بـ `/` كصفحة إعادة توجيه.
+- اترك [`prerenderRoutes`](/ar/api/module-options#translationpayloads) معطّلًا: فالنسخة العامة تحتوي مسبقًا على ملفات الحمولات.
+- مع وضع `source` أو `publicAssets: false` لا يوجد ما يقرؤه المتصفح، وتُحذّر عملية البناء.
+
+<Note>
+
+لا يوجد خادم لقراءة ملف تعريف الارتباط أو `Accept-Language`، لذا لا تعيد اللغة المحفوظة توجيه `/` عند التحميل الأول. في `no_prefix` يحتوي HTML على اللغة الافتراضية، ولا يُطبَّق ملف تعريف الارتباط المحفوظ عند التحميل: يظل `$switchLocale` يعمل في الصفحة المفتوحة.
+
+</Note>
+
+لـ Cloudflare Pages راجع [Cloudflare Pages](#cloudflare-pages).
+
+لبناء مع [نطاقات اللغات](/ar/guide/layers#multiple-domains)، شغّل generate مرة لكل نطاق، مع `NUXT_I18N_DOMAIN` كمضيف لذلك التشغيل. تحتوي كل شجرة حينها على صفحات ذلك النطاق وحمولاته. لا يملك Nitro متغيرًا لمجلد المخرجات، لذا اقرأ متغيرك الخاص من الإعدادات:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: { output: { publicDir: process.env.PUBLIC_DIR } },
+})
+```
+
+```bash
+NUXT_I18N_DOMAIN=example.de PUBLIC_DIR=sites/example.de npx nuxi generate
+NUXT_I18N_DOMAIN=example.com PUBLIC_DIR=sites/example.com npx nuxi generate
+```
+
+- أبقِ المجلدات خارج `.output`: إذ يفرّغه كل تشغيل.
+- لا تُزحف الروابط المطلقة إلى النطاقات الأخرى.
+- بدون المتغير، يُحذّر البناء الذي فيه لغة ذات `baseUrl` ويولّد إعدادات البناء، حيث تكون تلك اللغات روابط ولا تحصل على صفحات.
+- على خادم Node يثبّت المتغير نفسه العملية على نطاق واحد، أيًّا كانت قيمة `Host`.
+
+يطبّق المضيف الثابت ترويساته الخاصة على هذه الملفات؛ اضبط التخزين المؤقت في إعدادات المضيف. تصل قاعدة `/_locales/*` الخاصة بالوحدة فعلًا إلى Cloudflare Pages عبر `_headers` وإلى Vercel عبر `config.json`، بالقيمة `public, max-age=60`. لإرسال ملفات `.gz` / `.br` المرافقة، فعّل `nitro.compressPublicAssets`: تضغط الوحدة نسخة الحمولات بالإعدادات نفسها.
+
+## ترويسات التخزين المؤقت وdateBuild {#cache-headers-and-datebuild}
+
+| الطلب                                                                                  | `Cache-Control`                                                                                                 |
+| ---------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| خادم Node أو المسار، مع `?v=` مساوٍ لقيمة `dateBuild` الحالية، وقاموس غير فارغ     | `private, max-age=<httpCacheDuration>, immutable`                                                               |
+| خادم Node أو المسار، دون `?v=`، أو بقيمة قديمة، أو بقاموس فارغ             | `public, max-age=0, must-revalidate`                                                                            |
+| نسخة المضيف من `public/`، أي `?v=`                                                    | `public, max-age=60` ([`httpCacheControl`](/ar/api/module-options#other)) |
+| وضع `source`، أو `cacheTtl`، أو `apiBaseServerHost`: قد يتغير القاموس دون بناء | ترويسة `httpCacheControl`، دائمًا                                                                           |
+| مسار الخادم، تعذّرت قراءة القاموس                                           | `503`، `no-store`                                                                                               |
+| خادم التطوير                                                                               | لا شيء                                                                                                            |
+
+لماذا يبدو الجدول هكذا:
+
+- يُثبَّت عنوان URL ذو قيمة `v` الحالية مثل أصل مُجزَّأ (hashed)، ولا يستطيع قول ذلك إلا ما يرى الاستعلام: مسار الخادم، وخادم Node الذي يضبط الترويسة على ملفاته الثابتة.
+- القيمة `private`، لذا لا تستطيع شبكة CDN تتجاهل الاستعلام أن تجيب على قيمة `v` التالية من هذه الاستجابة.
+- تأخذ الملفات الثابتة للمضيف ترويسة على مستوى المسار من قاعدة مسار `/_locales/**`، التي لا ترى الاستعلام، لذا تبقى قصيرة؛ ولا يتعطل التحميل المتكرر بانتظار أي شيء.
+- تبقى قيمة `v` القديمة قابلة للخدمة، لأن HTML المخزّن مؤقتًا يشير إليها.
+
+يُبقي `httpCacheControl: false` كل ملف ثابت على `max-age=0, must-revalidate`. القيمة الافتراضية لـ [`httpCacheDuration`](/ar/api/module-options#httpcacheduration) سنة واحدة؛ و`0` لا يرسل أي ترويسة. يعيد `$clearCache()` التحقق مما يحمّله بعد ذلك.
+
+يطلب Safari الحمولة المحمّلة مسبقًا مرة أخرى عندما لا يُسمح له بإعادة استخدام الاستجابة: مع `no-cache` و`ETag` يكون الطلب الثاني `304`، ومع غياب ترويسة التخزين المؤقت وأداة التحقق معًا يكون تنزيلًا كاملًا ثانيًا. قيمة `max-age` أكبر من `0` تعطي طلبًا واحدًا. لا يدفع هذه الكلفة إلا `httpCacheDuration: 0` على مضيف لا يضيف أداة تحقق.
+
+[`dateBuild`](/ar/api/module-options#datebuild) هي قيمة `?v=`. افتراضيًا هي تجزئة (hash) لملفات الترجمة لديك، لذا لا تتغير إلا عندما تتغير الترجمات، وتحتفظ المتصفحات بحمولاتها المخزّنة مؤقتًا عبر عمليات النشر التي لم تمسّها. وهي تتغير أيضًا مع سلسلة القيم الاحتياطية.
+
+- اضبطها بنفسك لتثبيت قيمة.
+- اضبط `0` أو `''` لحذف `?v=` بالكامل؛ ولن تكون الحمولات حينها `immutable` أبدًا.
+
+<Tip>
+
+بعد استبدال قاموس في مكانه على خادم Node، أعد التشغيل مع `NUXT_I18N_DATE_BUILD=<new value>`: لا شيء آخر يغيّر `v` دون إعادة البناء.
+
+</Tip>
+
+### الملفات الجذرية وملفات الفروق {#root-and-delta-files}
+
+يكتب `premerged` ملفًا جذريًا واحدًا لكل لغة، `__root/<locale>/data.json`، وفي ملف كل صفحة ما يختلف عنه فقط.
+
+- يعلّم ملف الصفحة الجذرَ الذي صُنع مقابله بمفتاح `__i18n_root`.
+- يجلب المتصفح كليهما، ولا تعرض الصفحة شيئًا حتى يصل كلاهما، ويدمجهما SSR مرة واحدة لكل جزء.
+- الملف الذي لا يحمل علامة هو قاموس كامل ويقف بمفرده: يجيب كلٌّ من وضع التطوير، ووضع `source`، ومسار الخادم، والمضيف الذي لا يزال يحتفظ بملفات أقدم بملف كهذا، دون أي إعداد.
+
+لذا فإن من يقرأ `_locales/*/data.json` مباشرة يقرأ ملف فروق. اضبط `translationPayloads.rootDelta: false` للإبقاء على الملفات الكاملة.
+
+علامة التبويب المفتوحة عبر عملية نشر والتي تطلب ملف فروق جديدًا ترى أنه صُنع مقابل جذر آخر، فتجلب ذلك الجذر قبل عرضه.
+
+### عندما يتعذّر قراءة القاموس {#when-a-dictionary-cannot-be-read}
+
+الجلب الفاشل من مضيف (أي شيء عدا 404)، أو الملف غير المقروء أو التالف، أو استجابة 200 ليست كائن JSON، لا يصل إلى أي ذاكرة مؤقتة، ويقرأ الطلب التالي مجددًا:
+
+- يسجّل عرض الصفحة تحذيرًا، ويعرض مفاتيح خامًا لذلك القاموس ويجيب بـ `503` مع `Cache-Control: no-store`، وبالقيمة نفسها في كل ترويسة CDN (`CDN-Cache-Control` و`Cloudflare-CDN-Cache-Control` و`Netlify-CDN-Cache-Control` و`Vercel-CDN-Cache-Control` و`Surrogate-Control`، متقدمةً على أي قيمة من قاعدة مسار) و`Retry-After: 60`؛
+- يجيب `/_locales/...` بـ `503` مع `no-store`؛
+- يعطي `useTranslationServerMiddleware` دالة `t` تجيب بالمفتاح أو بالقيمة الافتراضية.
+
+ما يحدث أثناء الانقطاع:
+
+- **الزوار:** جسم استجابة 503 تلك هو الصفحة نفسها. عند الإماهة يقرأ المتصفح القاموس مجددًا، ويظهر النص بمجرد عودة المضيف، مع خطأ واحد من Vue في وحدة التحكم حول عدم تطابق الإماهة، لأن HTML الخادم كان يحتوي على المفاتيح.
+- **الزواحف** يُطلب منها العودة لاحقًا.
+- **الذاكرات المؤقتة:** لا تخزّن قاعدة مسار `swr` أو `cache` شيئًا بحالة 400 أو أكثر، وتحصل شبكة CDN على `no-store`، لذا لا تحتفظ أي ذاكرة مؤقتة بالمفاتيح الخام ويعرض أول طلب بعد التعافي النص الحقيقي.
+- **الصفحات المخزّنة مؤقتًا مسبقًا** بقاعدة تبقى كما هي: تفشل إعادة التحقق ولا تخزّن شيئًا. على Vercel تحتفظ إعادة تحقق `isr` الفاشلة بآخر صفحة بالطريقة نفسها.
+
+يشمل ذلك كل جزء يحمّله العرض، بما في ذلك جزء صفحة فاشل مع توفر جذره، وجزء يُدمج لاحقًا أثناء العرض. تحتفظ الصفحة ذات القاموس السليم، وإعادة التوجيه، وصفحة الخطأ بحالتها. [جزيرة المكوّن](/ar/guide/server-side-translations) هي الاستثناء: تبقى 200، لأن 503 سيُخرجها من الصفحة، لذا قد تُحفظ صفحة يُحمَّل قاموسها الخاص مع مفاتيح خام لجزيرة. كل طلب أثناء الانقطاع يصل إلى المضيف، دون مهلة خاصة بالوحدة سوى 60 ثانية لترويسات الاستجابة.
+
+استجابة 404 من المضيف تعني أنه لا يملك هذا الملف، وهذا ليس فشلًا. يعرض عرض الصفحة القاموس الجذري، كما يفعل المتصفح، ويجيب `/_locales/...` بالـ 404 نفسه. لا تحتفظ أي ذاكرة مؤقتة بأيٍّ منهما، لذا يُقرأ الملف الذي يظهر عند الطلب التالي، بكلفة طلب واحد إلى المضيف لكل عرض لمثل هذه الصفحة. ومع غياب الملف الجذري أيضًا يكون القاموس فارغًا، ويفشل [العرض المسبق](/ar/guide/upgrade#server,-build-and-deployment).
+
+يحتفظ الخادم بالحمولات المحمّلة في ذاكرة LRU مؤقتة داخل العملية تصل إلى `cacheMaxSize` من الإدخالات (1000 افتراضيًا) وتعيد تحميل الإدخال بعد `cacheTtl` عند ضبطه؛ يغطي [ضبط الأداء](/ar/guide/performance) كليهما، ويضيف [`cacheStorage`](/ar/guide/performance#shared-cache-for-several-instances) ذاكرة مؤقتة مشتركة بين النسخ. لا تضف قاعدة مسار Nitro من نوع `cache` على `/_locales/**` فوق ذلك: فهي تُفهرس بعنوان URL الكامل، بما فيه الاستعلام، وتخزّن نسخة ثالثة.
+
+## baseURL للتطبيق ومضيفو الحمولات {#app-baseurl-and-payload-hosts}
+
+**`app.baseURL`** لا يحتاج إلى شيء آخر. مع `app.baseURL: '/shop/'` يجلب المتصفح `/shop/_locales/...`؛ وتبقى النسخة في `.output/public/_locales/`، التي يخدمها Nitro تحت المسار الأساسي (يجب على المضيف الثابت تركيب المخرجات عند `/shop/`). تُطابق بادئات اللغات و[المسارات المستثناة](/ar/guide/excluding-static-files) دون المسار الأساسي.
+
+**`app.cdnURL`** ينقل الحمولات أيضًا، عندما تكون ملفات في `public/`: يجلب المتصفح `<cdnURL>/_locales/...` ويحمّله مسبقًا.
+
+- يجب أن تحتوي شبكة CDN على `_locales/` بجوار `_nuxt/`، عند ذلك المسار.
+- يجب أن تسمح بأصل موقعك (CORS)، لأن الملف يصل عبر `fetch`.
+- القاموس الذي لا يجيب عنه إلا مسار الخادم (وضع `source`، بلا نسخة عامة) يبقى على أصل التطبيق.
+
+يحتاج `NUXT_APP_BASE_URL` في وقت التشغيل على `cloudflare-module` إلى توافق Node (`nodejs_compat`). مع إيقاف `nitro.cloudflare.nodeCompat`، وهو ما يعود إليه Nitro أيضًا عند تاريخ قديم بلا علم، لا يرى المتغير ويخدم `/`، بما في ذلك Nuxt العادي، بينما تظل إعادة توجيه اللغة تذهب إلى المسار الأساسي. اضبط `app.baseURL` وقت البناء هناك.
+
+لخدمة الحمولات من أصل آخر، وجّه العميل والخادم إليه وأوقف المخرجات المحلية:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    apiBaseClientHost: 'https://cdn.example.com',
+    apiBaseServerHost: 'https://cdn.example.com',
+    translationPayloads: {
+      serverHandler: false,
+      publicAssets: false,
+      serverAssets: false,
+    },
+  },
+})
+```
+
+- على Node، يكتب `serverAssets` النسخة نفسها لقراءات الخادم الخاصة، ويجيب ذلك الملف على `/_locales`: يجب إيقافه أيضًا، حتى لو احتفظت بمسار الخادم للمتصفح، الذي لن يصل إليه أبدًا.
+- يجب أن يخدم المضيف التخطيط نفسه `<apiBaseUrl>/<page>/<locale>/data.json`.
+- تُحذّر عملية البناء عندما تكون كل المخرجات المحلية معطّلة والمضيف مفقودًا.
+
+يمكن أن تأتي القيم نفسها من `NUXT_I18N_APP_BASE_URL` و`NUXT_I18N_APP_BASE_CLIENT_HOST` و`NUXT_I18N_APP_BASE_SERVER_HOST` وقت البناء. يعمل `NUXT_I18N_APP_BASE_SERVER_HOST` أيضًا في وقت التشغيل ويتغلب على قيمة البناء. راجع [`apiBaseServerHost`](/ar/api/module-options#apibaseserverhost) للتفاصيل.
+
+## المنصات {#platforms}
+
+فقط ما تحتاجه الوحدة أو مخرجاتها. أما الحسابات والمناطق وتسجيلات الدخول عبر CLI فهي في توثيق المنصة.
+
+### Cloudflare Workers {#cloudflare-workers}
+
+الإعداد المسبق `cloudflare_module`. يحزم `wrangler deploy` مخرجات Nitro مرة ثانية باستخدام esbuild، وبعد ذلك يُعرض `defineAsyncComponent(() => import('./X.vue'))` الخام فارغًا على الخادم. صفحة الخطأ الافتراضية في Nuxt واحدة منها، لذا يكون جسم 404 فارغًا ويسجّل المتصفح عدم تطابق في الإماهة. يعرض العميل بعد ذلك الصفحة وتبقى الحالة 404، لكن بدون JavaScript تكون الصفحة فارغة. هذه هي [nuxt#33270](https://github.com/nuxt/nuxt/issues/33270): يفعل Nuxt العادي بدون الوحدة الشيء نفسه. لا تتأثر مسارات الصفحات.
+
+أوقف الحزم الثانية:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: {
+    preset: 'cloudflare_module',
+    cloudflare: {
+      deployConfig: true, // `wrangler` below applies only with it
+      wrangler: {
+        no_bundle: true,
+        find_additional_modules: true,
+        rules: [{ type: 'ESModule', globs: ['**/*.mjs'] }],
+      },
+    },
+  },
+})
+```
+
+```bash
+npx nuxi build
+cd .output/server && npx wrangler deploy -c wrangler.json
+```
+
+اضبط `compatibilityDate` على `2024-09-19` أو أحدث: فالتاريخ الأقدم يختار الإعداد المسبق القديم، الذي لا يكتب `wrangler.json` ولا يعطي أي خطأ. بعد ذلك تُعرض صفحة 404، ويصبح الرفع أصغر: 190 KiB gzip مقابل 246 KiB في تطبيق الاختبار. ملف `error.vue` الخاص بك هو المخرج الآخر، لكنه يغطي صفحة الخطأ فقط.
+
+لا تحتاج الوحدة نفسها إلى `nodejs_compat`. للحدود راجع [حدود الحزمة](#bundle-limits-on-edge).
+
+### Cloudflare Pages {#cloudflare-pages}
+
+استخدم الإعداد المسبق `cloudflare-pages-static`. أما `nuxi generate --preset cloudflare-pages` فهو بناء خادم بلا `index.html`.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: {
+    preset: 'cloudflare-pages-static',
+    prerender: { autoSubfolderIndex: false },
+  },
+})
+```
+
+```bash
+npx nuxi generate
+npx wrangler pages project create my-site --production-branch main --force
+npx wrangler pages deploy dist --project-name my-site --branch main
+```
+
+- **المخرجات.** يكتب الإعداد المسبق إلى `dist/`، لا إلى `.output/public`.
+- **`--force`.** بدونه يحيل إصدار wrangler جديد (4.156 هنا) الأمر `pages project create` إلى Workers. ومعه تحصل على مشروع Pages تقليدي. يلزم مرة واحدة، عند الإنشاء.
+- **`autoSubfolderIndex: false`.** يجيب Pages على `/de` بـ 308 إلى `/de/` بينما يشير canonical و`hreflang` إلى `/de`، فيشيران إلى إعادة توجيه. مع هذا الخيار يكون الملف `de.html`، وتختفي إعادة التوجيه.
+- **`NUXT_E1005` في وحدة التحكم عند 404** هو 404 عادي. يبلّغ عنه Nuxt بهذه الطريقة لأن `404.html` يبدأ على العميل، قبل تركيب التطبيق. تعمل الصفحة، ويطبع Nuxt العادي السطر نفسه.
+
+### Vercel وVercel Edge {#vercel-and-vercel-edge}
+
+الإعدادان المسبقان `vercel` و`vercel_edge`، دون أي تغيير في التطبيق. تعمل الوسوم دون `metaBaseUrl`، من الترويسات المُمرَّرة من المنصة. لدى Vercel Edge حد صغير للحزمة: راجع [حدود الحزمة](#bundle-limits-on-edge). لذاكرة مؤقتة مشتركة استخدم [مشغّل `upstash`](/ar/guide/performance#upstash-on-vercel-and-vercel-edge).
+
+### Netlify {#netlify}
+
+الإعدادان المسبقان `netlify` و`netlify_edge`.
+
+```bash
+npx nuxi build --preset netlify
+npx netlify deploy --prod --no-build --dir dist --functions .netlify/functions-internal
+```
+
+- **اترك `nitro.output` دون ضبط.** يكتب الإعداد المسبق `.netlify/` و`dist/` بنفسه.
+- **احتفظ بملف `package.json` في المجلد الذي تنشر منه.** بدونه ينظر CLI إلى المجلد الأب ولا ينشر أي دالة، دون أي خطأ.
+- **Netlify Edge** ينشر باستخدام `--dir dist` وحده. راجع [التواريخ على بيئات تشغيل Edge](#dates-on-edge-runtimes).
+
+### Cloud Run {#cloud-run}
+
+استخدم بناء `node-server` الافتراضي. يحتاج `gcloud run deploy --source` إلى `Dockerfile` في مجلد المخرجات عندما لا يعمل docker محليًا:
+
+```dockerfile
+# .output/Dockerfile
+FROM node:22-slim
+WORKDIR /app
+COPY . .
+ENV NODE_ENV=production
+CMD ["node", "server/index.mjs"]
+```
+
+```bash
+cd .output && gcloud run deploy my-app --source .
+```
+
+تعمل الوسوم دون `metaBaseUrl`، من الترويسات المُمرَّرة من المنصة.
+
+### Deno Deploy {#deno-deploy}
+
+الإعداد المسبق `deno_deploy`. يحل `deno deploy` محل `deployctl`. أنشئ تطبيقًا ديناميكيًا بنقطة الدخول `server/index.ts`، وانشر من مجلد المخرجات.
+
+### Firebase {#firebase}
+
+| المنتج | الإعداد |
+| --- | --- |
+| App Hosting | يشغّل بناء Node: استخدم الإعداد المسبق الافتراضي أو `firebase-app-hosting`، وNode 20+ |
+| Cloud Functions | يضمّن الإعداد المسبق `firebase` الحمولات ويحتاج إلى `firebase-functions` |
+| Hosting (ثابت) | يخدم `.output/public` كملفات، لذا يحصل `/_locales/**` على ترويسات Hosting |
+
+على Hosting الثابت، إذا عاد JSON بقيمة `Content-Type` أو تخزين مؤقت خاطئين، أضف إدخال `headers` لـ `/_locales/**` في `firebase.json`. لا تنطبق ترويسات `routeRules` في Nuxt على الملفات التي يخدمها Hosting بنفسه؛ ويضبط مسار الحمولات `Content-Type` و`Cache-Control` الخاصين به على الاستجابات التي تصل فعلًا إلى الخادم.
+
+### AWS Amplify {#aws-amplify}
+
+يحتفظ `aws-amplify` بالملفات الثابتة بجوار مجلد الحوسبة الخاص به، لا بجوار الخادم، لذا تُضمَّن الحمولات كما في منصة دوال.
+
+### عدة نسخ من بناء واحد {#several-instances-of-one-build}
+
+يمكن تشغيل ناتج واحد بلغة افتراضية أو لغات معطّلة مختلفة لكل نسخة عبر متغيرات البيئة: راجع [تجاوزات وقت التشغيل](/ar/guide/runtime-overrides). اللغة المعطّلة في وقت التشغيل فقط لا تزال ملفاتها الثابتة في `public/`؛ عطّلها وقت البناء إذا كان يجب ألا يمكن الوصول إليها.
+
+يمكن للنسخ التي تحمّل القواميس من مضيف بعيد مشاركتها في Redis أو Upstash أو Cloudflare KV أو D1 أو Deno KV أو أي تخزين Nitro آخر، فيتلقى الخادم الخلفي طلبًا واحدًا بدلًا من طلب لكل نسخة. إنها ذاكرة مؤقتة، لا مصدر للترجمات: راجع [ذاكرة مؤقتة مشتركة لعدة نسخ](/ar/guide/performance#shared-cache-for-several-instances).
+
+## خلف وكيل أو CDN {#behind-a-proxy-or-cdn}
+
+يجب أن يعرف التطبيق المضيف العام والمخطط (scheme) من الطلب.
+
+| يرسل الوكيل                              | بناء عادي                                      | بناء مع `baseUrl` على اللغات                                                   |
+| -------------------------------------------- | ------------------------------------------------ | --------------------------------------------------------------------------------- |
+| `Host` الحقيقي                              | لا شيء لضبطه                                   | لا شيء لضبطه                                                                    |
+| `Host` الخاص بالأصل، إضافة إلى `X-Forwarded-Host` | لا شيء لضبطه                                   | [`trustForwardedHost: true`](/ar/api/module-options#trustforwardedhost)              |
+| لا هذا ولا ذاك                                      | [`metaBaseUrl`](/ar/api/module-options#metabaseurl) | لا يفيد أي إعداد: يبدو كل طلب كأنه من مضيف الأصل، لذا غيّر الوكيل |
+
+- **المسارات تحت `swr` أو `cache`.** لا ينطبق الجدول هناك: راجع [تخزين HTML مؤقتًا](#caching-html). اضبط `metaBaseUrl` أو `site.url`.
+- **`X-Forwarded-Proto`.** أرسلها، وإلا ستقرأ عناوين URL الأساسية (canonical) `http://` خلف وكيل HTTPS. يصلح `metaBaseUrl` هذا أيضًا.
+- **في بناء النطاقات** يختار النطاق عنوان URL الأساسي للوسوم. لا يختار `metaTrustForwardedHost` النطاق هناك، بل `trustForwardedHost` وحده.
+- **إعادات التوجيه نسبية وملف تعريف ارتباط اللغة بلا `Domain`،** لذا يبقى كلاهما على المضيف العام.
+
+<Warning>
+
+**ثبّت `metaBaseUrl` عندما يظل الأصل قابلًا للوصول** — في بناء عادي دون `metaBaseUrl` أو `site.url`، تأخذ canonical و`hreflang` و`og:url` مضيفها من الطلب. يكون [`metaTrustForwardedHost`](/ar/api/module-options#metatrustforwardedhost) مفعّلًا افتراضيًا، لذا يحصل الطلب المباشر مع `X-Forwarded-Host: evil.example` على `https://evil.example` في تلك الوسوم، وتنشر الذاكرة المؤقتة الأمامية تلك الصفحة. مضيف المنصة مثل `*.workers.dev` هو بالضبط أصل من هذا النوع. يغلق `metaBaseUrl` هذه الثغرة لـ `Host` أيضًا. يحتفظ المضيف المعروف في بناء النطاقات بقيمة `baseUrl` الخاصة به. مع `trustForwardedHost: true` يستطيع العميل المباشر اختيار صفحة نطاق آخر، لذا لا تفعّل ذلك إلا خلف وكيل يستبدل الترويسة.
+
+</Warning>
+
+## تخزين HTML مؤقتًا {#caching-html}
+
+معظم عناوين URL آمنة للتخزين المؤقت، لأنها تسمّي لغتها. أما هذه فتعتمد على الزائر:
+
+| الإعداد                          | عناوين URL                                              |
+| ------------------------------ | ------------------------------------------------- |
+| الافتراضي، `autoDetectPath: '/'` | `/`                                               |
+| `prefix`                       | `/` وكل عنوان URL بلا بادئة، والتي تعيد التوجيه فقط |
+| `autoDetectPath: '*'`          | كل عنوان URL                                         |
+| `no_prefix`                    | كل صفحة                                        |
+
+- **`Vary`.** تحمل تلك الاستجابات `Vary` مع `Cookie` عند ضبط [`localeCookie`](/ar/api/module-options#localecookie) ومع `Accept-Language` عند تفعيل `autoDetectLanguage`. الذاكرة المؤقتة التي تحترمها تفصل الإجابات عن بعضها.
+- **الذاكرة المؤقتة التي تتجاهل `Vary`،** مثل "خزّن كل شيء حسب عنوان URL"، يجب أن تتخطى تلك العناوين. وإلا يصل `302 /de` الخاص بزائر إلى الزائر التالي، وتُسقط صفحة افتراضية مخزّنة إعادة التوجيه للجميع. على `/` يمكنك أيضًا ضبط `redirects: false`. تُفهرس ذاكرة مسارات Nitro المؤقتة بالمسار وقائمة `varies` الخاصة به، لذا أبقِ `/` خارج قواعد `swr` و`cache` أيضًا.
+- **`Set-Cookie`.** مع ضبط `localeCookie`، تحمل كل صفحة معروضة على الخادم تحت بادئة `Set-Cookie`، ولن تخزّنها شبكة CDN صحيحة. لـ HTML المخزّن مؤقتًا اترك `localeCookie` معطّلًا، أو أزل الترويسة على الحافة.
+- **تحتاج قواعد `swr` و`cache` إلى `metaBaseUrl` أو `site.url`.** يعرض Nitro مثل هذا المسار بالترويسات الموجودة في `cache.varies` فقط، لذا تختفي `Host` و`X-Forwarded-Host` و`X-Forwarded-Proto` ويقرأ عنوان URL للطلب `http://localhost`. بدون أصل ثابت، تشير canonical و`hreflang` و`og:url` في تلك المسارات إلى `http://localhost`، على كل منصة. ويقرأ `useRequestURL()` في Nuxt العادي القيمة نفسها هناك. أما أخذ المضيف من الزائر بدلًا من ذلك فسيضع `X-Forwarded-Host` الخاص بزائر واحد في الصفحة التي يحصل عليها كل الزوار. لا يتأثر بناء النطاقات: إذ تستخدم وسومه `baseUrl` الخاص باللغات.
+
+  إذا كان بناء واحد يخدم عدة مضيفين ولا يناسب أصل واحد، فدع القاعدة ترى الترويسات واحتفظ بنسخة واحدة لكل قيمة: `'/blog/**': { swr: 60, cache: { varies: ['host', 'x-forwarded-host', 'x-forwarded-proto'] } }`. كل قيمة مختلفة هي إدخال جديد في الذاكرة المؤقتة، لذا فإن العميل الذي يرسل ترويسات مختلقة يملأ الذاكرة المؤقتة: ضع الأصل خلف وكيل يضبطها.
+- **قواعد `swr` و`cache` في بناء النطاقات.** تضيف الوحدة `host` إلى `cache.varies` في كل قاعدة من هذا النوع، و`x-forwarded-host` مع `trustForwardedHost`، حتى لا يخدم نطاقٌ صفحتَه لنطاق آخر. القاعدة ذات `cache: false` تبقى كما كُتبت. `isr` هي ذاكرة المنصة المؤقتة: تحقق من أنها تُفهرس بالمضيف. ومع وجود المضيف في المفتاح، يضيف العميل الذي يرسل مضيفين مختلقين إدخالات إلى الذاكرة المؤقتة.
+
+لملفات الحمولات راجع [ترويسات التخزين المؤقت وdateBuild](#cache-headers-and-datebuild).
+
+## ذات صلة {#related}
+
+<CardGroup cols={2}>
+
+<Card title="ضبط الأداء" icon="book-open" href="/ar/guide/performance">
+
+</Card>
+
+<Card title="تجاوزات وقت التشغيل" icon="book-open" href="/ar/guide/runtime-overrides">
+
+</Card>
+
+<Card title="مرجع translationPayloads" icon="brackets-curly" href="/ar/api/module-options#translationpayloads">
+
+</Card>
+
+<Card title="الطبقات والنطاقات" icon="book-open" href="/ar/guide/layers">
+
+</Card>
+
+<Card title="SEO" icon="book-open" href="/ar/guide/seo">
+
+</Card>
+
+</CardGroup>

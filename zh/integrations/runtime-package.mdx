@@ -1,0 +1,141 @@
+---
+title: "Runtime"
+description: "使用 @i18n-micro/runtime 为浏览器、Worker 和边缘运行时提供与框架无关的 createI18n。"
+---
+
+`@i18n-micro/runtime` 是与框架无关的 i18n 实例：字典、`t()`、复数、`Intl` 格式化以及变更订阅，不依赖 `fs`，也不依赖任何框架。可以在纯 TypeScript、Web Worker、边缘函数中使用它，或将其作为你自己绑定的基础。React、Preact、Node 和 Astro 包都扩展自这个类。
+
+## 安装 {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add @i18n-micro/runtime
+```
+
+```bash npm
+npm install @i18n-micro/runtime
+```
+
+```bash yarn
+yarn add @i18n-micro/runtime
+```
+
+</CodeGroup>
+
+没有 peer 依赖。若要从磁盘读取翻译文件，请使用 [`@i18n-micro/node`](/zh/integrations/nodejs-package)。
+
+## 设置 {#setup}
+
+```ts
+import { createI18n } from '@i18n-micro/runtime'
+
+const i18n = createI18n({
+  locale: 'en',
+  fallbackLocale: 'en',
+  messages: {
+    en: { greeting: 'Hello, {name}!', apples: 'no apples | one apple | {count} apples' },
+    de: { greeting: 'Hallo, {name}!' },
+  },
+  routeMessages: {
+    about: { en: { title: 'About us' } },
+  },
+})
+```
+
+所有选项（`plural`、`missingWarn`、`missingHandler`、`numberFormats`、`datetimeFormats`）都列在[实例](/zh/integrations/overview#the-instance)中。
+
+## 翻译 {#translate}
+
+```ts
+i18n.t('greeting', { name: 'Ada' }) // 'Hello, Ada!'
+i18n.tc('apples', 5) // '5 apples'
+i18n.tn(1234.5) // '1,234.5'
+
+i18n.setRoute('about')
+i18n.t('title') // 'About us' (route dictionary)
+i18n.t('greeting', { name: 'Ada' }) // 'Hello, Ada!' (root, still visible)
+```
+
+稍后加载更多字典：
+
+```ts
+i18n.loadMessages({ fr: { greeting: 'Bonjour, {name} !' } }, { about: { fr: { title: 'À propos' } } })
+i18n.addTranslations('fr', { nav: { home: 'Accueil' } }) // deep merge; pass false to replace
+
+await i18n.loadFromUrl('/locales/fr.json', { locale: 'fr' })
+await i18n.loadFromUrl('/locales/pages/about/fr.json', { locale: 'fr', routeName: 'about' })
+await i18n.loadFromUrls([
+  { url: '/locales/en.json', locale: 'en' },
+  { url: '/locales/de.json', locale: 'de' },
+])
+```
+
+`loadFromUrl` 使用 `fetch`（通过 `init` 传入请求头），响应非 OK 时会抛出错误。`loadFromUrls` 会依次逐个加载。
+
+## 切换 locale {#switch-locale}
+
+```ts
+i18n.locale = 'de'
+i18n.t('greeting', { name: 'Ada' }) // 'Hallo, Ada!'
+```
+
+locale、路由和字典的变化会通知订阅者，框架绑定正是借此重新渲染的：
+
+```ts
+const stop = i18n.subscribe(() => {
+  document.querySelector('#greeting')!.textContent = i18n.t('greeting', { name: 'Ada' }) as string
+})
+i18n.locale = 'fr'
+stop()
+```
+
+`getSnapshot()` 返回一个在每次通知时都会变化的字符串（用于 `useSyncExternalStore` 风格的 store）。
+
+## 按请求隔离 {#per-request}
+
+实例只持有一个 locale 和一个路由。在服务端，不要为每个请求切换共享实例：两个并发请求会看到彼此的 locale。`i18n.fork(locale)` 为请求提供独立的实例：拥有自己的 locale、回退 locale 和路由；共享相同的字典、格式化器和规则。无论有多少字典，fork 的开销都相同。fork 在首次自行写入之前能看到对其父实例的写入，而它自己的写入只保留在自身中。[Node.js](/zh/integrations/nodejs-package#per-request) 额外提供了 `run`。
+
+## API {#api}
+
+| 成员 | 说明 |
+| --- | --- |
+| `t`, `ts`, `tc`, `tn`, `td`, `tdr`, `has` | 参见[翻译和格式化](/zh/integrations/overview#translate-and-format) |
+| `locale`, `fallbackLocale` | 读取/设置 |
+| `currentRoute`, `setRoute(name)`, `getRoute()` | 当前路由，默认 `'index'` |
+| `loadMessages(messages?, routeMessages?)` | 一次合并多个 locale 和路由 |
+| `addTranslations(locale, tree, merge = true)`, `addRouteTranslations(locale, route, tree, merge = true)` | |
+| `loadFromUrl(url, { locale?, routeName?, init? })`, `loadFromUrls(entries)` | 通过 `fetch` 获取 JSON |
+| `hasTranslation(key)` | 当前 locale，任意路由（不同于 `has`，后者检查当前路由和根） |
+| `setTranslation(key, value)`, `resolveTranslations()` | 写入单个键；读取合并后的树 |
+| `clear()`, `clearCache()` | 丢弃所有字典 |
+| `subscribe(cb)`, `getSnapshot()` | 变更通知 |
+| `storage` | `{ translations: Map<'locale:route', Translations> }` |
+
+不是语言标签的代码会从 `localeIso: { ua: 'uk-UA' }` 获取其复数规则；`localeIsoMap(locales)` 会根据 locale 列表中带有 `iso` 的条目构建该映射。
+
+模块导出：`createI18n`、`I18n`、`fetchJsonTranslations`、`FormatService`、`interpolate`、`localeIsoMap`，以及类型 `I18nOptions`、`LoadFromUrlOptions`、`LoadFromUrlEntry`、`TranslationStorage`、`Translations`、`Locale`、`PluralFunc`。完整签名：[包参考](/zh/api/packages/runtime)。
+
+## 相关内容 {#related}
+
+<CardGroup cols={2}>
+
+<Card title="框架" icon="book-open" href="/zh/integrations/overview">
+
+选项、查找顺序、复数
+
+</Card>
+
+<Card title="Node.js" icon="book-open" href="/zh/integrations/nodejs-package">
+
+从磁盘加载翻译文件
+
+</Card>
+
+<Card title="React 和 Preact" icon="book-open" href="/zh/integrations/react-package">
+
+基于此实例构建的绑定
+
+</Card>
+
+</CardGroup>

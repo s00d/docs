@@ -1,0 +1,291 @@
+---
+title: "React og Preact"
+description: "Oversettelser, bytte av locale og ruterintegrasjon for React- og Preact-apper med @i18n-micro/react og @i18n-micro/preact."
+---
+
+`@i18n-micro/react` og `@i18n-micro/preact` pakker den rammeverkuavhengige [runtime](/no/integrations/runtime-package) inn i en provider, en `useI18n()`-hook og fire komponenter. Bruk dem i en React- eller Preact-app som ikke er bygget med Nuxt. Begge pakkene har samme API; [Preact](#preact)-blokken lister de få forskjellene, og den felles modellen er beskrevet i [Rammeverk](/no/integrations/overview).
+
+## Installasjon {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add @i18n-micro/react
+```
+
+```bash npm
+npm install @i18n-micro/react
+```
+
+```bash yarn
+yarn add @i18n-micro/react
+```
+
+</CodeGroup>
+
+Peer-avhengigheter: `react` `^18.0.0 || ^19.0.0`; `react-dom` (valgfri, for gjengivelse); `react-router-dom` `^6.0.0 || ^7.0.0` (valgfri, bare for `@i18n-micro/react/router`). Testet på React 19.3 og 18.3, React Router 7.18 og 6.30.
+
+## Oppsett {#setup}
+
+```tsx
+// src/main.tsx
+import { createRoot } from 'react-dom/client'
+import { createI18n, I18nProvider } from '@i18n-micro/react'
+import App from './App'
+import en from './locales/en.json'
+
+const locales = [
+  { code: 'en', iso: 'en-US', displayName: 'English' },
+  { code: 'de', iso: 'de-DE', displayName: 'Deutsch' },
+]
+
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', messages: { en } })
+
+createRoot(document.getElementById('root')!).render(
+  <I18nProvider i18n={i18n} locales={locales} defaultLocale="en">
+    <App />
+  </I18nProvider>,
+)
+```
+
+<Warning>
+
+Opprett instansen én gang, på modulnivå eller i en `useState`-initialiserer, aldri i en komponentkropp.
+
+</Warning>
+
+`<I18nProvider>` tar `i18n`, `locales`, `defaultLocale` og `routingStrategy`:
+
+- En utelatt prop beholder verdien fra en ytre provider, instansen inkludert.
+- Uten noen instans i det hele tatt bygger den en fra `createI18n`-alternativene ved siden av dem, slik at props forblir rene data: `<I18nProvider locale="de" messages={messages}>`.
+- En ny `locale`-prop bygger en ny instans med `messages` fra den gjengivelsen. En slik instans lever i komponenten: hvis noe over den suspenderer under montering, kaster React den, med det som ble lagt til i den.
+
+Alle `createI18n`-alternativer, inkludert `routeMessages`, står i [instansen](/no/integrations/overview#the-instance).
+
+## Oversett {#translate}
+
+```tsx
+import { useI18n } from '@i18n-micro/react'
+
+export function Greeting() {
+  const { t, tc, tn } = useI18n()
+  return (
+    <>
+      <h1>{t('greeting', { name: 'Ada' })}</h1> {/* Hello, Ada! */}
+      <p>{tc('apples', 3)}</p> {/* 3 apples */}
+      <p>{tn(1234.5)}</p>
+    </>
+  )
+}
+```
+
+`useI18n()` returnerer:
+
+| Gruppe | Medlemmer |
+| --- | --- |
+| Oversettelse | `t`, `ts`, `tc`, `tn`, `td`, `tdr`, `has` |
+| Locale og rute | `locale`, `fallbackLocale`, `currentRoute`, `setLocale`, `setRoute`, `getRoute`, `getLocales`, `defaultLocale()`, `getLocaleName` |
+| Ruting | `switchLocale`, `localePath`, `localeRoute` |
+| Ordbøker | `addTranslations`, `addRouteTranslations`, `clearCache` |
+
+- Komponenten gjengis på nytt når locale, ruten eller en lesbar ordbok endres, og når provideren får et nytt `locales`- eller `routingStrategy`-objekt. En ordbok for en locale som verken er aktiv eller reserve, gjengir ingenting.
+- `t` og de andre oversettelsesmetodene endres bare med lageret, så de er trygge i `memo` og effektavhengigheter.
+
+`useT` er én streng som en verdi. Komponenten gjengis bare når den strengen endres, uansett hva som skjer med providerens andre props; `<I18nT>` avhenger heller ikke av dem:
+
+```tsx
+const title = useT('page.title')
+```
+
+Last inn flere ordbøker når som helst:
+
+```tsx
+const { addTranslations, addRouteTranslations, setRoute } = useI18n()
+
+useEffect(() => {
+  import('./locales/de.json').then((m) => addTranslations('de', m.default))
+  addRouteTranslations('en', 'about', { title: 'About us' })
+  setRoute('about') // t('title') now reads the 'about' dictionary first
+}, [])
+```
+
+Selve instansen har også `loadFromUrl(url, { locale, routeName })` for JSON over `fetch`.
+
+## Bytt locale {#switch-locale}
+
+```tsx
+const { setLocale, switchLocale } = useI18n()
+
+setLocale('de') // only the locale
+switchLocale('de') // the locale, then the adapter's push to the localized current path
+```
+
+Bytting laster ingenting; legg til ordboken for locale først. En skriving til lageret er synkron for React, selv inne i `startTransition`, så en komponent som suspenderer på en manglende ordbok, ville vist sin fallback. `useLocaleSwitch` laster først og beholder det gamle grensesnittet til ordboken er på plass:
+
+```tsx
+const [switchTo, pending] = useLocaleSwitch((locale) => i18n.loadFromUrl(`/locales/${locale}.json`, { locale }))
+
+<button disabled={pending} onClick={() => switchTo('de')}>Deutsch</button>
+```
+
+Det siste kallet vinner. En mislykket lasting avvises og lar locale være som den var.
+
+`<I18nGroup>` sender en `t` med prefiks til et render-prop-barn. `<I18nT>` og `t()` inne i den får ikke prefiks:
+
+```tsx
+<I18nGroup prefix="profile">{({ t }) => <h2>{t('title')}</h2> /* profile.title */}</I18nGroup>
+```
+
+## Ruting {#routing}
+
+React Router-adapteren ligger i en understi, slik at hovedinngangen aldri importerer `react-router-dom`. Den trenger `useLocation()` og `useNavigate()`, så opprett den inne i en komponent under ruteren:
+
+```tsx
+// src/App.tsx
+import { useMemo } from 'react'
+import { BrowserRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
+import { I18nLink, I18nProvider, I18nSwitcher } from '@i18n-micro/react'
+import { createReactRouterAdapter } from '@i18n-micro/react/router'
+import { i18n, locales } from './i18n'
+import { About, Home } from './pages'
+
+function Localized() {
+  const location = useLocation()
+  const navigate = useNavigate()
+  // memoized: a new object on every render re-renders every `useI18n()` consumer
+  const routingStrategy = useMemo(() => createReactRouterAdapter(locales, 'en', location, navigate), [location, navigate])
+  return (
+    <I18nProvider i18n={i18n} locales={locales} defaultLocale="en" routingStrategy={routingStrategy}>
+      <I18nLink to="/about">About</I18nLink>
+      <I18nSwitcher />
+      <Routes>
+        <Route path="/:locale?" element={<Home />} />
+        <Route path="/:locale?/about" element={<About />} />
+      </Routes>
+    </I18nProvider>
+  )
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <Localized />
+    </BrowserRouter>
+  )
+}
+```
+
+Adapteren gir prefiks til alle locales unntatt standarden (`/about`, `/de/about`) og gjengir `<I18nLink>` som React Routers `<Link>`. Sett locale fra URL-en selv (for eksempel fra `useParams().locale` i en effekt). For enhver annen ruter skriver du en adapter med `getCurrentPath`, `push` og `replace` (alle påkrevd) — se [Ruteradapter](/no/integrations/overview#router-adapter).
+
+## SSR {#ssr}
+
+`renderToString` fungerer: `useI18n()` har et server-snapshot. Opprett én instans per forespørsel og legg til ordbøkene før du gjengir, slik at forespørsler i ulike locales ikke deler tilstand, eller send rene data til provideren.
+
+### Hydrering {#hydration}
+
+Tall, flertallsformer og tekst hydreres som de er. En dato avhenger av tidssonen og en relativ dato av klokken: sett `timeZone` på serveren og i nettleseren, og for `tdr` gir du nettleseren serverens tid med `now`. `<I18nT>` med `date` eller `relativeDate` setter `suppressHydrationWarning`, så en forskjell får ikke hydreringen til å feile, men serverens tekst blir stående til teksten endres. Det når bare ett nivå: `children` som pakker oversettelsen inn i et element, feiler fortsatt ved en forskjell, så gi dem samme `timeZone`.
+
+### Server Components {#server-components}
+
+Pakken merker klientkoden sin med `'use client'`. `@i18n-micro/react/server` har `createI18n` og en `I18nT` uten hooks som tar instansen som prop, slik at teksten holdes utenfor klientbundelen. Under betingelsen `react-server`, som i Next.js app router, løses hovedinngangen også til den, men TypeScript vet ikke det som standard: importer fra `/server`. `@i18n-micro/react/client` gir alltid klientinngangen.
+
+```tsx
+// app/[locale]/layout.tsx: a server component
+import { cache } from 'react'
+import { createI18n, I18nT } from '@i18n-micro/react/server'
+import { I18nProvider } from '@i18n-micro/react/client'
+import { loadMessages } from './messages'
+
+const getI18n = cache(async (locale: string) => createI18n({ locale, messages: await loadMessages(locale) }))
+
+export default async function Layout({ params, children }) {
+  const { locale } = await params
+  const i18n = await getI18n(locale)
+  return (
+    <I18nProvider locale={locale} messages={{ [locale]: i18n.resolveTranslations() }}>
+      <h1>
+        <I18nT i18n={i18n} keypath="title" />
+      </h1>
+      {children}
+    </I18nProvider>
+  )
+}
+```
+
+Gjengitt gjennom `react-server-dom-webpack`; selve en Next.js-app er ikke kjørt mot dette.
+
+## API {#api}
+
+| Eksport | Inngang |
+| --- | --- |
+| `createI18n`, `ReactI18n`, `I18nProvider`, `useI18n`, `useT`, `useLocaleSwitch` | `@i18n-micro/react` |
+| `I18nT`, `I18nLink`, `I18nSwitcher`, `I18nGroup` | `@i18n-micro/react` |
+| `I18nContext`, `I18nConfigContext`, `useI18nContext`, `useI18nLocales`, `useI18nDefaultLocale`, `useI18nRouter` | `@i18n-micro/react` |
+| `defaultPlural`, `FormatService`, `interpolate` | `@i18n-micro/react` |
+| Typer: `I18nRoutingStrategy`, `ReactI18nOptions`, `I18nProviderProps`, `UseI18nReturn`, komponent-props, `TranslationKey`, `Locale`, `Translations`, `PluralFunc` | `@i18n-micro/react` |
+| `createReactRouterAdapter` | `@i18n-micro/react/router` |
+| `createI18n`, `ReactI18n`, `I18nT` (tar `i18n`) | `@i18n-micro/react/server` |
+
+Fullstendige signaturer: [React-referanse](/no/api/packages/react).
+
+## Preact {#preact}
+
+`@i18n-micro/preact` er bygget fra samme kildekode, på selve Preact, uten `preact/compat`: samme instans, provider, hooks og komponenter. Forskjeller:
+
+| | React | Preact |
+| --- | --- | --- |
+| Peer-avhengighet | `react` (+ valgfri `react-router-dom`) | `preact` `^10.0.0 \|\| ^11.0.0`, testet på 10.29 og 11.1 |
+| Instansklasse | `ReactI18n` | `PreactI18n` |
+| Ruteradapter | `createReactRouterAdapter` fra `/router` | `createBrowserHistoryAdapter(locales, defaultLocale, ssrUrl?)` fra `/router` |
+| Ny gjengivelse | `useSyncExternalStore` | et layout-effect-abonnement som sjekker lageret på nytt |
+| Server Components | `/server`, `/client` | ingen |
+
+`createBrowserHistoryAdapter` fungerer med enhver History API-ruter (wouter, preact-router): `push` og `replace` kaller `history.pushState` / `replaceState` og sender `popstate`, og `<I18nLink>` gjengir en vanlig `<a>` som navigerer gjennom `push`. En server har ingen adresselinje: send forespørselens URL som `ssrUrl`, ellers gjengis lenker og språkvelgeren som på `/`. I en nettleser vinner adresselinjen.
+
+```tsx
+// src/main.tsx
+import { render } from 'preact'
+import { createI18n, I18nProvider } from '@i18n-micro/preact'
+import { createBrowserHistoryAdapter } from '@i18n-micro/preact/router'
+import { App } from './App'
+import en from './locales/en.json'
+
+const locales = [
+  { code: 'en', iso: 'en-US', displayName: 'English' },
+  { code: 'de', iso: 'de-DE', displayName: 'Deutsch' },
+]
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', messages: { en } })
+
+render(
+  <I18nProvider i18n={i18n} locales={locales} defaultLocale="en" routingStrategy={createBrowserHistoryAdapter(locales, 'en')}>
+    <App />
+  </I18nProvider>,
+  document.getElementById('app')!,
+)
+```
+
+Fullstendige signaturer: [Preact-referanse](/no/api/packages/preact).
+
+## Relatert {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Rammeverk" icon="book-open" href="/no/integrations/overview">
+
+Instansalternativer, ruteradapter, komponent-props
+
+</Card>
+
+<Card title="Runtime" icon="book-open" href="/no/integrations/runtime-package">
+
+Instansen disse pakkene bygger på
+
+</Card>
+
+<Card title="Typegenerator" icon="book-open" href="/no/integrations/types-generator">
+
+Autofullføring for nøkler
+
+</Card>
+
+</CardGroup>

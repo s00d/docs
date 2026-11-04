@@ -1,0 +1,440 @@
+---
+title: "Dağıtım"
+description: "Bir Node sunucusuna, serverless veya Edge ortamına ya da statik site olarak dağıtın — çeviri payload'larının nereye gittiği, her platformun neye ihtiyaç duyduğu, proxy'ler ve önbellekleme."
+---
+
+Modül, ek yapılandırma olmadan her Nitro preset'iyle çalışır: çeviri dosyalarının nerede bulunacağını derlediğiniz preset'e göre seçer. Varsayılanlar çoğu uygulama için doğrudur; platformunuzla ilgili bölümü okuyun. Bu sayfa şunları açıklar:
+
+- `.output/` içinde neyin yer aldığını ve payload'ların hangi başlıkları aldığını;
+- statik barındırma, büyük kataloglar, bir alt yol, bir proxy veya bir CDN için neyin değiştirilmesi gerektiğini.
+
+<Note>
+
+Gerçek sunucularda dağıtıldı ve kontrol edildi: Cloudflare Workers ve Pages, Vercel ve Vercel Edge, Netlify ve Netlify Edge, Cloud Run ve Deno Deploy; her biri [Platformlar](#platforms) bölümünde listelenenlerle birlikte. Diğer preset'ler yerel olarak derlendi ve çalıştırıldı.
+
+</Note>
+
+## Çeviriler nasıl teslim edilir {#how-translations-are-delivered}
+
+Derleme zamanında modül `locales/` dizinini (tüm katmanlar birleştirilmiş olarak) **payload'lara** dönüştürür: her sayfa ve locale için bir JSON dosyası. Bunları iki tüketici okur:
+
+- **SSR**, işlenen sayfanın payload'ını süreç içinde yükler — HTTP isteği yoktur ve sözlük HTML'e gömülmez.
+- **Tarayıcı**, hydration sırasında ve gezinmede `/_locales/<page>/<locale>/data.json?v=<dateBuild>` adresini getirir.
+
+`_locales`, [`apiBaseUrl`](/tr/api/module-options#apibaseurl) değeridir. Yerleşik sunucu rotası bu URL'ye yanıt verir; `public/` içindeki statik kopya ise sunucu olmadan yanıt verir.
+
+## Node sunucusu {#node-server}
+
+```bash
+npx nuxi build
+node .output/server/index.mjs
+```
+
+`node-server` (varsayılan preset), `node-cluster`, `bun`, `deno-server` veya `public/` dizinini diskten sunan, `public/` klasörü `server/` klasörünün yanında bulunan herhangi bir preset ile:
+
+- payload'lar `.output/public/_locales/<page>/<locale>/data.json` konumuna kopyalanır;
+- SSR onları bu klasörden `fs` ile okur (sunucuya hiçbir şey paketlenmez);
+- tarayıcı onları statik dosyalar olarak veya sunucu rotasından alır.
+
+`.output/` dizininin tamamını dağıtın. Modül Node 20 veya daha yenisini gerektirir ve Nuxt'ın kendi minimum gereksinimi vardır: Nuxt 4.5 `^22.19.0 || ^24.11.0 || >=26.0.0` belirtir.
+
+Sürekli yük altındaki bir süreç, canlı heap'inden çok daha fazla bellek tutabilir. Bir container sınırı belirlemeden önce [Node sunucusunda bellek](/tr/guide/performance#memory-on-a-node-server) bölümüne bakın.
+
+Başka bir düzenle modül, payload'ları bir sonraki bölümde açıklandığı gibi gömer. Bu şunları kapsar:
+
+- derlemenin bir kez okuduğu özel bir `nitro.output.publicDir`;
+- statik dosyaları başka bir yerde tutan bir preset üzerinde `serveStatic: true`.
+
+<Warning>
+
+Bir derleme `public/` dizinini okuyorsa ve bu klasör sunucuya ulaşmıyorsa (`aws-lambda` ve `serveStatic: true` durumunda olduğu gibi), sunucu bir hata kaydeder ve sayfalar ham anahtarları gösterir. Payload'ları gömmek için `nitro.serveStatic: false` ayarlayın.
+
+</Warning>
+
+## Serverless ve Edge {#serverless-and-edge}
+
+Bu preset'ler çalışma zamanında `public/` dizinini okuyamaz:
+
+- `public/` dizinini bir CDN'e gönderen veya onu sunmayan fonksiyon preset'leri: `vercel`, `netlify`, `aws-lambda`, `aws-amplify`, `azure-swa`, `firebase`, `stormkit`, `zeabur`, `node-listener`;
+- dosya sistemi olmayan Edge preset'leri: `cloudflare-module`, `cloudflare-pages`, `vercel-edge`, `netlify-edge`, `deno_deploy`;
+- `winterjs` gibi `serveStatic: 'inline'`.
+
+Bu durumlarda modül, payload'ları Nitro sunucu varlıkları (`assets:i18n`) olarak sunucu paketine gömer ve tarayıcı için genel kopyayı yine de yazar.
+
+Sayfa × locale matrisinin tamamını gömmek paketi büyütür. Bir Edge platformunun sınırı aşıldığında derleme uyarır ve sınırı belirtir, bkz. [Paket sınırları](#bundle-limits-on-edge). Büyük kataloglar için kompakt kaynak dosyalarını gömen ve kök, sayfa ve yedek çevirileri çalışma zamanında birleştiren `source` moduna geçin:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    translationPayloads: {
+      mode: 'source',
+    },
+  },
+})
+```
+
+`source` modunda tarayıcı payload'ları her zaman, onları istek üzerine birleştiren sunucu rotasından getirir (herhangi bir genel kopya, yalnızca sunucunun okuduğu kompakt kaynak ağacını tutar). Bu çalışan bir sunucu gerektirir, bu nedenle saf statik bir site için `source` kullanmayın.
+
+### Edge üzerinde paket sınırları {#bundle-limits-on-edge}
+
+| Platform           | Sınır                                                                                  |
+| ------------------ | -------------------------------------------------------------------------------------- |
+| Cloudflare Workers | Free ve Paid planlarda sıkıştırılmamış 64 MiB. Sıkıştırılmış sınır yok. 1 s başlatma, 128 MB bellek |
+| Vercel Edge        | Hobby'de 1 MB gzip, Pro'da 2 MB, Enterprise'da 4 MB                                    |
+| Netlify Edge       | Sıkıştırılmış 20 MB                                                                    |
+
+Derleme gömdüğü sözlükleri toplar ve yalnızca platformun en düşük sınırı aşıldığında uyarır. Yalnızca sözlükleri sayar, bu nedenle uygulama bunun üzerine eklenir. Örneğin, 60 KB'lık bir kök dosyayla 120 sayfa × 4 locale şunları gömer:
+
+| Mod | Gömülen | Sığar |
+| --- | --- | --- |
+| `premerged` | 34.9 MiB | Cloudflare; Vercel Edge veya Netlify Edge değil |
+| `source` | 5.7 MiB | Vercel Edge'de hâlâ 3 MB gzip |
+
+Vercel Edge'de bu boyutta bir katalog bir [payload sunucusuna](#app-baseurl-and-payload-hosts) ihtiyaç duyar.
+
+`source`, her isolate'te sayfa ve locale başına bir birleştirme maliyeti öder; bu örnekte yaklaşık 1 ms ve soğuk bir isolate'te 7 ms CPU. Yedek zincirinin boyutuyla artar: 4 MB'lık zincir dosyaları için yaklaşık 43 ms. Netlify Edge istek başına 50 ms CPU'ya, Cloudflare'in Free planı ise 10 ms'ye izin verir.
+
+### Edge çalışma ortamlarında tarihler {#dates-on-edge-runtimes}
+
+`$td` çalışma ortamının `Intl`'ini kullanır ve onun ICU verileri tarayıcınınkinden farklı olabilir. Netlify Edge'de biçimlendirilmiş bir tarih, Chrome'un normal boşluk kullandığı yerde U+202F (dar bölünmez boşluk) içerebilir; bu yüzden Vue bir hydration uyuşmazlığı kaydeder ve metin hydration sırasında kendini düzeltir. Düz `Intl` ile düz Nuxt orada aynısını yapar; Deno Deploy yapmaz.
+
+<Tip>
+
+`date` veya `relativeDate` ile `<i18n-t>` uyuşmazlığa zaten izin verir. Şablondaki `$td` için öğeye `data-allow-mismatch="text"` ekleyin.
+
+</Tip>
+
+## Statik site (nuxi generate) {#static-site-nuxi-generate}
+
+```bash
+npx nuxi generate
+```
+
+`nuxi build --preset <static preset>` de aynısını yapar.
+
+- Varsayılan `premerged` modu her payload'ı `.output/public/_locales/` içine yazar, böylece herhangi bir statik sunucu onları sunabilir.
+- Sayfalar her locale için önceden işlenir: `prefix` altında modül her yerelleştirilmiş kökü (`/en`, `/de`) tohumlar ve `/` bir yönlendirme taslağı olarak tutulur.
+- [`prerenderRoutes`](/tr/api/module-options#translationpayloads) seçeneğini kapalı bırakın: genel kopya payload dosyalarını zaten içerir.
+- `source` modu veya `publicAssets: false` ile tarayıcının okuyacağı bir şey yoktur ve derleme uyarır.
+
+<Note>
+
+Bir çerezi veya `Accept-Language`'i okuyacak sunucu yoktur, bu nedenle kaydedilmiş bir locale ilk yüklemede `/` adresini yönlendirmez. `no_prefix` altında HTML varsayılan locale'i içerir ve kaydedilmiş bir çerez yüklemede uygulanmaz: `$switchLocale` açık sayfada yine de çalışır.
+
+</Note>
+
+Cloudflare Pages için bkz. [Cloudflare Pages](#cloudflare-pages).
+
+[Locale alan adları](/tr/guide/layers#multiple-domains) içeren bir derleme için generate komutunu her alan adı için bir kez, çalıştırmanın host'u olarak `NUXT_I18N_DOMAIN` ile çalıştırın. Bu durumda her ağaç o alan adının sayfalarını ve payload'larını tutar. Nitro'nun çıktı klasörü için bir değişkeni yoktur, bu yüzden kendinizinkini yapılandırmadan okuyun:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: { output: { publicDir: process.env.PUBLIC_DIR } },
+})
+```
+
+```bash
+NUXT_I18N_DOMAIN=example.de PUBLIC_DIR=sites/example.de npx nuxi generate
+NUXT_I18N_DOMAIN=example.com PUBLIC_DIR=sites/example.com npx nuxi generate
+```
+
+- Klasörleri `.output` dışında tutun: her çalıştırma onu boşaltır.
+- Diğer alan adlarına giden mutlak bağlantılar taranmaz.
+- Değişken olmadan, `baseUrl` locale'i içeren bir derleme uyarır ve bu locale'lerin bağlantı olduğu ve sayfa almadığı derleme yapılandırmasını oluşturur.
+- Bir Node sunucusunda aynı değişken, `Host` ne derse desin süreci tek bir alan adına sabitler.
+
+Statik bir sunucu bu dosyalara kendi başlıklarını uygular; önbelleklemeyi sunucunun yapılandırmasında ayarlayın. Modülün `/_locales/*` kuralı Cloudflare Pages'e `_headers` aracılığıyla ve Vercel'e `config.json` aracılığıyla `public, max-age=60` olarak ulaşır. `.gz` / `.br` kardeş dosyaları göndermek için `nitro.compressPublicAssets` seçeneğini açın: modül payload kopyasını aynı ayarlarla sıkıştırır.
+
+## Önbellek başlıkları ve dateBuild {#cache-headers-and-datebuild}
+
+| İstek                                                                                    | `Cache-Control`                                                                                                 |
+| ---------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Node sunucusu veya rota, geçerli `dateBuild` değerine eşit `?v=`, boş olmayan bir sözlük | `private, max-age=<httpCacheDuration>, immutable`                                                               |
+| Node sunucusu veya rota, `?v=` olmadan, eski bir değerle veya boş bir sözlükle            | `public, max-age=0, must-revalidate`                                                                            |
+| Bir sunucunun `public/` kopyası, herhangi bir `?v=`                                      | `public, max-age=60` ([`httpCacheControl`](/tr/api/module-options#other)) |
+| `source` modu, `cacheTtl` veya `apiBaseServerHost`: bir sözlük derleme olmadan değişebilir | her zaman `httpCacheControl` başlığı                                                                          |
+| Sunucu rotası, sözlük okunamadı                                                          | `503`, `no-store`                                                                                               |
+| geliştirme sunucusu                                                                      | yok                                                                                                             |
+
+Tablonun neden böyle göründüğü:
+
+- Geçerli `v` değerine sahip URL, hash'li bir varlık gibi sabitlenir ve bunu yalnızca sorguyu gören taraf söyleyebilir: sunucu rotası ve statik dosyalarında başlığı ayarlayan bir Node sunucusu.
+- `private`'tir, böylece sorguyu yok sayan bir CDN bir sonraki `v`'yi bu yanıttan veremez.
+- Bir sunucunun statik dosyaları, sorguyu göremeyen bir `/_locales/**` rota kuralından yol genelinde bir başlık alır, bu yüzden kısa kalır; tekrarlanan bir yükleme yine de hiçbir şeyi beklemez.
+- Önbelleğe alınmış HTML onu adlandırdığı için eski bir `v` sunulabilir kalır.
+
+`httpCacheControl: false`, her statik dosyayı `max-age=0, must-revalidate` üzerinde tutar. [`httpCacheDuration`](/tr/api/module-options#httpcacheduration) varsayılan olarak bir yıldır; `0` başlık göndermez. `$clearCache()` bir sonraki yüklediği her şeyi yeniden doğrular.
+
+Safari, yanıtı yeniden kullanamayacağı durumlarda önceden yüklenmiş bir payload'ı tekrar ister: `no-cache` ve bir `ETag` ile ikinci istek bir `304` olur; ne önbellek başlığı ne de doğrulayıcı olduğunda ikinci bir tam indirme olur. `0`'dan büyük bir `max-age` tek bir istek sağlar. Bunun bedelini yalnızca doğrulayıcı eklemeyen bir sunucudaki `httpCacheDuration: 0` öder.
+
+[`dateBuild`](/tr/api/module-options#datebuild), `?v=` değeridir. Varsayılan olarak çeviri dosyalarınızın bir hash'idir, bu nedenle yalnızca çeviriler değiştiğinde değişir ve tarayıcılar onlara dokunmayan dağıtımlar boyunca önbelleğe alınmış payload'larını korur. Yedek zinciriyle de değişir.
+
+- Bir değeri sabitlemek için kendiniz ayarlayın.
+- `?v=`'yi tamamen kaldırmak için `0` veya `''` ayarlayın; bu durumda payload'lar asla `immutable` olmaz.
+
+<Tip>
+
+Bir Node sunucusunda bir sözlüğü yerinde değiştirdikten sonra `NUXT_I18N_DATE_BUILD=<new value>` ile yeniden başlatın: yeniden derleme olmadan `v`'yi başka hiçbir şey değiştirmez.
+
+</Tip>
+
+### Kök ve delta dosyaları {#root-and-delta-files}
+
+`premerged`, her locale için bir kök (`__root/<locale>/data.json`) ve her sayfanın dosyasına yalnızca ondan farklı olanı yazar.
+
+- Sayfa dosyası, karşılığında oluşturulduğu kökü bir `__i18n_root` anahtarıyla işaretler.
+- Tarayıcı ikisini de getirir, ikisi de gelene kadar sayfa hiçbir şey göstermez ve SSR bunları chunk başına bir kez birleştirir.
+- İşareti olmayan bir dosya bütün bir sözlüktür ve tek başına durur: geliştirme, `source` modu, sunucu rotası ve hâlâ eski dosyaları tutan bir sunucu, hiçbir ayar olmadan böyle bir dosyayla yanıt verir.
+
+Dolayısıyla `_locales/*/data.json` dosyasını doğrudan okuyan herkes bir delta okur. Bütün dosyaları korumak için `translationPayloads.rootDelta: false` ayarlayın.
+
+Bir dağıtım boyunca açık kalan ve yeni bir delta isteyen bir sekme, deltanın başka bir köke karşı oluşturulduğunu görür ve göstermeden önce o kökü getirir.
+
+### Bir sözlük okunamadığında {#when-a-dictionary-cannot-be-read}
+
+Bir sunucudan başarısız bir getirme (404 dışında herhangi bir şey), okunamayan veya bozuk bir dosya ya da JSON nesnesi olmayan bir 200 hiçbir önbelleğe ulaşmaz ve bir sonraki istek yeniden okur:
+
+- bir sayfa işleme bir uyarı kaydeder, o sözlük için ham anahtarları gösterir ve `Cache-Control: no-store` ile `503` yanıtı verir; aynı değer her CDN başlığında (`CDN-Cache-Control`, `Cloudflare-CDN-Cache-Control`, `Netlify-CDN-Cache-Control`, `Vercel-CDN-Cache-Control`, `Surrogate-Control`, bir rota kuralından gelenlerin üzerine) ve `Retry-After: 60` ile birlikte bulunur;
+- `/_locales/...`, `no-store` ile `503` yanıtı verir;
+- `useTranslationServerMiddleware`, anahtarı veya varsayılan değeri döndüren bir `t` verir.
+
+Kesinti sırasında ne olur:
+
+- **Ziyaretçiler:** o 503'ün gövdesi sayfanın kendisidir. Hydration sırasında tarayıcı sözlüğü yeniden okur ve sunucu geri geldiğinde metin görünür; sunucunun HTML'i anahtarları içerdiği için Vue'nun hydration uyuşmazlığıyla ilgili tek bir konsol hatası olur.
+- **Tarayıcı botlarına** daha sonra tekrar gelmeleri söylenir.
+- **Önbellekler:** bir `swr` veya `cache` rota kuralı 400 veya daha yüksek durumlu hiçbir şeyi saklamaz ve bir CDN `no-store` alır; bu nedenle hiçbir önbellek ham anahtarları tutmaz ve kurtarmadan sonraki ilk istek gerçek metni işler.
+- Bir kural tarafından **zaten önbelleğe alınmış sayfalar** olduğu gibi kalır: yeniden doğrulama başarısız olur ve hiçbir şey saklamaz. Vercel'de başarısız bir `isr` yeniden doğrulaması son sayfayı aynı şekilde korur.
+
+Bu, bir işlemenin yüklediği her chunk'ı kapsar; kökü elde olan başarısız bir sayfa chunk'ı ve işlemenin ilerleyen aşamasında birleştirilen bir chunk da dahildir. Sağlıklı bir sözlüğe sahip bir sayfa, bir yönlendirme ve bir hata sayfası durumlarını korur. Bir [bileşen adası](/tr/guide/server-side-translations) istisnadır: 503 onu sayfadan çıkaracağı için 200 olarak kalır; bu nedenle kendi sözlüğü yüklenen bir sayfa, bir adanın ham anahtarlarıyla tutulabilir. Kesinti sırasındaki isteklerin her biri sunucuya ulaşır; yanıt başlıkları için 60 saniye dışında modülün kendine ait bir zaman aşımı yoktur.
+
+Sunucudan gelen bir 404, böyle bir dosyanın olmadığı anlamına gelir; bu bir hata değildir. Bir sayfa işleme, tarayıcının yaptığı gibi kök sözlüğü gösterir ve `/_locales/...` aynı 404 ile yanıt verir. Hiçbir önbellek ikisini de tutmaz; bu nedenle ortaya çıkan bir dosya bir sonraki istekte okunur, bunun bedeli de böyle bir sayfanın her işlenmesinde sunucuya bir istektir. Kök dosya da yoksa sözlük boştur ve bir [prerender](/tr/guide/upgrade#server,-build-and-deployment) başarısız olur.
+
+Sunucu yüklenen payload'ları en fazla `cacheMaxSize` girdilik (varsayılan olarak 1000) süreç içi bir LRU önbelleğinde tutar ve ayarlandığında bir girdiyi `cacheTtl` sonrasında yeniden yükler; [Performans ayarı](/tr/guide/performance) ikisini de ele alır ve [`cacheStorage`](/tr/guide/performance#shared-cache-for-several-instances) örnekler arasında paylaşılan bir önbellek ekler. Bunun üzerine `/_locales/**` için bir Nitro `cache` rota kuralı eklemeyin: sorgu dahil tam URL'ye göre anahtarlar ve üçüncü bir kopya saklar.
+
+## Uygulama baseURL'i ve payload sunucuları {#app-baseurl-and-payload-hosts}
+
+**`app.baseURL`** başka hiçbir şeye ihtiyaç duymaz. `app.baseURL: '/shop/'` ile tarayıcı `/shop/_locales/...` adresini getirir; kopya `.output/public/_locales/` içinde kalır ve Nitro onu base altında sunar (statik bir sunucu çıktıyı `/shop/` konumuna bağlamalıdır). Locale önekleri ve [hariç tutulan yollar](/tr/guide/excluding-static-files) base olmadan eşleştirilir.
+
+**`app.cdnURL`**, `public/` içindeki dosyalar olduklarında payload'ları da taşır: tarayıcı `<cdnURL>/_locales/...` adresini getirir ve önceden yükler.
+
+- CDN, `_locales/` dizinini `_nuxt/` dizininin yanında, o yolda tutmalıdır.
+- Dosya `fetch` ile geldiği için sitenizin kökenine (CORS) izin vermelidir.
+- Yalnızca sunucu rotasının yanıt verdiği bir sözlük (`source` modu, genel kopya yok) uygulamanın kökeninde kalır.
+
+`cloudflare-module` üzerinde çalışma zamanında bir `NUXT_APP_BASE_URL`, Node uyumluluğu (`nodejs_compat`) gerektirir. `nitro.cloudflare.nodeCompat` kapalıyken (Nitro bayrak olmadan eski bir tarihte de buna düşer) değişkeni görmez ve düz Nuxt dahil `/` sunar; ancak bir locale yönlendirmesi yine de base'e gider. Orada `app.baseURL` değerini derleme sırasında ayarlayın.
+
+Payload'ları başka bir kökenden sunmak için istemciyi ve sunucuyu ona yönlendirin ve yerel çıktıları kapatın:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    apiBaseClientHost: 'https://cdn.example.com',
+    apiBaseServerHost: 'https://cdn.example.com',
+    translationPayloads: {
+      serverHandler: false,
+      publicAssets: false,
+      serverAssets: false,
+    },
+  },
+})
+```
+
+- Node'da `serverAssets`, sunucunun kendi okumaları için aynı kopyayı yazar ve `/_locales` isteğine o dosya yanıt verir: bu da kapalı olmalıdır; tarayıcı için sunucu rotasını tutsanız bile, çünkü tarayıcı ona asla ulaşmaz.
+- Sunucu aynı `<apiBaseUrl>/<page>/<locale>/data.json` düzenini sunmalıdır.
+- Tüm yerel çıktılar kapalıyken ve bir sunucu eksikken derleme uyarır.
+
+Aynı değerler derleme zamanında `NUXT_I18N_APP_BASE_URL`, `NUXT_I18N_APP_BASE_CLIENT_HOST` ve `NUXT_I18N_APP_BASE_SERVER_HOST` değişkenlerinden de gelebilir. `NUXT_I18N_APP_BASE_SERVER_HOST` çalışma zamanında da çalışır ve derleme değerine üstün gelir. Ayrıntılar için bkz. [`apiBaseServerHost`](/tr/api/module-options#apibaseserverhost).
+
+## Platformlar {#platforms}
+
+Yalnızca modülün veya çıktısının ihtiyaç duyduğu şeyler. Hesaplar, bölgeler ve CLI oturum açmaları platformun belgelerindedir.
+
+### Cloudflare Workers {#cloudflare-workers}
+
+Preset `cloudflare_module`. `wrangler deploy`, Nitro'nun çıktısını esbuild ile ikinci kez paketler ve bundan sonra ham bir `defineAsyncComponent(() => import('./X.vue'))` sunucuda boş işlenir. Nuxt'ın varsayılan hata sayfası böyle bir bileşendir, bu yüzden bir 404'ün gövdesi boştur ve tarayıcı bir hydration uyuşmazlığı kaydeder. Ardından istemci sayfayı işler ve durum 404 olarak kalır, ancak JavaScript olmadan sayfa boştur. Bu [nuxt#33270](https://github.com/nuxt/nuxt/issues/33270) sorunudur: modül olmadan düz Nuxt da aynısını yapar. Sayfa rotaları etkilenmez.
+
+İkinci paketlemeyi kapatın:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: {
+    preset: 'cloudflare_module',
+    cloudflare: {
+      deployConfig: true, // `wrangler` below applies only with it
+      wrangler: {
+        no_bundle: true,
+        find_additional_modules: true,
+        rules: [{ type: 'ESModule', globs: ['**/*.mjs'] }],
+      },
+    },
+  },
+})
+```
+
+```bash
+npx nuxi build
+cd .output/server && npx wrangler deploy -c wrangler.json
+```
+
+`compatibilityDate` değerini `2024-09-19` veya sonrasına ayarlayın: daha eski bir tarih, `wrangler.json` yazmayan ve hata vermeyen eski preset'i seçer. Bu durumda 404 işlenir ve yükleme küçülür: test uygulamasında 246 KiB'a karşı 190 KiB gzip. Kendi `error.vue` dosyanız diğer çıkış yoludur, ancak yalnızca hata sayfasını kapsar.
+
+Modülün kendisi `nodejs_compat` gerektirmez. Sınırlar için bkz. [Paket sınırları](#bundle-limits-on-edge).
+
+### Cloudflare Pages {#cloudflare-pages}
+
+`cloudflare-pages-static` preset'ini kullanın. `nuxi generate --preset cloudflare-pages`, `index.html` içermeyen bir sunucu derlemesidir.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: {
+    preset: 'cloudflare-pages-static',
+    prerender: { autoSubfolderIndex: false },
+  },
+})
+```
+
+```bash
+npx nuxi generate
+npx wrangler pages project create my-site --production-branch main --force
+npx wrangler pages deploy dist --project-name my-site --branch main
+```
+
+- **Çıktı.** Preset `.output/public` yerine `dist/` dizinine yazar.
+- **`--force`.** Bu olmadan yeni bir wrangler (burada 4.156) `pages project create` komutunu Workers'a devreder. Bununla klasik bir Pages projesi elde edersiniz. Oluşturma için bir kez gereklidir.
+- **`autoSubfolderIndex: false`.** Pages, canonical ve `hreflang` `/de` adresini belirtirken `/de` isteğine `/de/` adresine bir 308 ile yanıt verir, böylece bunlar bir yönlendirmeyi gösterir. Bu seçenekle dosya `de.html` olur ve yönlendirme ortadan kalkar.
+- **Bir 404'te konsoldaki `NUXT_E1005`** normal bir 404'tür. Nuxt bunu böyle bildirir, çünkü `404.html` uygulama bağlanmadan önce istemcide başlar. Sayfa çalışır ve düz Nuxt da aynı satırı yazdırır.
+
+### Vercel ve Vercel Edge {#vercel-and-vercel-edge}
+
+Uygulamada değişiklik olmadan `vercel` ve `vercel_edge` preset'leri. Etiketler, platformun iletilen başlıklarından `metaBaseUrl` olmadan çalışır. Vercel Edge'in paket sınırı küçüktür: bkz. [Paket sınırları](#bundle-limits-on-edge). Paylaşılan bir önbellek için [`upstash` sürücüsünü](/tr/guide/performance#upstash-on-vercel-and-vercel-edge) kullanın.
+
+### Netlify {#netlify}
+
+`netlify` ve `netlify_edge` preset'leri.
+
+```bash
+npx nuxi build --preset netlify
+npx netlify deploy --prod --no-build --dir dist --functions .netlify/functions-internal
+```
+
+- **`nitro.output` değerini ayarlamayın.** Preset `.netlify/` ve `dist/` dizinlerini kendisi yazar.
+- **Dağıttığınız klasörde bir `package.json` tutun.** Olmazsa CLI üst klasöre bakar ve hata vermeden hiçbir fonksiyon dağıtmaz.
+- **Netlify Edge** yalnızca `--dir dist` ile dağıtılır. Bkz. [Edge çalışma ortamlarında tarihler](#dates-on-edge-runtimes).
+
+### Cloud Run {#cloud-run}
+
+Varsayılan `node-server` derlemesini kullanın. Docker yerel olarak çalışmıyorsa `gcloud run deploy --source` çıktı klasöründe bir `Dockerfile` gerektirir:
+
+```dockerfile
+# .output/Dockerfile
+FROM node:22-slim
+WORKDIR /app
+COPY . .
+ENV NODE_ENV=production
+CMD ["node", "server/index.mjs"]
+```
+
+```bash
+cd .output && gcloud run deploy my-app --source .
+```
+
+Etiketler, platformun iletilen başlıklarından `metaBaseUrl` olmadan çalışır.
+
+### Deno Deploy {#deno-deploy}
+
+Preset `deno_deploy`. `deno deploy`, `deployctl`'in yerini alır. Giriş noktası `server/index.ts` olan dinamik bir uygulama oluşturun ve çıktı klasöründen dağıtın.
+
+### Firebase {#firebase}
+
+| Ürün | Kurulum |
+| --- | --- |
+| App Hosting | Node derlemesini çalıştırır: varsayılan preset'i veya `firebase-app-hosting` ile Node 20+ kullanın |
+| Cloud Functions | `firebase` preset'i payload'ları gömer ve `firebase-functions` gerektirir |
+| Hosting (statik) | `.output/public` dizinini dosya olarak sunar, bu nedenle `/_locales/**` Hosting'in başlıklarını alır |
+
+Statik Hosting'de JSON yanlış `Content-Type` veya önbellekleme ile dönerse, `firebase.json` içinde `/_locales/**` için bir `headers` girdisi ekleyin. Nuxt `routeRules` başlıkları Hosting'in kendisinin sunduğu dosyalara uygulanmaz; payload rotası, sunucuya ulaşan yanıtlarda kendi `Content-Type` ve `Cache-Control` değerlerini ayarlar.
+
+### AWS Amplify {#aws-amplify}
+
+`aws-amplify` statik dosyaları sunucunun yanında değil, işlem klasörünün yanında tutar; bu nedenle payload'lar bir fonksiyon platformunda olduğu gibi gömülür.
+
+### Tek bir derlemenin birkaç örneği {#several-instances-of-one-build}
+
+Tek bir artefakt, ortam değişkenleri aracılığıyla örnek başına farklı bir varsayılan veya devre dışı locale ile çalışabilir: bkz. [Çalışma zamanı geçersiz kılmaları](/tr/guide/runtime-overrides). Yalnızca çalışma zamanında devre dışı bırakılan bir locale'in statik dosyaları `public/` içinde kalır; bunlara erişilememesi gerekiyorsa locale'i derleme zamanında devre dışı bırakın.
+
+Sözlükleri uzak bir sunucudan yükleyen örnekler bunları Redis, Upstash, Cloudflare KV veya D1, Deno KV ya da başka bir Nitro depolamasında paylaşabilir; böylece arka uç örnek başına bir istek yerine tek bir istek alır. Bu bir önbellektir, çeviri kaynağı değildir: bkz. [Birkaç örnek için paylaşılan önbellek](/tr/guide/performance#shared-cache-for-several-instances).
+
+## Bir proxy veya CDN arkasında {#behind-a-proxy-or-cdn}
+
+Uygulamanın genel host'u ve şemayı istekten öğrenmesi gerekir.
+
+| Proxy'nin gönderdiği                         | Düz derleme                                      | Locale'lerde `baseUrl` içeren derleme                                             |
+| -------------------------------------------- | ------------------------------------------------ | --------------------------------------------------------------------------------- |
+| Gerçek `Host`                                | Ayarlanacak bir şey yok                          | Ayarlanacak bir şey yok                                                           |
+| Kökenin `Host`'u, artı `X-Forwarded-Host`    | Ayarlanacak bir şey yok                          | [`trustForwardedHost: true`](/tr/api/module-options#trustforwardedhost)           |
+| Hiçbiri                                      | [`metaBaseUrl`](/tr/api/module-options#metabaseurl) | Hiçbir ayar yardımcı olmaz: her istek kökenin host'u gibi görünür, bu yüzden proxy'yi değiştirin |
+
+- **`swr` veya `cache` altındaki rotalar.** Tablo orada geçerli değildir: bkz. [HTML önbellekleme](#caching-html). `metaBaseUrl` veya `site.url` ayarlayın.
+- **`X-Forwarded-Proto`.** Bunu gönderin, aksi halde HTTPS proxy arkasında canonical URL'ler `http://` olarak okunur. `metaBaseUrl` bunu da düzeltir.
+- **Alan adı derlemesinde** etiketlerin temel URL'sini alan adı seçer. Orada alan adını `metaTrustForwardedHost` seçmez, yalnızca `trustForwardedHost` seçer.
+- **Yönlendirmeler görelidir ve locale çerezinin `Domain` değeri yoktur,** bu yüzden ikisi de genel host'ta kalır.
+
+<Warning>
+
+**Köken erişilebilir kaldığında `metaBaseUrl` değerini sabitleyin** — `metaBaseUrl` veya `site.url` olmayan düz bir derlemede canonical, `hreflang` ve `og:url` host'larını istekten alır. [`metaTrustForwardedHost`](/tr/api/module-options#metatrustforwardedhost) varsayılan olarak açıktır, bu nedenle `X-Forwarded-Host: evil.example` içeren doğrudan bir istek bu etiketlerde `https://evil.example` alır ve öndeki bir önbellek o sayfayı yayar. `*.workers.dev` gibi bir platform host'u tam olarak böyle bir kökendir. `metaBaseUrl` bunu `Host` için de kapatır. Bir alan adı derlemesinin bilinen bir host'u kendi `baseUrl` değerini korur. `trustForwardedHost: true` ile doğrudan bir istemci başka bir alan adının sayfasını seçebilir, bu nedenle bunu yalnızca başlığın üzerine yazan bir proxy arkasında açın.
+
+</Warning>
+
+## HTML önbellekleme {#caching-html}
+
+URL'lerin çoğunu önbelleğe almak güvenlidir, çünkü locale'lerini adlandırırlar. Şunlar ziyaretçiye bağlıdır:
+
+| Kurulum                        | URL'ler                                           |
+| ------------------------------ | ------------------------------------------------- |
+| Varsayılan, `autoDetectPath: '/'` | `/`                                            |
+| `prefix`                       | `/` ve yalnızca yönlendirme yapan her öneksiz URL |
+| `autoDetectPath: '*'`          | Her URL                                           |
+| `no_prefix`                    | Her sayfa                                         |
+
+- **`Vary`.** Bu yanıtlar, [`localeCookie`](/tr/api/module-options#localecookie) ayarlandığında `Cookie` ve `autoDetectLanguage` açık olduğunda `Accept-Language` içeren `Vary` taşır. Buna uyan bir önbellek yanıtları ayrı tutar.
+- **`Vary`'yi yok sayan bir önbellek,** örneğin "her şeyi URL'ye göre önbelleğe al", bu URL'leri atlamalıdır. Aksi halde bir ziyaretçinin `302 /de` yanıtı bir sonraki ziyaretçiye ulaşır ve saklanan bir varsayılan sayfa herkes için yönlendirmeyi düşürür. `/` üzerinde `redirects: false` de ayarlayabilirsiniz. Nitro'nun rota önbelleği yol ve `varies` listesine göre anahtarlar, bu yüzden `/` adresini `swr` ve `cache` kurallarının da dışında tutun.
+- **`Set-Cookie`.** `localeCookie` ayarlandığında, bir önek altında sunucuda işlenen her sayfa `Set-Cookie` taşır ve doğru çalışan bir CDN onu saklamaz. Önbelleğe alınmış HTML için `localeCookie`'yi kapalı bırakın veya başlığı edge'de çıkarın.
+- **`swr` ve `cache` kuralları `metaBaseUrl` veya `site.url` gerektirir.** Nitro böyle bir rotayı yalnızca `cache.varies` içindeki başlıklarla işler, bu nedenle `Host`, `X-Forwarded-Host` ve `X-Forwarded-Proto` kaybolur ve istek URL'si `http://localhost` olarak okunur. Sabit bir köken olmadan, bu rotalardaki canonical, `hreflang` ve `og:url` her platformda `http://localhost` adresini gösterir. Düz Nuxt'ın `useRequestURL()` fonksiyonu da orada aynısını okur. Host'u bunun yerine ziyaretçiden almak, bir ziyaretçinin `X-Forwarded-Host` değerini her ziyaretçinin aldığı sayfaya koyardı. Alan adı derlemesi etkilenmez: etiketleri locale'lerin `baseUrl` değerini kullanır.
+
+  Tek bir derleme birkaç host'a hizmet veriyorsa ve tek bir köken uygun değilse, kuralın başlıkları görmesine izin verin ve değer başına bir kopya tutun: `'/blog/**': { swr: 60, cache: { varies: ['host', 'x-forwarded-host', 'x-forwarded-proto'] } }`. Her farklı değer yeni bir önbellek girdisidir, bu nedenle uydurma başlıklar gönderen bir istemci önbelleği doldurur: kökeni bu başlıkları ayarlayan bir proxy'nin arkasına koyun.
+- **Alan adı derlemesinde `swr` ve `cache` kuralları.** Modül, bir alan adının başka birine kendi sayfasını sunmaması için bu tür her kuralın `cache.varies` listesine `host` ve `trustForwardedHost` ile birlikte `x-forwarded-host` ekler. `cache: false` içeren bir kural yazıldığı gibi kalır. `isr` platformun önbelleğidir: host'a göre anahtarladığını kontrol edin. Anahtarda host varken, uydurma host'lar gönderen bir istemci önbellek girdileri ekler.
+
+Payload dosyaları için bkz. [Önbellek başlıkları ve dateBuild](#cache-headers-and-datebuild).
+
+## İlgili {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Performans ayarı" icon="book-open" href="/tr/guide/performance">
+
+</Card>
+
+<Card title="Çalışma zamanı geçersiz kılmaları" icon="book-open" href="/tr/guide/runtime-overrides">
+
+</Card>
+
+<Card title="translationPayloads referansı" icon="brackets-curly" href="/tr/api/module-options#translationpayloads">
+
+</Card>
+
+<Card title="Katmanlar ve alan adları" icon="book-open" href="/tr/guide/layers">
+
+</Card>
+
+<Card title="SEO" icon="book-open" href="/tr/guide/seo">
+
+</Card>
+
+</CardGroup>

@@ -1,0 +1,139 @@
+---
+title: "ロケール検出"
+description: "ページや API リクエストのロケールの決まり方：URL、クエリ、状態、Cookie、Accept-Language、デフォルト、そして訪問者がリダイレクトされる条件。"
+---
+
+すべてのリクエストには 1 つのロケールが割り当てられ、サーバーでもブラウザでも同じソースの一覧から同じ順序で選ばれます。初めての訪問者がどの言語に着地するか、選択を記憶するかどうか、サーバー API に何が渡るかを決める際にお読みください。優先順位、各戦略が行うリダイレクト、そして各ソースのオン・オフを切り替えるオプションを説明します。
+
+<Tip>
+
+**前提条件** — [ルーティング戦略](/ja/guide/strategy)
+
+</Tip>
+
+## 優先順位 {#the-precedence}
+
+**有効な**ロケールを示す最初のソースが採用されます。無効または不正な値（未知のコード、壊れた Cookie）はスキップされ、次のソースが評価されます。
+
+| # | ソース | 評価される条件 |
+| --- | --- | --- |
+| 1 | URL プレフィックス（`/de/about`） | プレフィックス戦略。`prefix_except_default` と `prefix_and_default` では、プレフィックスのない URL はデフォルトロケール |
+| 2 | `?locale=de` | ページ：`no_prefix` のみ。サーバー API ヘルパー：常に、かつ URL より先に |
+| 3 | アプリが設定したロケール状態（`useI18nLocale().setLocale()`） | URL にロケールがない場合 |
+| 4 | Cookie | [`localeCookie`](/ja/api/module-options#localecookie) が設定されている場合（`no_prefix` では自動的に `'user-locale'`） |
+| 5 | `Accept-Language` ヘッダー | [`autoDetectLanguage`](/ja/api/module-options#autodetectlanguage) が `true`（デフォルト）の場合 |
+| 6 | [`defaultLocale`](/ja/api/module-options#defaultlocale) | 常に |
+
+つまり、プレフィックス戦略ではページに何を表示するかは URL が決めます。設定ソース（3〜5）は訪問者を**リダイレクト**する先を決めるだけで、それも `autoDetectPath` が許可するパスに限られます。`no_prefix` ではリダイレクト先がないため、設定ソースがページの表示内容を決めます。
+
+![判定フロー：URL にロケールプレフィックスがあればそのロケールでレンダリングします。ない場合、no_prefix は設定ソースからレンダリングし、prefix_and_default はデフォルトロケールでレンダリングし、prefix または prefix_except_default は autoDetectPath がそのパスを許可していれば設定に基づいてリダイレクトします](/images/diagrams/locale-detection.svg)
+
+## 戦略ごとのリダイレクト {#redirects-per-strategy}
+
+リダイレクトは `302` で、ページのレンダリング前にサーバーで行われ、クライアント側のナビゲーションではルートミドルウェアによって行われます。クエリとハッシュは保持されます。[`redirects: false`](/ja/api/module-options#redirects) の場合はリダイレクトは一切行われませんが、誤ったプレフィックスは引き続き 404 になります。
+
+訪問者が `de` を希望（Cookie またはヘッダー）、`defaultLocale: 'en'`、デフォルトの `autoDetectPath: '/'` の場合：
+
+| リクエスト | `prefix_except_default` | `prefix` | `prefix_and_default` | `no_prefix` |
+| --- | --- | --- | --- | --- |
+| `/` | → `/de` | → `/de` | `/`（`en`） | `/`（`de`） |
+| `/about` | `/about`（`en`） | → `/de/about` | `/about`（`en`） | `/about`（`de`） |
+| `/fr/about` | `/fr/about` | `/fr/about` | `/fr/about` | — |
+| `/en/about` | 404 | `/en/about` | `/en/about` | — |
+
+`prefix_and_default` は決してリダイレクトしません。プレフィックスのない URL はデフォルトロケールに属し、他のロケールはそれぞれのプレフィックスの下にあります。`prefix_except_default` では、`en` を希望する訪問者は `/` からリダイレクトされません。リダイレクト先には末尾のスラッシュが付かず（`/de/` ではなく `/de`）、カスタムパスに従います（`/about` → `/de/ueber-uns`）。
+
+Cookie やヘッダーが決定要因となる場合（`/` からのリダイレクト、`no_prefix` のすべてのページ）、レスポンスには `Vary: Cookie, Accept-Language` が付与されるため、CDN はそれぞれのレスポンスを区別してキャッシュします。
+
+### `autoDetectPath` {#autodetectpath}
+
+設定ソースが訪問者を移動させてよい場所：
+
+| 値 | 設定が評価されるパス |
+| --- | --- |
+| `'/'`（デフォルト） | `/` のみ。ディープリンクは URL の言語のまま |
+| `'no_prefix'` | ロケールプレフィックスのないすべてのパス（`/about` → `/de/about`） |
+| `'/welcome'` | そのパスと完全一致する場合（末尾のスラッシュは無視） |
+| `'*'` | プレフィックス付きを含むすべてのパス：訪問者が `de` を希望する場合、`/about` と `/fr/about` → `/de/about` |
+
+- 許可されていないパスでは、プレフィックスのない URL はデフォルトロケールとして扱われます。
+- `prefix` は例外です。プレフィックスのないページが存在しないため、`/about` は常に訪問者のロケールに移動します（Cookie が `de` なら `/de/about`、希望がなければ `/en/about`）。
+- `'*'` の場合、サーバーはアプリの状態を無視し、プレフィックス付き URL が自身のロケールを Cookie に記録することもなくなります。Cookie は訪問者が `$switchLocale` で切り替えたときに変わります。
+
+<Warning>
+
+`'*'` の場合、共有されたリンクは閲覧者の言語で開かれるため、驚かれることがあります。それが意図した動作でない限り、`'/'` または `'no_prefix'` を推奨します。
+
+</Warning>
+
+## Accept-Language {#accept-language}
+
+ヘッダーは RFC 9110 の定義どおりに読み取られ、設定内のロケール**コード**と照合されます。
+
+- エントリは `q` 値の高い順に試されます（`fr;q=0.1, de;q=0.9` → `de`）。`q=0` は「この言語は不可」を意味し、`q` が不正なエントリは無視されます。`*` は何にも一致しません。
+- `_` は `-` として読まれます（`en_US` = `en-US`）。
+- エントリごとに、完全一致のコード、次に短い形式（`de-AT` → `de`）、次に同じ言語の地域ロケール（`en` → `en-US`）の順に試されます。完全一致と短い形式は `locales` の順序に依存しません。複数の地域ロケールが一致する場合は、`locales` で最初のものが採用されます。
+- 文字体系をまたぐことはありません。`zh-TW` と `zh-HK` は繁体字、`zh-CN` は簡体字を意味するため、`zh-CN` が `zh-Hant` ロケールに一致することはありません。
+- 無効化されたロケールは一致しません。
+
+```ts
+// locales: [{ code: 'en' }, { code: 'de' }, { code: 'zh-Hant' }]
+// 'de-CH,de;q=0.9,en;q=0.8'  → 'de'
+// 'en-GB'                    → 'en'
+// 'zh-TW'                    → 'zh-Hant'
+// 'zh-CN'                    → no match, next source
+```
+
+ヘッダーによる検出は `autoDetectLanguage: false` でオフにできます。Cookie と状態は引き続き評価されます。
+
+## Cookie {#the-cookie}
+
+- プレフィックス戦略では**デフォルトでオフ**です（`localeCookie: null`）。この場合、リダイレクトはヘッダーのみに基づいて行われ、選択は訪問をまたいで記憶されません。記憶させるには `localeCookie: 'user-locale'` を設定します。
+- `no_prefix` では、別の名前を設定しない限り `'user-locale'` です。そこでも `localeCookie: null` でオフにできます。
+- 訪問者が切り替えたとき（`$switchLocale`、`<i18n-switcher>`、`useI18nLocale().setLocale()`）、およびプレフィックス付きページのサーバーレンダリング時に書き込まれます（`/fr/about` は `fr` を保存。ただし、リダイレクトが有効な `autoDetectPath: '*'` では URL がまだ移動しうるため保存しません）。ページへのクライアントナビゲーションでもそのページのロケールが保存され、デフォルトロケールのプレフィックスなしページでも同様です。その URL の初回読み込みでは保存されません。`no_prefix` とハッシュモードでは、ナビゲーションは変更があった場合のみ保存します。404 は何も保存しません（`$switchLocale` で到達した場合を除く）。
+- 有効期間は 1 年です（`path=/`、`SameSite=Lax`）。
+- `hashMode` では、設定は代わりに `hash-locale` Cookie に保存され、サーバーとクライアントは同じ Cookie を読み取ります。サーバーはそのロケールでレンダリングし、`prefix` 以外では決してリダイレクトしません。ハッシュ内のロケール（`/#/de`）がそれより優先され、ハイドレーション直後に適用されます。`prefix` では `/` にページがないため、`/` はブラウザでレンダリングされ、Cookie、次にブラウザの言語（`autoDetectLanguage`）に基づいて `/#/de` に移動します。それ以外のドキュメント（`/about`、`/de`）はハッシュ内にリダイレクトされます。
+
+設定の読み取りと変更には、`useCookie` や `useState` を直接使うのではなく、[`useI18nLocale`](/ja/composables/useI18nLocale) を使用してください。
+
+## 独自の検出 {#your-own-detection}
+
+ロケールを自分で選ぶ（ユーザー設定、サブドメインなど）には、モジュールのプラグインより前に実行されるプラグインで `useI18nLocale().setLocale(code)` を呼び出します。これがソース 3、つまりアプリの状態になります。組み込みの検出をオフにする方法を含む完全な手順は、[カスタムロケール検出](/ja/guide/custom-auto-detect)を参照してください。
+
+## サーバー API ルート {#server-api-routes}
+
+API の URL がローカライズされることはまれなため、[`useLocaleServerMiddleware`](/ja/guide/server-side-translations) と `useTranslationServerMiddleware` は独自の順序を使用します。
+
+1. `?locale=`
+2. `[locale]` ルートパラメーター、またはパス内のロケールプレフィックス
+3. Cookie（`localeCookie` が設定されている場合）
+4. `Accept-Language`（`autoDetectLanguage` がオンの場合）
+5. `defaultLocale`
+
+ここでも `localeCookie: null` と `autoDetectLanguage: false` でソース 3 と 4 をオフにできます。
+
+## ランタイムオーバーライド {#runtime-overrides}
+
+[ランタイムオーバーライド](/ja/guide/runtime-overrides)は、ソースの照合対象となる一覧を変更します。
+
+- ランタイムの `disabledLocales` はすべてのステップから除外されます。それを示す Cookie やヘッダーはスキップされます。
+- ランタイムの `defaultLocale` は、`prefix` と `no_prefix` ではステップ 6 になります。
+- `prefix_except_default` と `prefix_and_default` では、デフォルトロケールはビルド時に固定されます（そのページがプレフィックスなしのルートになるため）。ランタイムの `defaultLocale` やビルド時のデフォルトの無効化は、警告とともに無視されます。
+
+## 関連項目 {#related}
+
+<CardGroup cols={2}>
+
+<Card title="カスタムロケール検出" icon="book-open" href="/ja/guide/custom-auto-detect">
+
+</Card>
+
+<Card title="サーバールートと API" icon="book-open" href="/ja/guide/server-side-translations">
+
+</Card>
+
+<Card title="useI18nLocale" icon="brackets-curly" href="/ja/composables/useI18nLocale">
+
+</Card>
+
+</CardGroup>

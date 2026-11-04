@@ -1,0 +1,131 @@
+---
+title: "Node.js"
+description: "@i18n-micro/node로 디스크에서 번역 파일을 로드하고 Node.js 서버, 스크립트, CLI에서 번역합니다."
+---
+
+`@i18n-micro/node`는 [런타임](/ko/integrations/runtime-package) 인스턴스에 디스크에서 번역 폴더를 읽는 로더를 더한 것입니다. Express나 Fastify 서버, CLI, 이메일 또는 PDF 생성기, 또는 Nuxt 앱과 같은 JSON 파일이 필요한 모든 스크립트에서 사용하세요. 파일을 한 번 로드하고, 요청 간에 변경 가능한 상태를 공유하지 않고 요청마다 번역합니다.
+
+## 설치 {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add @i18n-micro/node @i18n-micro/utils
+```
+
+```bash npm
+npm install @i18n-micro/node @i18n-micro/utils
+```
+
+```bash yarn
+yarn add @i18n-micro/node @i18n-micro/utils
+```
+
+</CodeGroup>
+
+피어 의존성은 없으며, Node.js `>=20`이 필요합니다. `@i18n-micro/utils`는 아래의 `Accept-Language` 헬퍼에만 필요합니다.
+
+## 설정 {#setup}
+
+로더는 [Nuxt 폴더 구성](/ko/guide/translations)을 읽습니다: `locales/en.json`은 루트 사전이고, `locales/pages/blog/post/en.json`은 `blog-post` 라우트에 속합니다.
+
+```ts
+import { createI18n } from '@i18n-micro/node'
+
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', translationDir: './locales' })
+await i18n.loadTranslations()
+
+i18n.t('greeting', { name: 'Ada' }) // 'Hello, Ada!'
+i18n.t('title', undefined, undefined, 'blog-post') // from locales/pages/blog/post/en.json
+```
+
+옵션은 런타임 옵션([인스턴스](/ko/integrations/overview#the-instance) 참고)에 `translationDir`와 `disablePageLocales`(`pages/**` 파일을 루트 사전으로 취급)를 더한 것입니다. `i18n.reload()`는 개발 환경의 파일 감시자를 위해 모든 사전을 지우고 폴더를 다시 읽습니다.
+
+`loadTranslations(dir, disablePageLocales?)`는 단독으로도 export되며 `{ root, routes }`를 반환합니다:
+
+```ts
+import { loadTranslations } from '@i18n-micro/node'
+
+const { root, routes } = await loadTranslations('./locales')
+// root:   { en: {...}, de: {...} }
+// routes: { 'blog-post': { en: {...}, de: {...} } }
+```
+
+## 요청별 처리 {#per-request}
+
+인스턴스는 하나의 로케일과 하나의 라우트를 가집니다. 요청 핸들러 안에서 공유 인스턴스의 `i18n.locale`을 바꾸면 동시 요청과 경쟁 상태가 발생합니다. `run`은 요청에 자체 인스턴스를 제공합니다:
+
+```ts
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', translationDir: './locales' })
+await i18n.loadTranslations()
+
+// `() => next()`: `run` hands its callback the fork, and Express reads an argument of `next` as an error
+app.use((req, res, next) => i18n.run(pickLocale(req), () => next()))
+
+app.get('/', (req, res) => {
+  res.send(i18n.t('greeting')) // the request's locale, in everything it awaits
+})
+```
+
+`run` 안에서 공유 인스턴스는 요청의 로케일과 라우트를 읽고 설정합니다(`AsyncLocalStorage`). 포크는 현재 라우트에서 시작하며, 콜백 안의 `i18n.setRoute(...)`는 해당 요청의 라우트를 변경합니다. 콜백은 요청의 포크도 받습니다: 포크에 기록된 사전은 요청 안에 머물고, 공유 인스턴스에 기록된 사전은 모두에게 전달됩니다.
+
+`AsyncLocalStorage` 없이는 `i18n.fork(locale)`이 전달해 사용할 수 있는 같은 종류의 인스턴스를 반환합니다.
+
+`reload()`는 디렉터리를 다시 읽습니다. 새 사전이 준비될 때까지 이전 사전이 응답합니다.
+
+## 로케일 선택하기 {#pick-the-locale}
+
+`detectLocaleFromAcceptLanguage(header, locales)`는 `q` 가중치를 존중하며 `de-DE`를 `de` 로케일에(그리고 `de`를 `de-DE`에) 일치시킵니다. 일치하는 것이 없으면 `null`을 반환합니다.
+
+```ts
+import express from 'express'
+import { detectLocaleFromAcceptLanguage } from '@i18n-micro/utils/accept-language'
+
+const app = express()
+
+app.get('/hello', (req, res) => {
+  const locale = detectLocaleFromAcceptLanguage(req.headers['accept-language'], locales) ?? 'en'
+  const i18n = byLocale.get(locale)!
+  res.json({ message: i18n.t('greeting', { name: 'Ada' }) })
+})
+```
+
+URL 접두사, 쿠키, 헤더를 함께 사용하려면 `@i18n-micro/utils/resolve-locale`의 `resolveLocale({ defaultLocale, validLocales, url, cookie, acceptLanguage, autoDetectLanguage: true })`가 모듈의 우선순위를 적용합니다: URL, 쿠키, `Accept-Language`, 기본값 순서입니다. 잘못된 값은 건너뜁니다.
+
+Nuxt 앱 안에서는 서버에서 이 패키지가 필요하지 않습니다: 모듈의 [서버 측 번역](/ko/guide/server-side-translations)을 사용하세요.
+
+## API {#api}
+
+| Export | 참고 |
+| --- | --- |
+| `createI18n(options)`, `I18n` | 런타임 인스턴스 + `translationDir`, `loadTranslations(dir?)`, `reload()` |
+| `loadTranslations(dir, disablePageLocales?)` | `{ root, routes }` |
+| `loadRootTranslations(dir, disablePageLocales?)` | `root`만 |
+| `FormatService`, `interpolate` | core에서 |
+| 타입: `I18nOptions`, `LoadedTranslations`, `Translations`, `Locale`, `PluralFunc`, `Params` | |
+
+인스턴스 메서드는 [런타임](/ko/integrations/runtime-package#api)에 나열되어 있습니다. 전체 시그니처: [패키지 레퍼런스](/ko/api/packages/node).
+
+## 관련 항목 {#related}
+
+<CardGroup cols={2}>
+
+<Card title="런타임" icon="book-open" href="/ko/integrations/runtime-package">
+
+`fs` 없는 인스턴스
+
+</Card>
+
+<Card title="번역" icon="book-open" href="/ko/guide/translations">
+
+폴더 구성
+
+</Card>
+
+<Card title="로케일 감지" icon="book-open" href="/ko/guide/locale-detection">
+
+Nuxt 모듈의 우선순위
+
+</Card>
+
+</CardGroup>

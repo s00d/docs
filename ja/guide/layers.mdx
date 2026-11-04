@@ -1,0 +1,128 @@
+---
+title: "レイヤーとドメイン"
+description: "Nuxt レイヤーを通じて i18n の設定と翻訳ファイルを共有し、ロケールをそれぞれのドメインで配信します。"
+---
+
+Nuxt レイヤーは複数のアプリ向けに i18n の設定と `locales/` フォルダを持つことができ、各アプリは必要なものを追加または上書きします。このページではその方法と、1 つのビルドで複数のドメインを配信する方法を説明します。
+
+## 設定と翻訳を共有する {#share-config-and-translations}
+
+```ts
+// base/nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    locales: [
+      { code: 'en', iso: 'en-US' },
+      { code: 'de', iso: 'de-DE' },
+      { code: 'fr', iso: 'fr-FR' },
+    ],
+    defaultLocale: 'en',
+  },
+})
+```
+
+```ts
+// shop/nuxt.config.ts
+export default defineNuxtConfig({
+  extends: ['../base'], // a layer directory or package, not a nuxt.config file
+  i18n: {
+    locales: [
+      { code: 'es', iso: 'es-ES' }, // added
+      { code: 'fr', disabled: true }, // the base layer's fr, switched off here
+    ],
+  },
+})
+```
+
+- **設定:** アプリのスカラーオプションはレイヤーのものを置き換えます。すべてのレイヤーの `locales` 配列は結合され、同じ `code` を持つエントリはアプリのフィールドを優先して 1 つにマージされます。そのため、アプリはロケールを追加したり、継承したロケールに `disabled: true` などのフィールドを設定したりできます。
+- **翻訳:** すべてのレイヤーの `locales/` はキー単位でマージされます（レイヤーが先、アプリが最後）。そのため、`shop/locales/en.json` のキーは `base/locales/en.json` の同じキーを上書きします。ページファイル（`locales/pages/<page>/`）も同じようにマージされます。
+- **ページ:** `$defineI18nRoute` はすべてのレイヤーのページから読み取られます。
+
+レイヤーの一部ではないフォルダをマージするには、[`additionalTranslationDirs`](/ja/api/module-options#additionaltranslationdirs) に列挙してください。
+
+## 複数ドメイン {#multiple-domains}
+
+1 つのビルドですべてのドメインを配信します。各ロケールをそのドメインとともに列挙します。`baseDefault` を指定すると、そのホストのデフォルトになります:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    strategy: 'prefix_except_default',
+    defaultLocale: 'en',
+    locales: [
+      { code: 'en', iso: 'en-US', baseUrl: 'https://example.com', baseDefault: true },
+      { code: 'de', iso: 'de-DE', baseUrl: 'https://example.de', baseDefault: true },
+      { code: 'nl', iso: 'nl-NL', baseUrl: 'https://example.de' },
+      { code: 'fr', iso: 'fr-FR' },
+    ],
+  },
+})
+```
+
+両方のドメインを同じサーバーに向けます。残りはリクエストのホストによって決まります:
+
+- **デフォルト:** ホストの `baseDefault` ロケール。それがない場合、ホストが配信していればビルドのデフォルト、そうでなければホストの最初のロケール。
+- **配信されるロケール:** そのホストのロケールと、`baseUrl` を持たないすべてのロケール。`example.de` では `de`、`nl`、`fr` です。
+- **他のドメインのロケール** はリンク先になります。`$localePath`、`$localeRoute`、`$switchLocalePath`、`<i18n-switcher>`、`hreflang` はそれぞれの `baseUrl` 上の絶対 URL を返し、`$switchLocale` はそこへナビゲートします。このホストではそれらの URL は 404 になり、Cookie や `Accept-Language` でそれらを選択することはできません。
+- **他のドメインへのリンク** は `$localePath` または `<i18n-link>` を通します: `<NuxtLink :to="$localePath('/contact', 'de')">`、`<i18n-link :to="$localeRoute('/contact', 'de')">`。ルーターは絶対オブジェクトを受け付けないため、`<NuxtLink :to="$localeRoute(...)">` や `router.push($localeRoute(...))` は同じオリジンに留まります。`localhost` やプレビューホストでは、`baseUrl` を持つすべてのロケール（現在のロケールも含む）がこのようなリンクになります。コードでは `navigateTo($localePath('/contact', 'de'), { external: true })` または `$switchRoute` を使用してください。
+- **その他のホスト** はビルド設定を受け取り、`baseUrl` を持つすべてのロケールがリンク先になります。リクエストの内容は反映されません。canonical と `hreflang` は `metaBaseUrl`、なければビルドのデフォルトの `baseUrl` を使用します（`baseUrl` のないデフォルトには `metaBaseUrl` または `site.url` が必要です。[SEO](/ja/guide/seo#set-the-public-origin) を参照）。
+- `public/` 内の **ペイロードファイル** は静的です。どのホストもあらゆるロケールのファイルを返します。ドメインごとの [generate](/ja/guide/deployment#static-site-(nuxi-generate)) は、そのドメインのファイルのみを公開します。
+
+各戦略における `example.de`（`contact` のカスタムパスとして `de: '/kontakt'` を指定した場合）:
+
+| 戦略 | `/` | デフォルトロケールのページ | その他の URL |
+| --- | --- | --- | --- |
+| `prefix_except_default` | `de` | `/kontakt` | `/de/kontakt` と `/en/contact` は 404、`/contact` は `/kontakt` にリダイレクト |
+| `prefix_and_default` | `de` | `/kontakt` と `/de/kontakt`、リンクは `/kontakt` を使用 | `/en/contact` と `/contact` は 404 |
+| `prefix` | `/de` にリダイレクト | `/de/kontakt` | `/kontakt` は `/de/kontakt` にリダイレクト、`/en/contact` は 404 |
+| `no_prefix` | `de` | `/kontakt` | 他のドメインのロケールのカスタムパスは 404 |
+
+`prefix` では、プレフィックスなしの URL はリダイレクトされるだけなので、他のドメインからのリンクはプレフィックスを保持します。`no_prefix` では、他のドメインへのリンクはそのホストのデフォルトロケールに着地します。URL で 2 つ目のロケールを指定できないためです。
+
+知っておくべきこと:
+
+- **プロキシの背後** では、ホストは `Host` から取得されます。プロキシが公開ホストを代わりに `X-Forwarded-Host` に入れる場合は [`trustForwardedHost`](/ja/api/module-options#trustforwardedhost) を設定してください。ただし、プロキシがそのヘッダーを上書きする場合に限ります。どちらも送信しないプロキシではドメインビルドを配信できません。[プロキシまたは CDN の背後](/ja/guide/deployment#behind-a-proxy-or-cdn) を参照してください。
+- **`app.baseURL`** も `baseUrl` に含める必要があります: `app.baseURL: '/shop'` とともに `baseUrl: 'https://example.de/shop'`。
+- **ホストは完全一致です。** `www.example.de` は別のホストです。エッジでリダイレクトするか、その `baseUrl` をロケールに設定してください。ロケールごとにホストは 1 つだけです。
+- **キャッシュはホストをキーにする必要があります。** CDN は通常そうしています。Nitro のルートキャッシュはパスをキーにするため、ドメインビルドではモジュールがすべての `swr` および `cache` ルールの `cache.varies` に `host` を追加し、`trustForwardedHost` の場合は `x-forwarded-host` も追加します。`cache: false` のルールは記述どおりのままです。`isr` はプラットフォームのキャッシュなので、ホストをキーにしているか確認してください。
+- **2 つのホストのデフォルトのカスタムパスが衝突してはいけません。** プレフィックスなしのレコードは 1 つのルーターを共有するため、`/x` を `example.de` と `example.com` で別々のページにすることはできません。
+- **プリレンダリングされたページ:** `nuxt build` での `prerender: true` ルートルールはホストなしで 1 回だけレンダリングされ、そのファイルがすべてのドメインに応答します。ドメインごとに異なるページはサーバーに任せるか、[ドメインごとに generate](/ja/guide/deployment#static-site-(nuxi-generate)) してください。
+- **`noPrefixRedirect`** は、すべてのホストで、ホストと訪問者のロケールに従います。
+- **`hashMode`:** ホストは上記のようにレンダリングを選択し、他のドメインへのリンクはルートをハッシュに含めます（`https://example.com/#/contact`）。
+- **`ssr: false`:** ブラウザは `location.host` からドメインを読み取るため、サーバーのないホストでも解決されます。
+- **[ランタイムオーバーライド](/ja/guide/runtime-overrides)** が最初に適用されます。ランタイムの `disabledLocales` はすべてのホストで有効ですが、1 つ例外があります。`prefix_except_default` と `prefix_and_default` では、ホストのデフォルトはそのページがプレフィックスなしのレコードであるため、そのホストでは有効のままです。`prefix` と `no_prefix` では、ホストは次に配信するロケールにフォールバックします。ランタイムの `defaultLocale` は未知のホストにのみ適用されます。
+
+[静的サイト](/ja/guide/deployment#static-site-(nuxi-generate)) の場合は、ドメインごとに 1 回 generate してください。
+
+### ドメインごとに 1 つのアプリ {#one-app-per-domain}
+
+ドメインごとに異なるページやモジュールが必要な場合は、共有レイヤーとドメインごとの小さなアプリという構成も引き続き使えます。各アプリは同じ `locales` リストの上に独自の `defaultLocale` を設定します。他のドメインのロケールは、上記と同様にそのアプリでは 404 になります。
+
+### コードでロケールを選択する {#choosing-the-locale-in-code}
+
+単一のインスタンスですべてのドメインに応答し、SEO タグにリクエスト自身のオリジンを使う方法については [SEO](/ja/guide/seo#set-the-public-origin) を、コードでホストからロケールを選択する方法については [カスタムロケール検出](/ja/guide/custom-auto-detect) を参照してください。
+
+## 関連 {#related}
+
+<CardGroup cols={2}>
+
+<Card title="翻訳ファイル" icon="book-open" href="/ja/guide/translations">
+
+</Card>
+
+<Card title="ランタイムオーバーライド" icon="book-open" href="/ja/guide/runtime-overrides">
+
+</Card>
+
+<Card title="SEO" icon="book-open" href="/ja/guide/seo">
+
+</Card>
+
+<Card title="Nuxt レイヤー" icon="arrow-up-right-from-square" href="https://nuxt.com/docs/getting-started/layers">
+
+</Card>
+
+</CardGroup>

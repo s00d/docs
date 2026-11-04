@@ -1,0 +1,141 @@
+---
+title: "Runtime"
+description: "使用 @i18n-micro/runtime，在瀏覽器、worker 與 edge 執行環境中使用不依賴框架的 createI18n。"
+---
+
+`@i18n-micro/runtime` 是不依賴框架的 i18n 實例：字典、`t()`、複數、`Intl` 格式化以及變更訂閱，不需要 `fs`，也不需要任何框架。你可以在純 TypeScript、web worker、edge function 中使用它，或將它作為你自己綁定的基礎。React、Preact、Node 與 Astro 套件都是擴充這個類別。
+
+## 安裝 {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add @i18n-micro/runtime
+```
+
+```bash npm
+npm install @i18n-micro/runtime
+```
+
+```bash yarn
+yarn add @i18n-micro/runtime
+```
+
+</CodeGroup>
+
+沒有 peer 相依套件。若要使用磁碟上的翻譯檔案，請使用 [`@i18n-micro/node`](/zh-TW/integrations/nodejs-package)。
+
+## 設定 {#setup}
+
+```ts
+import { createI18n } from '@i18n-micro/runtime'
+
+const i18n = createI18n({
+  locale: 'en',
+  fallbackLocale: 'en',
+  messages: {
+    en: { greeting: 'Hello, {name}!', apples: 'no apples | one apple | {count} apples' },
+    de: { greeting: 'Hallo, {name}!' },
+  },
+  routeMessages: {
+    about: { en: { title: 'About us' } },
+  },
+})
+```
+
+所有選項（`plural`、`missingWarn`、`missingHandler`、`numberFormats`、`datetimeFormats`）都列於[實例](/zh-TW/integrations/overview#the-instance)中。
+
+## 翻譯 {#translate}
+
+```ts
+i18n.t('greeting', { name: 'Ada' }) // 'Hello, Ada!'
+i18n.tc('apples', 5) // '5 apples'
+i18n.tn(1234.5) // '1,234.5'
+
+i18n.setRoute('about')
+i18n.t('title') // 'About us' (route dictionary)
+i18n.t('greeting', { name: 'Ada' }) // 'Hello, Ada!' (root, still visible)
+```
+
+之後再載入更多字典：
+
+```ts
+i18n.loadMessages({ fr: { greeting: 'Bonjour, {name} !' } }, { about: { fr: { title: 'À propos' } } })
+i18n.addTranslations('fr', { nav: { home: 'Accueil' } }) // deep merge; pass false to replace
+
+await i18n.loadFromUrl('/locales/fr.json', { locale: 'fr' })
+await i18n.loadFromUrl('/locales/pages/about/fr.json', { locale: 'fr', routeName: 'about' })
+await i18n.loadFromUrls([
+  { url: '/locales/en.json', locale: 'en' },
+  { url: '/locales/de.json', locale: 'de' },
+])
+```
+
+`loadFromUrl` 使用 `fetch`（傳入 `init` 以設定標頭），並在回應不是 OK 時拋出錯誤。`loadFromUrls` 會逐一依序載入。
+
+## 切換 locale {#switch-locale}
+
+```ts
+i18n.locale = 'de'
+i18n.t('greeting', { name: 'Ada' }) // 'Hallo, Ada!'
+```
+
+locale、路由與字典的變更會通知訂閱者，框架綁定就是藉此重新渲染：
+
+```ts
+const stop = i18n.subscribe(() => {
+  document.querySelector('#greeting')!.textContent = i18n.t('greeting', { name: 'Ada' }) as string
+})
+i18n.locale = 'fr'
+stop()
+```
+
+`getSnapshot()` 會回傳一個在每次通知時都會改變的字串（適用於 `useSyncExternalStore` 風格的 store）。
+
+## 每個請求 {#per-request}
+
+實例只持有一個 locale 與一個路由。在伺服器上，請勿為每個請求切換共用的實例：兩個並行的請求會看到彼此的 locale。`i18n.fork(locale)` 會為請求提供專屬的實例：擁有自己的 locale、備援與路由；共用相同的字典、格式化器與規則。無論有多少字典，fork 的成本都相同。fork 在第一次自行寫入之前會看到父實例的寫入，而它自己的寫入只會保留在它自身。[Node.js](/zh-TW/integrations/nodejs-package#per-request) 另外加入了 `run`。
+
+## API {#api}
+
+| 成員 | 備註 |
+| --- | --- |
+| `t`, `ts`, `tc`, `tn`, `td`, `tdr`, `has` | 請參閱[翻譯與格式化](/zh-TW/integrations/overview#translate-and-format) |
+| `locale`, `fallbackLocale` | 可讀取／設定 |
+| `currentRoute`, `setRoute(name)`, `getRoute()` | 目前的路由，預設為 `'index'` |
+| `loadMessages(messages?, routeMessages?)` | 一次合併多個 locale 與路由 |
+| `addTranslations(locale, tree, merge = true)`, `addRouteTranslations(locale, route, tree, merge = true)` | |
+| `loadFromUrl(url, { locale?, routeName?, init? })`, `loadFromUrls(entries)` | 以 `fetch` 取得 JSON |
+| `hasTranslation(key)` | 目前的 locale、任何路由（不同於 `has`，後者檢查目前的路由與根） |
+| `setTranslation(key, value)`, `resolveTranslations()` | 寫入單一鍵；讀取合併後的樹狀結構 |
+| `clear()`, `clearCache()` | 清除所有字典 |
+| `subscribe(cb)`, `getSnapshot()` | 變更通知 |
+| `storage` | `{ translations: Map<'locale:route', Translations> }` |
+
+不是語言標籤的代碼會從 `localeIso: { ua: 'uk-UA' }` 取得其複數規則；`localeIsoMap(locales)` 會從 locale 清單中帶有 `iso` 的項目建立此對應。
+
+模組匯出：`createI18n`、`I18n`、`fetchJsonTranslations`、`FormatService`、`interpolate`、`localeIsoMap`，以及型別 `I18nOptions`、`LoadFromUrlOptions`、`LoadFromUrlEntry`、`TranslationStorage`、`Translations`、`Locale`、`PluralFunc`。完整簽章：[套件參考](/zh-TW/api/packages/runtime)。
+
+## 相關內容 {#related}
+
+<CardGroup cols={2}>
+
+<Card title="框架" icon="book-open" href="/zh-TW/integrations/overview">
+
+選項、查找順序、複數
+
+</Card>
+
+<Card title="Node.js" icon="book-open" href="/zh-TW/integrations/nodejs-package">
+
+從磁碟載入翻譯檔案
+
+</Card>
+
+<Card title="React 與 Preact" icon="book-open" href="/zh-TW/integrations/react-package">
+
+建構於此實例之上的綁定
+
+</Card>
+
+</CardGroup>

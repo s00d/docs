@@ -1,0 +1,115 @@
+---
+title: "v3.0.0 — אופטימיזציית ביצועים, חבילות Route ו-Path Strategy"
+description: "הערות גרסה: v3.0.0 — אופטימיזציית ביצועים, חבילות Route ו-Path Strategy"
+---
+
+**תאריך**: 2026-02-04
+
+**גרסה**: `v3.0.0`
+
+![v3.0.0 release](/images/3.0.0.png)
+
+אנו מכריזים על **v3.0.0** עם **שינוי ארכיטקטוני מקיף**: שכתוב מלא של מערכת אחסון התרגומים לביצועים מרביים, יצירת הנתיבים ולוגיקת הנתיבים בזמן ריצה מפוצלות כעת לחבילות ייעודיות, ותהליך ההפניות תוכנן מחדש לאמינות טובה יותר ולתאימות ל-Serverless.
+
+## מה חדש? {#what’s-new}
+
+### אופטימיזציית ביצועים — ארכיטקטורת אחסון תרגומים חדשה {#performance-optimization-—-new-translation-storage-architecture}
+
+מערכת הטעינה והמטמון של התרגומים שוכתבה במלואה לביצועים מרביים:
+
+- **מחלקת TranslationStorage מרכזית** — מחלקה חדשה `TranslationStorage` (`src/runtime/utils/storage.ts`) מספקת אחסון מאוחד ללקוח ולשרת. היא משתמשת ב-`globalThis` עם `Symbol.for` כדי להבטיח singleton אמיתי בכל תהליך ה-Node.js, ומונעת שכפול מטמון בין מודולים ארוזים.
+
+- **פונקציית `$t()` ממוטבת (tFast)** — פונקציית התרגום מבצעת חיפוש ישיר במילון פעיל יחיד:
+  1. כל התרגומים (root + ספציפיים לעמוד + fallback) ממוזגים מראש בזמן הבנייה לקובץ יחיד לכל עמוד
+  2. בניווט באותו locale, תרגומי העמוד החדש ממוזגים באופן מצטבר לתוך המילון הפעיל (מונע הבהוב מפתחות במהלך אנימציות מעבר)
+  3. תמיכה במפתחות מקוננים (`key.subkey.subsubkey`) עם פענוח נתיב ממוטב
+  4. אין חיפושי Map או חישובי locale/route בכל קריאה — נעשה שימוש בהקשר שחושב מראש
+
+- **הזרקה בצד השרת דרך `window.__I18N__`** — תרגומים שנטענו במהלך SSR מוזרקים ל-HTML כתגית script. הלקוח קורא ישירות מ-`window.__I18N__` בטעינה הראשונית, וכך נמנעות בקשות כפולות.
+
+- **מטמון chunks מקומי ב-plugin** — ה-plugin מחזיק Map מקומי בשם `loadedChunks` ששומר את כל ה-chunks של התרגום שנטענו. לאחר שנטענו, התרגומים לעולם אינם נטענים מחדש במהלך מחזור החיים של העמוד.
+
+- **מיזוג מראש בזמן הבנייה** — שלב `preMergeLocales` ב-`module.ts` ממזג את כל השכבות, שרשראות ה-locale של ה-fallback והתרגומים ברמת ה-root לכל קובץ עמוד בזמן הבנייה. ה-server-loader פשוט קורא קובץ יחיד שנבנה מראש — אין צורך במיזוג בזמן ריצה.
+
+**שיפורי ביצועים:**
+
+- הקצאת זיכרון מופחתת לכל בקשה (אין יצירה מחדש של אובייקטים בכל קריאה ל-`$t()`)
+- לחץ נמוך יותר על איסוף הזבל
+- זמני תגובה מהירים יותר תחת עומס
+- דפוס שימוש יציב בזיכרון (ללא גרפים "קופצים")
+
+### חבילות Route ו-Path Strategy {#route-&-path-strategy-packages}
+
+- **@i18n-micro/route-strategy** — יצירת נתיבים בזמן הבנייה: מרחיבה את עמודי Nuxt בנתיבים מתורגמים, מטפלת בכינויים (aliases), בנתיבים מקוננים ובנתיבים מותאמים אישית לכל אסטרטגיה. נקודת כניסה יחידה: `new RouteGenerator(options)` ו-`extendPages(pages)`. האסטרטגיות (`no_prefix`, `prefix`, `prefix_except_default`, `prefix_and_default`) ממומשות כמחלקות נפרדות ונבחרות באמצעות factory.
+- **@i18n-micro/path-strategy** — טיפול בנתיבים וב-locale בזמן ריצה: מספקת את `PathStrategy` לבניית נתיבים מתורגמים, לפענוח הפניות ולהחלפת locale. ייצואי subpath הניתנים ל-tree-shaking (`/prefix`, `/no-prefix` וכו') כך שרק האסטרטגיה שנבחרה נארזת. משתמשת בפונקציות טהורות לפענוח נתיבים ובדגלי הקשר שחושבו מראש למינימום הקצאות.
+- **מבנה חבילות מסודר** — לוגיקת הנתיבים ב-`@i18n-micro/route-strategy` עם `core/`, `strategies/`. ה-path strategy ב-`@i18n-micro/path-strategy` עם מבנה `src/` שטוח: `types.ts`, `path.ts`, `resolver.ts`, `helpers.ts` ו-`strategies/`.
+- **התנהגות עקבית** — טיפול בכינויים, חיבור נתיבי הורה–ילד, `globalLocaleRoutes` / `filesLocaleRoutes` / `routeLocales` מותאמים אישית, והבטחות אי-שינוי (immutability) מכוסים על ידי חבילת בדיקות ייעודית.
+
+### שינוי מקיף בארכיטקטורת ההפניות {#redirect-architecture-overhaul}
+
+- **Server middleware** — הפניות וטיפול ב-404 רצים ב-middleware של Nitro (`i18n.global.ts`). הוא רץ לפני הרינדור של Nuxt, כך שהפניות מ-`/` ל-`/<locale>/` מתרחשות ללא הבהוב שגיאה כאשר קיים cookie של locale.
+- **Client plugin (צד הלקוח)** — plugin ללקוח בלבד (`06.client-redirect.client.ts`) רץ אחרי ה-hydration ומטפל בהפניות כאשר `useI18nLocale()` או cookie מגדירים locale שאינו ברירת המחדל. Nitro רץ לפני Nuxt, ולכן השרת אינו רואה שינויי cookie/state מ-plugins של המשתמש; ה-client plugin מכסה מקרה זה.
+- **ללא רכיב fallback** — רכיב ה-fallback `locale-redirect.vue` והאפשרות `fallbackRedirectComponentPath` הוסרו. לוגיקת ההפניה מטופלת במלואה על ידי ה-server middleware וה-client plugin.
+- **תמיכה בנתיבים מותאמים אישית** — נתיבים כמו `/kontakt` לגרמנית (דרך `globalLocaleRoutes`) מזוהים כראוי כתקינים ללא קידומת locale, וכך נמנעות שגיאות 404 שגויות במהלך prerender.
+- **תיקון customRegexMatcher** — בעת שימוש ב-`customRegexMatcher`, התבנית תואמת כעת את **כל** מקטע הנתיב הראשון (עם העוגנים `^` ו-`$`). כך נמנעות שגיאות 404 שגויות לנתיבים כמו `/locale-test` כאשר התבנית `[a-z]{2}-[a-z]{2}` הייתה תואמת בעבר תת-מחרוזות.
+- **תיקון autoDetectPath** — האפשרות `autoDetectPath` משווה כעת כראוי מול נתיב ה-URL המקורי, ומונעת הפניות לא רצויות בעת ניווט מפורש לכתובות URL עם קידומת locale.
+
+### ה-Composable useI18nLocale {#usei18nlocale-composable}
+
+- **ניהול locale מרכזי** — ה-composable החדש `useI18nLocale()` מחליף את `useLocaleCookies` ומספק נקודת כניסה יחידה למצב ה-locale, ל-cookies ולכלי הסנכרון.
+- **API** — `locale`, `localeCookie`, `hashCookie`, `getLocale()`, `getPreferredLocale()`, `setLocale()`, `syncLocale()`, `isValidLocale()`, `getEffectiveLocale()`, `resolveInitialLocale()`.
+- **locale מתוכנת** — השתמשו ב-`useI18nLocale().setLocale(locale)` ב-plugins של השרת במקום ב-`useState('i18n-locale')` לטיפול נקי ומרכזי יותר ב-locale.
+
+### זיהוי אוטומטי מותאם אישית ותצורה {#custom-auto-detection-&-configuration}
+
+- **`getI18nConfig()`** — plugins מותאמים אישית (למשל לזיהוי locale) צריכים להשתמש ב-`getI18nConfig()` מתוך `#build/i18n.strategy.mjs` במקום ב-`useRuntimeConfig().public.i18nConfig`. כך מתקבלת גישה ישירה לתצורת ה-i18n המחושבת (למשל `localeCookie`) בלי להסתמך על runtime config.
+- **שם ה-cookie** — השתמשו ב-`getI18nConfig().localeCookie ?? 'user-locale'` בעת מימוש לוגיקת זיהוי מותאמת אישית.
+
+### חבילות שילוב מפושטות {#simplified-integration-packages}
+
+כל חבילות השילוב (`@i18n-micro/vue`, `@i18n-micro/astro`, `@i18n-micro/node`, `@i18n-micro/react`, `@i18n-micro/preact`, `@i18n-micro/solid`) פושטו ועברו אופטימיזציה, והן חולקות את אותה לוגיקת תרגום ליבה.
+
+### שינויים בתצורה {#configuration-changes}
+
+- **`previousPageFallback` הוסר** — אין עוד צורך באפשרות זו. אסטרטגיית המיזוג המצטבר החדשה שומרת אוטומטית את תרגומי העמוד הקודם זמינים במהלך אנימציות מעבר, ולאחר מכן מנקה אותם דרך ה-hook `page:transition:finish`.
+- **`hmr`** — הועבר מ-`experimental.hmr` לאפשרות ברמה העליונה. שולט ב-HMR בצד השרת עבור קובצי תרגום (מופעל כברירת מחדל בפיתוח).
+
+```typescript
+// Before (v2.x)
+export default defineNuxtConfig({
+  i18n: {
+    experimental: {
+      hmr: true,
+    },
+  },
+})
+
+// After (v3.0.0)
+export default defineNuxtConfig({
+  i18n: {
+    hmr: true,
+  },
+})
+```
+
+## שינויים שוברים {#breaking-changes}
+
+- **`fallbackRedirectComponentPath`** — הוסר. המודול אינו משתמש עוד ברכיב נתיב fallback להפניות. אם הגדרתם נתיב רכיב מותאם אישית, הסירו אותו מהתצורה.
+- **`useLocaleCookies`** — הוסר. השתמשו ב-`useI18nLocale()` במקומו. ה-composable החדש מספק את `locale`, `localeCookie`, `hashCookie`, `setLocale()`, `syncLocale()` ועוד.
+- **`experimental.i18nPreviousPageFallback` / `previousPageFallback`** — הוסרו לחלוטין. אסטרטגיית המיזוג המצטבר מטפלת בהבהובי מעבר אוטומטית. הסירו אפשרות זו מהתצורה.
+- **`experimental.hmr`** — הועבר ל-`hmr`. עדכנו את התצורה אם השתמשתם באפשרות זו.
+- **plugins מותאמים אישית** — אם ה-plugin המותאם אישית שלכם לזיהוי locale השתמש ב-`useRuntimeConfig().public.i18nConfig`, עברו ל-`getI18nConfig()` מתוך `#build/i18n.strategy.mjs`. העדיפו את `useI18nLocale().setLocale()` על פני `useState('i18n-locale')`. ראו [זיהוי שפה מותאם אישית](/he/guide/custom-auto-detect) לדוגמאות מעודכנות.
+- **שינויים בקבצים פנימיים** — `load-from-storage.ts` ו-`translation-loader.ts` הוסרו והוחלפו ב-`storage.ts` וב-`server-loader.ts`. אם ייבאתם ישירות מקבצים אלה (לא מומלץ), עדכנו את הייבוא.
+
+## למה זה חשוב {#why-it-matters}
+
+- **ביצועים**: מטמון singleton מרכזי מבטל יצירת אובייקטים בכל בקשה ומפחית את הלחץ על איסוף הזבל.
+- **תחזוקתיות**: לוגיקת הנתיבים נמצאת בחבילות ייעודיות עם גבולות וטיפוסים ברורים.
+- **בדיקות**: התנהגות האסטרטגיות ומקרי קצה נבדקים בבידוד.
+- **אמינות**: פיצול לוגיקת ההפניה בין השרת (Nitro) ללקוח מונע בעיות תזמון כאשר cookie/useState מוגדרים על ידי plugins של המשתמש.
+- **מוכן ל-Serverless**: ה-plugin של Nitro רץ באותו הקשר כמו ה-handlers של Nitro, ותואם ל-Edge/Workers.
+- **תיעוד**: התנהגות הניתוב מתועדת ב[מדריך האסטרטגיות](/he/guide/strategy) ובחבילות [path-strategy](https://github.com/s00d/nuxt-i18n-micro/tree/main/packages/path-strategy) ו-[route-strategy](https://github.com/s00d/nuxt-i18n-micro/tree/main/packages/route-strategy).
+
+להערות שדרוג ולרשימת שינויים מלאה, ראו את [יומן השינויים](https://github.com/s00d/nuxt-i18n-micro/blob/main/CHANGELOG.md).
+
+---

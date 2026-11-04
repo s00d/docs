@@ -1,0 +1,132 @@
+---
+title: "翻译文件"
+description: "翻译键存放在哪里，根文件和页面文件如何与回退结合，以及页面如何加载其字典。"
+---
+
+翻译是普通的 JSON 文件：每个区域设置一个根文件，用于存放共享的键；每个页面和区域设置各一个文件，用于存放该页面的键。当你添加页面、在页面之间共享键或设置回退时，请阅读本页。你将了解某个键必须放在哪个文件中、页面可以看到什么，以及每个文件何时加载。
+
+## 目录布局 {#layout}
+
+```text
+locales/
+├── en.json                 # root: menus, footer, buttons
+├── de.json
+└── pages/
+    ├── index/              # pages/index.vue
+    │   ├── en.json
+    │   └── de.json
+    ├── about/              # pages/about.vue
+    │   ├── en.json
+    │   └── de.json
+    └── products-id/        # pages/products/[id].vue
+        ├── en.json
+        └── de.json
+```
+
+- `locales/pages/` 下的文件夹名是页面的 Nuxt **路由名称**：`pages/products/[id].vue` 对应 `products-id`，`pages/blog/[slug]/comments.vue` 对应 `blog-slug-comments`。
+- 键可以嵌套任意深度；`$t('auth.form.login')` 读取 `{ "auth": { "form": { "login": … } } }`。
+- `translationDir` 用于移动该文件夹（默认为 `'locales'`，相对于项目根目录，在 Nuxt 4 的 `app/` 布局下同样如此）。
+- 当 Nuxt 解析页面时，缺失的文件会被创建为 `{}`，除非设置了 [`disableWatcher`](/zh/api/module-options#disablewatcher)。
+
+## 页面能看到什么 {#what-a-page-sees}
+
+![在 de 下 /about 中查找键的顺序：pages/about/de.json、de.json、pages/about/en.json、en.json。它们合并为一个供 $t 读取的 about/de/data.json](/images/diagrams/page-dictionary.svg)
+
+页面的字典是其根文件与页面文件的深度合并（每一层都合并）。发生冲突时以页面文件为准：
+
+```json
+// locales/en.json
+{ "title": "My shop", "nav": { "home": "Home", "cart": "Cart" } }
+```
+
+```json
+// locales/pages/about/en.json
+{ "title": "About us", "nav": { "cart": "Basket" } }
+```
+
+```ts
+// on /about
+t('title') // 'About us'
+t('nav.home') // 'Home'   (root)
+t('nav.cart') // 'Basket' (page wins)
+// on any other page
+t('title') // 'My shop'
+```
+
+没有自己文件夹的页面只会获得根字典。其他页面的键不可见。
+
+### 回退区域设置 {#fallback-locales}
+
+当前区域设置中缺失的键，会先从其回退区域设置中获取，然后才会显示键本身：
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    locales: [
+      { code: 'en', iso: 'en-US' },
+      { code: 'de', iso: 'de-DE' },
+      { code: 'de-at', iso: 'de-AT', fallbackLocale: 'de' },
+    ],
+    defaultLocale: 'en',
+    fallbackLocale: 'en', // global, for every locale
+  },
+})
+```
+
+- 区域设置自身的 `fallbackLocale` 会一直追溯到末端：`de-at` → `de` → `en`。
+- 全局 `fallbackLocale` 是最弱的一层，位于所有链之下。
+- 链中的每个区域设置都会先添加其根文件，再添加其页面文件，从最弱的回退一直到当前区域设置。因此，当前区域设置的根文件优先于回退区域设置的页面文件。
+
+如果没有回退，缺失的键会按键本身渲染（`'nav.home'`），并在开发环境下于浏览器控制台中输出警告（[`missingWarn`](/zh/api/module-options#missingwarn)）。
+
+## 共享与其他来源 {#sharing-and-other-sources}
+
+| 需求 | 选项 |
+| --- | --- |
+| 只使用根文件，不使用 `pages/` 文件夹 | [`disablePageLocales: true`](/zh/api/module-options#disablepagelocales) |
+| 两个页面读取同一个页面文件夹 | [`routesLocaleLinks`](/zh/api/module-options#routeslocalelinks)：`{ 'about-us': 'about' }` |
+| 位于其他文件夹中的共享根文件 | [`additionalTranslationDirs`](/zh/api/module-options#additionaltranslationdirs)：`['common']`（主 `translationDir` 优先） |
+| 来自 Nuxt 层的键 | 各层的文件会合并，项目自身的文件优先。参见[层](/zh/guide/layers) |
+| 运行时添加的键 | [`i18n:register`](/zh/api/events) 钩子、`$mergeTranslations`、`$setTranslation` |
+| 内联在页面组件中的键 | `$defineI18nRoute({ locales: { en: { … } } })`，参见[页面配置](/zh/guide/per-component-translations) |
+
+## 页面如何加载其字典 {#how-a-page-loads-its-dictionary}
+
+![区域设置 JSON 文件被构建为载荷树，在 Node 上存储于 public/ 中，在 Edge 上存储于服务器资源中，由服务器加载器读取，然后在服务器上供 $t 使用，并在浏览器中被获取供 $t 使用](/images/diagrams/translation-pipeline.svg)
+
+模块为每个页面和区域设置构建一个载荷：`/{apiBaseUrl}/{page}/{locale}/data.json`（默认为 `/_locales/about/de/data.json`）。
+
+1. **服务器渲染。** Nitro 检测区域设置，页面直接从服务器加载器加载其载荷，无需 HTTP 请求。字典不会写入 HTML 载荷，因此页面保持精简。
+2. **Hydration。** 浏览器获取同一个载荷。服务器已经为它输出了 `<link rel="preload">`，因此获取会随 HTML 一同开始。
+3. **导航。** 下一个页面的载荷会替换字典。离开的页面的键在其消失之前（页面过渡结束或 `page:finish`）仍可解析，因此正在淡出的页面不会闪现原始键。加载失败的分块（网络错误、4xx 或 5xx、响应体不是对象）会保留当前字典，下一次导航时会重新加载。区域设置切换失败时也是如此：`$switchLocale` 解析为 `false`，再次调用它或再次点击切换器即可重试。在前缀策略下，此时 URL 已经改变，因此 `lang` 和 `$getLocale()` 指向 URL 的区域设置，而旧文本仍留在屏幕上。
+4. **缓存。** 已加载的载荷会在服务器和浏览器中缓存；大小和 TTL 的调节选项请参见[性能](/zh/guide/performance)。
+
+`translationPayloads.mode` 决定载荷的构建方式。`'premerged'`（默认）在构建时写出每个页面 × 区域设置的文件。`'source'` 保留源文件并按请求合并，对于 Edge 目标上的大型目录而言体积更小。两者生成的字典相同。各部署目标下文件最终存放的位置请参见[部署](/zh/guide/deployment)。
+
+## 开发环境中的编辑 {#editing-in-development}
+
+`nuxt dev` 会实时读取文件。保存翻译文件会就地刷新当前打开页面的字典：无需重新加载，已删除的键会消失，对根文件的修改会作用于每个页面。损坏的 JSON 文件会输出带有其路径的警告，并被视为空文件。设置 [`hmr: false`](/zh/api/module-options#hmr) 可改为手动刷新。
+
+## 相关内容 {#related}
+
+<CardGroup cols={2}>
+
+<Card title="页面配置" icon="book-open" href="/zh/guide/per-component-translations">
+
+按页面配置的区域设置和内联翻译
+
+</Card>
+
+<Card title="方法" icon="brackets-curly" href="/zh/api/methods">
+
+`$t`、`$tc`、`$tn`、`$td`
+
+</Card>
+
+<Card title="部署" icon="book-open" href="/zh/guide/deployment">
+
+</Card>
+
+</CardGroup>

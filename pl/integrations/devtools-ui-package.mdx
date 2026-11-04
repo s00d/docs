@@ -1,0 +1,134 @@
+---
+title: "DevTools UI"
+description: "Edytor tłumaczeń dla serwerów deweloperskich Vite oraz most, który łączy go z dowolną instancją @i18n-micro."
+---
+
+`@i18n-micro/devtools-ui` to edytor tłumaczeń z zakładki Nuxt DevTools, spakowany jako web component z wtyczką Vite. Dodaj go do projektu Vue, React, Preact, Solid lub Astro, aby podczas programowania przeglądać i edytować w przeglądarce pliki JSON z folderu tłumaczeń. Aplikacje Nuxt mają go już w [Nuxt DevTools](/pl/guide/devtools).
+
+![DevTools UI: drzewo plików i edytor z tekstem domyślnego locale obok każdego klucza](/images/devtools/02-translations-editor-dark.webp)
+
+## Instalacja {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add -D @i18n-micro/devtools-ui
+```
+
+```bash npm
+npm install -D @i18n-micro/devtools-ui
+```
+
+```bash yarn
+yarn add -D @i18n-micro/devtools-ui
+```
+
+</CodeGroup>
+
+Brak zależności peer.
+
+## Konfiguracja {#setup}
+
+```ts
+// vite.config.ts
+import { defineConfig } from 'vite'
+import { i18nDevToolsPlugin } from '@i18n-micro/devtools-ui/vite'
+
+export default defineConfig({
+  plugins: [i18nDevToolsPlugin({ translationDir: 'src/locales' })],
+})
+```
+
+| Opcja | Domyślnie | Uwagi |
+| --- | --- | --- |
+| `translationDir` | `'src/locales'` | Folder z plikami JSON, względem katalogu głównego Vite. |
+| `base` | `'/__i18n_api'` | Ścieżka bazowa endpointów API. |
+| `injectButton` | `true` | Dodaje pływający przycisk do stron serwowanych przez transformację `index.html` w Vite. Astro nie ma takich stron: zobacz poniżej. |
+| `defaultLocale` | pierwszy plik locale w `translationDir` | Zwracane przez `/config`. |
+| `fallbackLocale` | `defaultLocale` | Zwracane przez `/config`. |
+
+Wtyczka działa tylko na serwerze deweloperskim (`apply: 'serve'`); build produkcyjny nie zawiera z niej niczego. Przycisk otwiera `/__i18n_devtools.html`, które odczytuje i zapisuje pliki przez endpointy wtyczki:
+
+| Endpoint | Działanie |
+| --- | --- |
+| `GET <base>/translations` | każdy słownik w `translationDir`, według ścieżki względnej |
+| `POST <base>/save` | treść `{ file, content }`; nadpisuje istniejący plik `.json` wewnątrz `translationDir`, 403 dla wszystkiego innego. Nigdy nie tworzy pliku |
+| `GET <base>/config` | `{ defaultLocale, fallbackLocale, locales, translationDir }`; `locales` pochodzą z plików głównego poziomu w `translationDir` |
+
+Endpointy odpowiadają tylko stronie devtools: żądanie z innego originu lub hosta kończy się `403`, a `/save` przyjmuje wyłącznie `application/json` (`415`). Strona dowiaduje się o zmianach plików przez gniazdo HMR Vite.
+
+W Astro zamiast wtyczki dodaj integrację. Dodaje ona aplikację do paska narzędzi deweloperskich:
+
+```ts
+// astro.config.mjs
+import { defineConfig } from 'astro/config'
+import { i18nDevToolsIntegration } from '@i18n-micro/devtools-ui/vite'
+
+export default defineConfig({
+  integrations: [i18nDevToolsIntegration({ translationDir: 'src/locales' })],
+})
+```
+
+Zapisywanie jedynie zapisuje plik. Aplikacja, która importuje JSON przez Vite, otrzymuje zmiany przez HMR; aby edycje były stosowane bezpośrednio do działającej instancji, użyj mostu.
+
+## Most do działającej instancji {#bridge-to-a-live-instance}
+
+Aby osadzić edytor na własnej stronie i od razu stosować edycje do działającej instancji, utwórz most z adaptera i przekaż go do elementu `<i18n-devtools-ui>`:
+
+```ts
+import { createBridge, register } from '@i18n-micro/devtools-ui'
+import { i18n, locales } from './i18n' // a runtime, React, Preact or Solid instance
+
+register() // defines <i18n-devtools-ui> once
+
+const bridge = createBridge({
+  adapter: {
+    getRouteCache: () => Object.fromEntries(i18n.storage.translations),
+    addTranslations: (locale, content, merge) => i18n.addTranslations(locale, content, merge),
+    addRouteTranslations: (locale, route, content, merge) => i18n.addRouteTranslations(locale, route, content, merge),
+    subscribe: (cb) => i18n.subscribe(cb),
+    getCurrentLocale: () => i18n.locale,
+  },
+  locales,
+  defaultLocale: 'en',
+  translationDir: 'src/locales',
+})
+
+const el = document.createElement('i18n-devtools-ui') as HTMLElement & { bridge: typeof bridge }
+el.bridge = bridge
+document.body.append(el)
+```
+
+`getRouteCache` musi zwracać słowniki z kluczami `locale:route` (`en:index`, `en:blog-post`), czyli to, co przechowuje `i18n.storage.translations`. Dla instancji Vue użyj `i18n.global.getRouteCache()` i `i18n.global.subscribeToChanges(cb)`.
+
+`saveTranslation` najpierw aktualizuje instancję, a następnie wysyła POST do `<base>/save`. Gdy nie ma endpointu (statyczny build podglądu) lub serwer deweloperski jest nieosiągalny, edycja jest zachowywana w `localStorage`; każdy inny błąd zapisu przywraca poprzedni słownik i rzuca wyjątek.
+
+## API {#api}
+
+| Eksport | Punkt wejścia |
+| --- | --- |
+| `i18nDevToolsPlugin(options)`, `i18nDevToolsIntegration(options)` | `@i18n-micro/devtools-ui/vite` |
+| `register()`, `I18nDevToolsElement` | `@i18n-micro/devtools-ui` |
+| `createBridge(options)`, typy `BridgeAdapter`, `CreateBridgeOptions` | `@i18n-micro/devtools-ui` (także `/bridge/create`) |
+| typ `I18nDevToolsBridge` | `@i18n-micro/devtools-ui` (także `/bridge`) |
+| `createRpcClient`, `setupRpcHost` | `@i18n-micro/devtools-ui` |
+
+Pełne sygnatury: [dokumentacja pakietu](/pl/api/packages/devtools-ui).
+
+## Powiązane {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Nuxt DevTools" icon="book-open" href="/pl/guide/devtools">
+
+Ten sam edytor wewnątrz Nuxt
+
+</Card>
+
+<Card title="Frameworki" icon="book-open" href="/pl/integrations/overview">
+
+Instancja i jej `storage`
+
+</Card>
+
+</CardGroup>

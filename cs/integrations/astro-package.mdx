@@ -1,0 +1,249 @@
+---
+title: "Astro"
+description: "Překlady na straně serveru, routy s prefixem lokalizace, detekce na domovské stránce a SEO tagy pro Astro s @i18n-micro/astro."
+---
+
+`@i18n-micro/astro` překládá stránky Astro na serveru: middleware vybere lokalizaci z URL a vloží instanci pro daný požadavek do `Astro.locals` a `useI18n(Astro)` ji čte. Použijte ho na webu v Astru, který potřebuje URL s prefixem lokalizace (`/about`, `/fr/about`) a sdílené JSON slovníky. Získáte komponenty `.astro`, přesměrování domovské stránky na jazyk návštěvníka, tagy `hreflang` a props pro [ostrovy](/cs/integrations/astro-islands).
+
+## Instalace {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add @i18n-micro/astro
+```
+
+```bash npm
+npm install @i18n-micro/astro
+```
+
+```bash yarn
+yarn add @i18n-micro/astro
+```
+
+</CodeGroup>
+
+Peer závislosti: `astro` `^5.0.0 || ^6.0.0 || ^7.0.0`. Volitelné, pouze pro [ostrovy](/cs/integrations/astro-islands): `vue` `^3.3.0`, `react` `^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0`, `preact` `^10.0.0 || ^11.0.0`, `svelte` `^4.0.0 || ^5.0.0`.
+
+## Nastavení {#setup}
+
+Přidejte integraci. Zabalí vaše slovníky do serveru a nainstaluje middleware, takže není potřeba žádný `src/middleware.ts`:
+
+```ts
+// astro.config.mjs
+import { defineConfig } from 'astro/config'
+import node from '@astrojs/node'
+import { i18nIntegration } from '@i18n-micro/astro'
+
+export default defineConfig({
+  output: 'server',
+  adapter: node({ mode: 'standalone' }),
+  integrations: [
+    i18nIntegration({
+      locale: 'en',
+      fallbackLocale: 'en',
+      locales: [
+        { code: 'en', iso: 'en-US', displayName: 'English' },
+        { code: 'de', iso: 'de-DE', displayName: 'Deutsch' },
+        { code: 'fr', iso: 'fr-FR', displayName: 'Français' },
+      ],
+      translationDir: 'src/locales',
+    }),
+  ],
+})
+```
+
+Slovníky se v době buildu stanou kódem: server nečte z disku, takže běží i na edge (Cloudflare, Vercel Edge). V `astro dev` se úprava souboru projeví při dalším požadavku.
+
+### Možnosti integrace {#integration-options}
+
+| Možnost | Výchozí | Poznámky |
+| --- | --- | --- |
+| `locale` | povinná | Výchozí lokalizace. |
+| `fallbackLocale` | `locale` | |
+| `locales` | `[]` | Úplné objekty `Locale`. Lokalizace s `disabled` není lokalizací žádné URL ani cílem přesměrování. `iso` je tag, podle kterého se řídí plurály, když kód tagem není (`ua` → `uk-UA`). |
+| `translationDir` | žádná | Složka zabalená do serveru, relativně ke kořeni projektu. |
+| `disablePageLocales` | `false` | Soubory stránek se počítají jako kořenové překlady. |
+| `autoDetect` | `true` | Přesměrování domovské stránky, viz [Detekce lokalizace](#locale-detection). |
+| `redirectToDefault` | `false` | `/` přesměruje i tehdy, když nic nepreferuje jinou lokalizaci. |
+| `localeCookie` | `'i18n-locale'` | `null` vypne cookie. |
+| `missingWarn` | `false` | |
+| `middleware` | `true` | `false`: napište middleware sami, viz níže. |
+
+Runtime nastavení jsou publikována ve `virtual:i18n-micro/config` (`config.base` je `base` z Astra, `config.localeCodes` povolené kódy), slovníky ve `virtual:i18n-micro/messages`.
+
+### Vlastní middleware {#your-own-middleware}
+
+Pravidlo plurálu, handler chybějících klíčů a router adaptér nemohou přejít z procesu konfigurace do serverového bundlu. Pro ně předejte `middleware: false` a napište `src/middleware.ts`. Konfigurace `i18n` z Astra se pak nastaví za vás s `routing: 'manual'`, takže `Astro.currentLocale` a `astro:i18n` fungují. Astro toto nastavení bez `src/middleware.ts` nepovoluje, takže s middlewarem, který dodává integrace, tyto nefungují.
+
+```ts
+// src/middleware.ts
+import { config } from 'virtual:i18n-micro/config'
+import { messages } from 'virtual:i18n-micro/messages'
+import { createAstroRouterAdapter, createI18n, createI18nMiddleware, localeIsoMap } from '@i18n-micro/astro'
+
+const i18n = createI18n({
+  locale: config.defaultLocale,
+  fallbackLocale: config.fallbackLocale,
+  localeIso: localeIsoMap(config.locales),
+  messages: messages.root,
+  routeMessages: messages.routes,
+  plural: myPluralRule,
+})
+
+export const onRequest = createI18nMiddleware({
+  i18n,
+  defaultLocale: config.defaultLocale,
+  locales: config.localeCodes,
+  localeObjects: config.locales,
+  autoDetect: config.autoDetect,
+  redirectToDefault: config.redirectToDefault,
+  localeCookie: config.localeCookie,
+  base: config.base,
+  routingStrategy: createAstroRouterAdapter(config.locales, config.defaultLocale),
+})
+```
+
+Chcete-li místo toho číst složku za běhu, `loadTranslationsFromDir` a `loadTranslationsIntoI18n` jsou v `@i18n-micro/astro/node` (pouze Node).
+
+### Možnosti middlewaru {#middleware-options}
+
+| Možnost | Výchozí | Poznámky |
+| --- | --- | --- |
+| `i18n` | povinná | Globální instance; každý požadavek dostane `i18n.fork(locale)`, což stojí stejně bez ohledu na počet slovníků. |
+| `defaultLocale` | povinná | |
+| `locales` | povinná | Kódy lokalizací. |
+| `localeObjects` | `locales` jako `{ code }` | Úplné objekty `Locale` pro komponenty a SEO. |
+| `autoDetect` | `true` | Přesměrování domovské stránky, viz [Detekce lokalizace](#locale-detection). |
+| `redirectToDefault` | `false` | `/` přesměruje i tehdy, když nic nepreferuje jinou lokalizaci, a to na domovskou stránku výchozí lokalizace tak, jak ji vyhodnotí strategie routování. |
+| `localeCookie` | `'i18n-locale'` | `null` vypne cookie. |
+| `routingStrategy` | prefix kromě výchozí | Router adaptér. Metody, které vynechá, pocházejí z výchozího adaptéru. |
+| `base` | žádná | `base` z Astra: `config.base`. |
+
+Soubory stránek (`src/locales/pages/blog/post/de.json`) jsou routou `blog-post`: cesta stránky spojená znakem `-`.
+
+## Překlad {#translate}
+
+```astro
+---
+// src/pages/index.astro
+import { useI18n } from '@i18n-micro/astro'
+import I18nT from '@i18n-micro/astro/i18n-t'
+
+const { t, tc, locale } = useI18n(Astro)
+---
+
+<h1>{t('greeting', { name: 'Ada' })}</h1>
+<p>{tc('apples', 3)}</p>
+<I18nT keypath="welcome" tag="p" />
+<p>{locale}</p>
+```
+
+`useI18n(Astro)` vrací `locale`, `defaultLocale`, `locales`, `t`, `ts`, `tc`, `tn`, `td`, `tdr`, `has`, `getRoute`, `getRouteName(path?)`, `getLocaleFromPath(path?)`, `switchLocalePath(locale)`, `localizePath(path, locale?)`, `getBasePath(url?)`, `getI18n`, `addTranslations`, `addRouteTranslations`, `mergeTranslations` a `clearCache`. Vyhodí výjimku, pokud middleware neproběhl. Helpery `getI18n`, `getLocale`, `getDefaultLocale` a `getLocales` čtou stejné `Astro.locals`.
+
+Název routy pochází z routy bez její lokalizace: `/fr/blog/post` → `blog-post` a každá URL ze `src/pages/blog/[slug].astro` → `blog-slug`, takže jedna složka `locales/pages/blog-slug/` obslouží všechny. `[...path]` je `path`. Při `base` v Astru helpery přijímají a vracejí URL webu: `switchLocalePath` a `localizePath` ho zahrnují, `getBasePath` ne, protože `Astro.rewrite` přijímá cestu bez něj.
+
+### Komponenty {#components}
+
+Importujte je z `@i18n-micro/astro/<name>` (nebo `@i18n-micro/astro/components/<name>.astro`):
+
+| Komponenta | Props |
+| --- | --- |
+| `i18n-t` | `keypath`, `params`, `plural`, `number`, `date`, `relativeDate`, `tag` (`span`, libovolný tag), `html`, `hideIfEmpty`, `defaultValue`; ostatní atributy se předají dál. S `html` se výsledek každé větve vykreslí jako HTML a `params` se escapují. Sloty nejsou |
+| `i18n-link` | `href`, `locale` (cílová lokalizace, výchozí aktuální), `class`; ostatní atributy se předají dál. Externí URL, `#hash` a `?query` zůstanou tak, jak jsou zapsány; routa si ponechá svůj query, hash a koncové lomítko |
+| `i18n-switcher` | `class`, `activeClass` (`'active'`), `customLabels`; vykreslí odkazy na aktuální stránku v každé povolené lokalizaci, včetně jejího query |
+| `i18n-group` | žádné, které by měnily výstup: `<div>` kolem svého slotu, bez prefixu |
+
+## Routy s prefixem lokalizace {#locale-prefixed-routes}
+
+Ponechte jednu stránku na routu v `src/pages/` a přidejte tenké rewrite stuby pod `src/pages/[locale]/`:
+
+```
+src/pages/
+  index.astro
+  about.astro
+  [locale]/
+    index.astro
+    about.astro
+```
+
+```astro
+---
+// src/pages/[locale]/about.astro
+import { prepareLocaleRewrite } from '@i18n-micro/astro'
+
+const target = prepareLocaleRewrite(Astro)
+if (target instanceof Response) return target
+return Astro.rewrite(target)
+---
+```
+
+`prepareLocaleRewrite` vrací odpověď `404` pro neznámé `:locale`, jinak nastaví lokalizaci na `Astro.locals` a vrátí cestu bez prefixu. Middleware ponechá lokalizaci, která už je v `locals`, takže se přepsaná stránka vykreslí v ní. `getLocaleRewritePath(Astro)` vrací pouze cestu, pokud lokalizaci validujete sami.
+
+## Detekce lokalizace {#locale-detection}
+
+O lokalizaci stránky rozhoduje URL:
+
+1. Prefix lokalizace (`/fr/about` → `fr`; `/en/about` je také `en`).
+2. Jinak to, co vrátí `getLocaleFromPath` router adaptéru, pokud to není výchozí lokalizace.
+3. Jinak výchozí lokalizace. `/about` je vždy stránkou výchozí lokalizace, ať říká cookie cokoli.
+
+`autoDetect` je nápověda pro přesměrování pouze na domovské stránce:
+
+- Požadavek na `/`, jehož cookie nebo `Accept-Language` preferuje jinou lokalizaci, dostane `302` na domovskou stránku této lokalizace (`/de`). Váhy q se respektují; `de-DE` odpovídá lokalizaci `de` a `de` odpovídá lokalizaci `de-DE`.
+- S `redirectToDefault` `/` přesměruje vždy: na domovskou stránku preferované lokalizace, jinak výchozí lokalizace.
+- Odpověď na `/` nese `Vary: Cookie, Accept-Language` (pouze `Accept-Language`, když je `localeCookie` `null`).
+- Předrenderované stránky nikdy nepřesměrovávají.
+
+`detectLocale(pathname, cookies, headers, defaultLocale, locales, localeCookie?, routingStrategy?, autoDetect?)` vrací stejnou preferovanou lokalizaci pro vaši vlastní logiku.
+
+Cookie si pamatuje volbu. Zobrazení stránky, které přichází ze stránky stejného původu v jiné lokalizaci, znamená, že návštěvník přepíná, ať ho tam přivedl jakýkoli odkaz: HTML odpověď nastaví cookie na novou lokalizaci a `/` nepřesměruje, takže přepínač dosáhne domovské stránky výchozí lokalizace. Endpoint, obrázek, 404, odeslání formuláře a prefetch nic nemění. „Stejný původ“ je to, co prohlížeč uvádí v `Sec-Fetch-Site`; bez této hlavičky se porovnává host z `Referer` s hostem požadavku, takže za proxy nastavte v Astru `security.allowedDomains`.
+
+[Serverový ostrov](https://docs.astro.build/en/guides/server-islands/) nebo akce nemá ve své URL lokalizaci. Vykreslí se pro stránku, která o něj požádala, načtenou z `Referer`, u kterého se počítá jen cesta, takže proxy před serverem nic nemění, a nikdy nepřesměrovává. Jeho odpověď nese `Vary: Referer`. Bez `Referer` (politika `no-referrer`) je ve výchozí lokalizaci a na dynamické stránce jeho routa pochází z URL, takže se k němu slovníky stránky nedostanou.
+
+## Router adaptér {#router-adapter}
+
+`createAstroRouterAdapter(locales, defaultLocale)` přidává prefix každé lokalizaci kromě výchozí. Adaptér pro Astro potřebuje pouze `getCurrentPath`; ostatní členy jsou volitelné a vracejí se k výchozímu adaptéru: `getRouteName(path, locales, routePattern?)`, `getLocaleFromPath`, `switchLocalePath`, `localizePath`, `removeLocaleFromPath`, `resolvePath` (cíl přesměrování domovské stránky), `push`, `replace`, `getRoute`. Pro URL se subdoménami nebo sufixy napište vlastní a předejte ho do `createI18nMiddleware`.
+
+## SEO {#seo}
+
+```astro
+---
+// src/layouts/Layout.astro
+import { useLocaleHead } from '@i18n-micro/astro'
+
+const head = useLocaleHead(Astro, { baseUrl: 'https://example.com' })
+---
+
+<html lang={head.htmlAttrs.lang} dir={head.htmlAttrs.dir}>
+  <head>
+    {head.link.map((l) => <link rel={l.rel} href={l.href} hreflang={l.hreflang} />)}
+    {head.meta.map((m) => <meta property={m.property} content={m.content} />)}
+  </head>
+  <body><slot /></body>
+</html>
+```
+
+Vrací `htmlAttrs` (`lang` z `iso`, `dir`), canonical odkaz (cesta bez query), alternativy `hreflang` pro každou povolenou lokalizaci se `seo !== false` plus `x-default`, `og:locale`, `og:locale:alternate` a `og:url`. Možnosti: `baseUrl` (`site` z konfigurace Astra, jinak URL relativní ke kořeni), `addDirAttribute` (`true`), `addSeoAttributes` (`true`), `hreflangBaseLanguage` (`false`).
+
+## Související {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Ostrovy v Astru" icon="book-open" href="/cs/integrations/astro-islands">
+
+Překlady uvnitř ostrovů Vue, React, Preact a Svelte
+
+</Card>
+
+<Card title="Frameworky" icon="book-open" href="/cs/integrations/overview">
+
+Možnosti instance a formátování
+
+</Card>
+
+<Card title="Reference balíčku" icon="brackets-curly" href="/cs/api/packages/astro">
+
+</Card>
+
+</CardGroup>

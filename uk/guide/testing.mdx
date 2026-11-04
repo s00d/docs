@@ -1,0 +1,147 @@
+---
+title: "Тестування застосунку"
+description: "Модульне тестування компонентів, що використовують $t, за допомогою @i18n-micro/test-utils і Vitest, та наскрізна перевірка локалізованих сторінок."
+---
+
+Компонентам, які викликають `useI18n()`, у модульних тестах потрібен екземпляр i18n. `@i18n-micro/test-utils` надає фейковий `useI18n()` зі справжньою логікою перекладу, плюралізації та форматування, тож ви можете змонтувати компонент із власними словниками без сервера Nuxt. Для маршрутизації та перенаправлень запускайте справжній модуль наскрізно за допомогою `@nuxt/test-utils`.
+
+Ця сторінка присвячена тестуванню вашого застосунку. Як цей репозиторій тестує сам модуль, описано на сторінці [Тестування модуля](https://s00d.github.io/nuxt-i18n-micro/contributing/testing).
+
+## Встановлення {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add -D @i18n-micro/test-utils @nuxt/test-utils vitest @vue/test-utils happy-dom
+```
+
+```bash npm
+npm install -D @i18n-micro/test-utils @nuxt/test-utils vitest @vue/test-utils happy-dom
+```
+
+</CodeGroup>
+
+## Мок useI18n {#mock-usei18n}
+
+```ts
+// tests/unit-setup.ts
+import { setupNuxtI18nMock } from '@i18n-micro/test-utils'
+import { mockNuxtImport } from '@nuxt/test-utils/runtime'
+import { beforeEach, vi } from 'vitest'
+
+export const { i18n, useI18n, setTranslationsFromJson } = setupNuxtI18nMock({
+  spy: vi.fn, // every method becomes a vi.fn, so you can assert calls
+  beforeEach, // reset state and reseed `translations` before each test
+  translations: { welcome: 'Welcome' },
+})
+
+mockNuxtImport('useI18n', () => useI18n)
+```
+
+```ts
+// vitest.config.ts
+import { defineVitestConfig } from '@nuxt/test-utils/config'
+
+export default defineVitestConfig({
+  test: {
+    environment: 'nuxt',
+    setupFiles: ['./tests/unit-setup.ts'],
+  },
+})
+```
+
+Тримайте `mockNuxtImport` у файлі налаштування: `@nuxt/test-utils` має його трансформувати. `setupNuxtI18nMock` використовує приватний кеш перекладів, тож паралельні тестові файли не мають спільного стану.
+
+## Написання тесту {#write-a-test}
+
+```vue
+<!-- components/Greeting.vue -->
+<script setup lang="ts">
+const { $t } = useI18n()
+</script>
+
+<template>
+  <p>{{ $t('welcome') }}</p>
+</template>
+```
+
+```ts
+// tests/greeting.spec.ts
+import { mountSuspended } from '@nuxt/test-utils/runtime'
+import { expect, it } from 'vitest'
+import Greeting from '~/components/Greeting.vue'
+import de from '~/locales/de.json'
+import { i18n, setTranslationsFromJson } from './unit-setup'
+
+it('renders the German greeting', async () => {
+  await setTranslationsFromJson('de', de)
+  i18n.setLocale('de')
+
+  const wrapper = await mountSuspended(Greeting)
+  expect(wrapper.text()).toBe('Willkommen') // de.json: { "welcome": "Willkommen" }
+})
+```
+
+Фейк надає ті самі методи, що й справжній `useI18n()` (`$t`, `$tc`, `$tn`, `$td`, `$has`, `$localePath`, …, з `$` і без нього), а також сетери для тестів: `setLocale`, `setLocales`, `setDefaultLocale`, `setRouteName`, `setTranslationsFromJson`, `loadPageTranslations`, `mergeTranslations`, `setMissingHandler`.
+
+`$localePath` і `$switchLocalePath` — це заглушки, які додають префікс до шляху відповідно до опції `strategy` (без справжнього роутера). Справжні посилання та перенаправлення тестуйте наскрізно.
+
+## Низькорівневі хелпери {#lower-level-helpers}
+
+| Хелпер | Для чого |
+| --- | --- |
+| `createIsolatedFakeI18n(options)` | Ізольований фейк без прив'язки до Nuxt `useI18n`, напр., для звичайного `mount` з `@vue/test-utils` з `global.mocks`. |
+| `createFakeI18n(options)` | Фейк на спільному кеші модуля (викликайте `resetI18n()` у `beforeEach`) або ізольований з `isolated: true`. |
+| `createI18nTestContext(options)` | Контекст, що лежить в основі обох, коли потрібно кілька фейків. |
+| `t`, `tc`, `ts`, `tn`, `td`, `tdr`, `has` | Прямі виклики на спільному контексті для тестування звичайних функцій. |
+
+Мок є `BaseI18n`: `t`, `tc`, `tn`, `td`, `tdr` і `has` — справжні, на справжніх словниках, тож тест бачить те саме, що показує застосунок.
+
+Наведені вище фабричні хелпери приймають `locale`, `defaultLocale`, `locales`, `routeName`, `strategy`, `translations` і `messages` (словники для кожної локалі). Повний приклад проєкту знаходиться в [`packages/test-utils/example`](https://github.com/s00d/nuxt-i18n-micro/tree/main/packages/test-utils/example).
+
+## Наскрізні тести {#end-to-end-tests}
+
+Маршрутизація, перенаправлення, SEO-теги та завантаження payload потребують справжнього модуля. Запустіть застосунок за допомогою `@nuxt/test-utils/e2e`:
+
+```ts
+// tests/e2e/locales.test.ts
+import { $fetch, fetch, setup } from '@nuxt/test-utils/e2e'
+import { describe, expect, it } from 'vitest'
+
+describe('locales', async () => {
+  await setup({ server: true })
+
+  it('serves the German page', async () => {
+    expect(await $fetch('/de')).toContain('lang="de-DE"')
+  })
+
+  it('redirects / for a German browser', async () => {
+    const res = await fetch('/', { headers: { 'accept-language': 'de' }, redirect: 'manual' })
+    expect(res.headers.get('location')).toBe('/de')
+  })
+})
+```
+
+Другий тест передбачає `prefix` (або `prefix_except_default` з іншою локаллю за замовчуванням); коли `/` перенаправляє, див. у [Визначенні локалі](/uk/guide/locale-detection).
+
+## Пов'язане {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Тестування модуля" icon="code-pull-request" href="https://s00d.github.io/nuxt-i18n-micro/contributing/testing">
+
+</Card>
+
+<Card title="useI18n" icon="brackets-curly" href="/uk/composables/useI18n">
+
+</Card>
+
+<Card title="Визначення локалі" icon="book-open" href="/uk/guide/locale-detection">
+
+</Card>
+
+<Card title="Storybook" icon="book-open" href="/uk/guide/storybook">
+
+</Card>
+
+</CardGroup>

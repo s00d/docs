@@ -1,0 +1,83 @@
+---
+title: "v3.20.0 — refaktoryzacja warstwy runtime i rozdzielenie przekierowań"
+description: "Informacje o wydaniu: v3.20.0 — refaktoryzacja warstwy runtime i rozdzielenie przekierowań"
+---
+
+**Data**: 2026-05-14
+
+**Wersja**: `v3.20.0`
+
+![Wydanie v3.20.0](/images/3.20.0.png)
+
+To wydanie przenosi runtime Nuxt do dedykowanej warstwy **`NuxtI18n`**, rozdziela obsługę przekierowań po stronie serwera i klienta oraz naprawia kilka regresji SSR/hydratacji. Publiczne composables i opcje `nuxt.config` pozostają takie same w typowych aplikacjach.
+
+## Co nowego? {#what’s-new}
+
+### `NuxtI18n` i `NuxtTranslationLoader` {#nuxti18n-&-nuxttranslationloader}
+
+Logika i18n w czasie działania zostaje przeniesiona z monolitycznej wtyczki do wyspecjalizowanych klas:
+
+- **`NuxtI18n`** — warstwa aktywnego widoku tłumaczeń (`$t`, `$has`, kontekst locale/trasy, scalanie/czyszczenie przy przejściach)
+- **`NuxtTranslationLoader`** — ładuje fragmenty, przełącza kontekst podczas nawigacji, zasila payload SSR
+- **`createNuxtI18nPluginApi`** — cienka warstwa API wtyczki (`$switchLocale`, `$localeRoute` itd.)
+
+Zobacz zaktualizowane strony [Cache & Storage Architecture](https://s00d.github.io/nuxt-i18n-micro/v3/api/i18n-cache-api) i [Wydajność](/pl/guide/performance).
+
+### Payload SSR przez `useState('i18n-ssr-chunks')` {#ssr-payload-via-usestate‘i18n-ssr-chunks’}
+
+Tłumaczenia SSR są serializowane przez **stan Nuxt**, a nie przez znacznik script `window.__I18N__`:
+
+1. Serwer ładuje fragmenty → `useState('i18n-ssr-chunks')`
+2. Klient wykonuje hydratację → `translationStorage.seedFromSsrChunks()`
+3. Zero dodatkowych pobrań przy pierwszym renderowaniu
+
+Dotychczasowa ścieżka odczytu `window.__I18N__` została **usunięta**.
+
+### Rozdzielenie architektury przekierowań {#redirect-architecture-split}
+
+Przekierowania są teraz zależne od środowiska, co daje czytelniejsze zachowanie i mniej szarpnięć po stronie klienta:
+
+| Środowisko     | Komponent                      | Rola                                       |
+| -------------- | ------------------------------ | ------------------------------------------ |
+| **Server SSR** | `06.redirect.ts` (tylko serwer) | 302 przed renderowaniem, sprawdzanie 404, synchronizacja ciasteczka |
+| **Client SPA** | `i18n-redirect.global.ts`      | Globalne middleware trasy podczas nawigacji |
+
+Przekierowania po stronie klienta wyznaczają locale na podstawie **trasy docelowej**, zachowują **query string i hash** oraz respektują `redirects: false` (middleware nie jest wtedy rejestrowane). Zobacz [Wykrywanie locale — przekierowania dla każdej strategii](/pl/guide/locale-detection#redirects-per-strategy).
+
+### Moment wywołania hooka `i18n:register` {#i18nregister-hook-timing}
+
+Wtyczka **`05.hooks`** (`dependsOn: i18n-plugin-loader`) wywołuje `i18n:register` po przygotowaniu loadera — przy starcie i podczas nawigacji — dzięki czemu wtyczki użytkownika niezawodnie otrzymują to zdarzenie. Wyłącz za pomocą `hooks: false`. Zobacz [Zdarzenia](/pl/api/events).
+
+### Ekstrakcja `defineI18nRoute` w czasie budowania {#build-time-definei18nroute-extraction}
+
+Unplugin Vite skanuje pliki stron `.vue` w czasie budowania i zapisuje metadane tras dla `@i18n-micro/route-strategy`. `$defineI18nRoute` w czasie działania w `script setup` pozostaje dostępne dla trybu deweloperskiego i konfiguracji inline. Zobacz [Tłumaczenia na poziomie komponentu](/pl/guide/per-component-translations).
+
+## Poprawki błędów {#bug-fixes}
+
+- **Hydratacja SSR** — klonowanie reaktywnych fragmentów SSR przed `Object.freeze` (naprawia awarie `#locale` / 404 po stronie klienta)
+- **Przełączanie locale** — zastąpienie warstwy widoku przy zmianie locale (brak nieaktualnych kluczy z poprzedniego locale)
+- **Przekierowanie po stronie klienta** — locale z trasy docelowej; query/hash zachowane przy przekierowaniu
+- **`has()`** — sprawdza tylko aktywne locale; mechanizm zapasowy działa w `$t()`, a nie w `$has()`
+- **Metadane `defineI18nRoute`** — pamięć podręczna na instancję wtyczki; najdłuższe dopasowanie `rootDir`; poprawne ścieżki `pages/index` vs `pages/index/index`
+
+## Dokumentacja {#documentation}
+
+Przewodniki i dokumentacja API zostały zaktualizowane pod kątem nowej architektury:
+
+- [Strategia](/pl/guide/strategy), [Aktualizacja do v3](https://s00d.github.io/nuxt-i18n-micro/v3/guide/v3-upgrade), [Niestandardowe wykrywanie języka](/pl/guide/custom-auto-detect)
+- [FAQ — przełączanie locale bez zmiany adresu URL](/pl/guide/faq#can-i-switch-locale-without-changing-the-url?)
+- [Konfiguracja](https://s00d.github.io/nuxt-i18n-micro/v3/guide/configuration) — zachowanie `redirects` i `hooks`
+
+## Zmiany niekompatybilne wstecz {#breaking-changes}
+
+Brak przy standardowym użyciu `nuxt.config` + composables. Zmieniły się wewnętrzne ścieżki i mechanizm wstrzykiwania SSR; aplikacje, które polegały na ręcznym wstrzykiwaniu `window.__I18N__`, muszą zamiast tego używać payloadu Nuxt / API modułu.
+
+## Dlaczego to ważne {#why-it-matters}
+
+- **Bardziej niezawodne przekazanie SSR → klient** — natywny stan Nuxt zamiast doraźnych zmiennych globalnych
+- **Czytelniejszy model przekierowań** — 302 na serwerze przed renderowaniem; middleware klienta tylko tam, gdzie jest potrzebne
+- **Łatwiejsze utrzymanie** — runtime podzielony na testowalne jednostki z ukierunkowanymi testami regresji
+
+Pełny changelog zostanie opublikowany wraz z wydaniem na [GitHubie](https://github.com/s00d/nuxt-i18n-micro/blob/main/CHANGELOG.md).
+
+---

@@ -1,0 +1,115 @@
+---
+title: "v3.0.0 — Teljesítményoptimalizálás, Route & Path Strategy csomagok"
+description: "Kiadási megjegyzések: v3.0.0 — Teljesítményoptimalizálás, Route & Path Strategy csomagok"
+---
+
+**Dátum**: 2026-02-04
+
+**Verzió**: `v3.0.0`
+
+![v3.0.0 kiadás](/images/3.0.0.png)
+
+Bejelentjük a **v3.0.0** verziót, amely **jelentős architekturális átalakítást** hoz: a fordítástároló rendszer teljes újraírását a maximális teljesítmény érdekében, az útvonalgenerálás és a futásidejű útvonallogika külön csomagokba került, a átirányítási folyamatot pedig a nagyobb megbízhatóság és a Serverless-kompatibilitás érdekében újraterveztük.
+
+## Mi újság? {#what’s-new}
+
+### Teljesítményoptimalizálás — új fordítástároló architektúra {#performance-optimization-—-new-translation-storage-architecture}
+
+A fordítások betöltési és gyorsítótárazási rendszerét a maximális teljesítmény érdekében teljesen újraírtuk:
+
+- **Központosított TranslationStorage osztály** — Egy új `TranslationStorage` osztály (`src/runtime/utils/storage.ts`) egységes tárolót biztosít a kliens és a szerver számára. A `globalThis` és a `Symbol.for` használatával valódi singletont garantál a teljes Node.js folyamatban, megakadályozva a gyorsítótár megkettőződését a csomagolt modulok között.
+
+- **Optimalizált `$t()` függvény (tFast)** — A fordítófüggvény közvetlen keresést végez egyetlen aktív szótárban:
+  1. Minden fordítás (gyökér + oldalspecifikus + tartalék) build időben előre egyesítve kerül oldalanként egyetlen fájlba
+  2. Azonos locale-on belüli navigáláskor az új oldal fordításai kumulatívan beolvadnak az aktív szótárba (megakadályozza a kulcsok villódzását az átmeneti animációk alatt)
+  3. Támogatja a beágyazott kulcsokat (`key.subkey.subsubkey`) optimalizált útvonalfeloldással
+  4. Nincs Map-keresés és locale-/útvonalszámítás minden hívásnál — előre kiszámított kontextust használ
+
+- **Szerveroldali befecskendezés a `window.__I18N__` segítségével** — Az SSR során betöltött fordítások script tagként kerülnek a HTML-be. A kliens az első betöltéskor közvetlenül a `window.__I18N__` objektumból olvas, elkerülve a duplikált lekéréseket.
+
+- **Helyi chunk-gyorsítótár a pluginban** — A plugin egy helyi `loadedChunks` Map-et tart fenn, amely az összes betöltött fordítási chunkot tárolja. A betöltött fordításokat az oldal életciklusa alatt soha nem kéri le újra.
+
+- **Build idejű előzetes egyesítés** — A `module.ts` egy `preMergeLocales` lépése build időben minden oldalfájlba beolvasztja az összes réteget, a tartalék locale-láncokat és a gyökérszintű fordításokat. A server-loader egyszerűen beolvas egyetlen előre elkészített fájlt — futásidejű egyesítésre nincs szükség.
+
+**Teljesítménybeli javulások:**
+
+- Kevesebb memóriafoglalás kérésenként (nincs objektum-újralétrehozás minden `$t()` hívásnál)
+- Kisebb terhelés a szemétgyűjtőn
+- Gyorsabb válaszidők terhelés alatt
+- Stabil memóriahasználati minta (nincsenek „ugráló” grafikonok)
+
+### Route & Path Strategy csomagok {#route-&-path-strategy-packages}
+
+- **@i18n-micro/route-strategy** — Build idejű útvonalgenerálás: lokalizált útvonalakkal bővíti a Nuxt oldalakat, kezeli az aliasokat, a beágyazott útvonalakat és a stratégiánkénti egyéni útvonalakat. Egyetlen belépési pont: `new RouteGenerator(options)` és `extendPages(pages)`. A stratégiák (`no_prefix`, `prefix`, `prefix_except_default`, `prefix_and_default`) külön osztályokként vannak megvalósítva, és egy factory választja ki őket.
+- **@i18n-micro/path-strategy** — Futásidejű útvonal- és locale-kezelés: a `PathStrategy` segítségével lokalizált útvonalakat építhetsz, átirányításokat oldhatsz fel és locale-t válthatsz. Tree-shake-elhető alútvonal-exportok (`/prefix`, `/no-prefix` stb.), így csak a kiválasztott stratégia kerül a bundle-be. Tiszta függvényeket használ az útvonalfeloldáshoz és előre kiszámított kontextusjelzőket a minimális memóriafoglalás érdekében.
+- **Strukturált csomagelrendezés** — Az útvonallogika a `@i18n-micro/route-strategy` csomagban található, `core/` és `strategies/` könyvtárakkal. A path strategy a `@i18n-micro/path-strategy` csomagban van, lapos `src/` szerkezettel: `types.ts`, `path.ts`, `resolver.ts`, `helpers.ts` és `strategies/`.
+- **Következetes működés** — Az aliasok kezelését, a szülő–gyermek útvonalak összefűzését, az egyéni `globalLocaleRoutes` / `filesLocaleRoutes` / `routeLocales` beállításokat és a megváltoztathatatlansági garanciákat egy külön tesztkészlet fedi le.
+
+### Az átirányítási architektúra átalakítása {#redirect-architecture-overhaul}
+
+- **Szerver middleware** — Az átirányítások és a 404-kezelés Nitro middleware-ben (`i18n.global.ts`) futnak. Ez a Nuxt renderelés előtt fut le, így a `/` útvonalról a `/<locale>/` útvonalra történő átirányítás hibavillanás nélkül megy végbe, ha van locale-süti.
+- **Kliens plugin (kliensoldali)** — Egy csak kliensoldali plugin (`06.client-redirect.client.ts`) a hidratálás után fut, és kezeli az átirányításokat, ha a `useI18nLocale()` vagy egy süti nem alapértelmezett locale-t állít be. A Nitro a Nuxt előtt fut, így a szerver nem látja a felhasználói pluginok által végzett süti-/állapotváltozásokat; ezt az esetet a kliens plugin fedi le.
+- **Nincs tartalék komponens** — A `locale-redirect.vue` tartalék komponens és a `fallbackRedirectComponentPath` opció megszűnt. Az átirányítási logikát teljes egészében a szerver middleware és a kliens plugin kezeli.
+- **Egyéni útvonalak támogatása** — Az olyan útvonalakat, mint a német `/kontakt` (a `globalLocaleRoutes` segítségével), a rendszer locale-előtag nélkül is helyesen érvényesnek ismeri fel, elkerülve a hibás 404-eket előrenderelés közben.
+- **customRegexMatcher javítás** — A `customRegexMatcher` használatakor a minta most a **teljes** első útvonalszegmensre illeszkedik (`^` és `$` horgonyokkal). Ez megakadályozza a téves 404-eket olyan útvonalaknál, mint a `/locale-test`, ahol a `[a-z]{2}-[a-z]{2}` minta korábban részkarakterláncokra illeszkedett volna.
+- **autoDetectPath javítás** — Az `autoDetectPath` opció most helyesen az eredeti URL-útvonallal hasonlít össze, megakadályozva a nem kívánt átirányításokat, amikor kifejezetten locale-előtagos URL-ekre navigálsz.
+
+### useI18nLocale composable {#usei18nlocale-composable}
+
+- **Központosított locale-kezelés** — Az új `useI18nLocale()` composable felváltja a `useLocaleCookies` composable-t, és egyetlen belépési pontot biztosít a locale-állapothoz, a sütikhez és a szinkronizálási segédeszközökhöz.
+- **API** — `locale`, `localeCookie`, `hashCookie`, `getLocale()`, `getPreferredLocale()`, `setLocale()`, `syncLocale()`, `isValidLocale()`, `getEffectiveLocale()`, `resolveInitialLocale()`.
+- **Programozott locale** — Szerverpluginokban a `useState('i18n-locale')` helyett használd a `useI18nLocale().setLocale(locale)` hívást a tisztább, központosított locale-kezelés érdekében.
+
+### Egyéni automatikus felismerés és konfiguráció {#custom-auto-detection-&-configuration}
+
+- **`getI18nConfig()`** — Az egyéni pluginoknak (pl. locale-felismeréshez) a `useRuntimeConfig().public.i18nConfig` helyett a `#build/i18n.strategy.mjs` modulból származó `getI18nConfig()` függvényt kell használniuk. Ez közvetlen hozzáférést biztosít a feloldott i18n-konfigurációhoz (pl. `localeCookie`) a futásidejű konfigurációra támaszkodás nélkül.
+- **Süti neve** — Egyéni felismerési logika megvalósításakor használd a `getI18nConfig().localeCookie ?? 'user-locale'` kifejezést.
+
+### Egyszerűsített integrációs csomagok {#simplified-integration-packages}
+
+Az összes integrációs csomagot (`@i18n-micro/vue`, `@i18n-micro/astro`, `@i18n-micro/node`, `@i18n-micro/react`, `@i18n-micro/preact`, `@i18n-micro/solid`) egyszerűsítettük és optimalizáltuk; ugyanazt a központi fordítási logikát használják.
+
+### Konfigurációs változások {#configuration-changes}
+
+- **A `previousPageFallback` megszűnt** — Erre az opcióra már nincs szükség. Az új kumulatív egyesítési stratégia automatikusan elérhetőként tartja az előző oldal fordításait az átmeneti animációk alatt, majd a `page:transition:finish` hookon keresztül eltakarítja őket.
+- **`hmr`** — Az `experimental.hmr` helyett most legfelső szintű opció. A fordítási fájlok szerveroldali HMR-jét vezérli (fejlesztéskor alapértelmezetten engedélyezve).
+
+```typescript
+// Before (v2.x)
+export default defineNuxtConfig({
+  i18n: {
+    experimental: {
+      hmr: true,
+    },
+  },
+})
+
+// After (v3.0.0)
+export default defineNuxtConfig({
+  i18n: {
+    hmr: true,
+  },
+})
+```
+
+## Kompatibilitástörő változások {#breaking-changes}
+
+- **`fallbackRedirectComponentPath`** — Eltávolítva. A modul már nem használ tartalék útvonalkomponenst az átirányításokhoz. Ha egyéni komponensútvonalat állítottál be, távolítsd el a konfigurációdból.
+- **`useLocaleCookies`** — Eltávolítva. Helyette használd a `useI18nLocale()` composable-t. Az új composable biztosítja a `locale`, `localeCookie`, `hashCookie`, `setLocale()`, `syncLocale()` és további elemeket.
+- **`experimental.i18nPreviousPageFallback` / `previousPageFallback`** — Teljesen eltávolítva. A kumulatív egyesítési stratégia automatikusan kezeli az átmenetek alatti villódzást. Távolítsd el ezt az opciót a konfigurációdból.
+- **`experimental.hmr`** — Áthelyezve ide: `hmr`. Frissítsd a konfigurációdat, ha használtad ezt az opciót.
+- **Egyéni pluginok** — Ha az egyéni locale-felismerő pluginod a `useRuntimeConfig().public.i18nConfig` értéket használta, válts a `#build/i18n.strategy.mjs` modulból származó `getI18nConfig()` függvényre. A `useState('i18n-locale')` helyett inkább a `useI18nLocale().setLocale()` hívást használd. A frissített példákat lásd az [Egyéni nyelvfelismerés](/hu/guide/custom-auto-detect) oldalon.
+- **Belső fájlváltozások** — A `load-from-storage.ts` és a `translation-loader.ts` megszűnt, helyüket a `storage.ts` és a `server-loader.ts` vette át. Ha közvetlenül ezekből a fájlokból importáltál (nem ajánlott), frissítsd az importjaidat.
+
+## Miért fontos? {#why-it-matters}
+
+- **Teljesítmény**: A központosított singleton gyorsítótár megszünteti a kérésenkénti objektumlétrehozást, és csökkenti a szemétgyűjtő terhelését.
+- **Karbantarthatóság**: Az útvonal- és path-logika külön csomagokban él, egyértelmű határokkal és típusokkal.
+- **Tesztelés**: A stratégiák viselkedését és a határeseteket elkülönítve teszteljük.
+- **Megbízhatóság**: A szétválasztott szerveroldali (Nitro) és kliensoldali átirányítási logika elkerüli az időzítési problémákat, amikor a sütit/useState-et felhasználói pluginok állítják be.
+- **Serverless-kész**: A Nitro plugin ugyanabban a kontextusban fut, mint a Nitro handlerek, így kompatibilis az Edge/Workers környezetekkel.
+- **Dokumentáció**: Az útválasztás működését a [Stratégia útmutató](/hu/guide/strategy), valamint a [path-strategy](https://github.com/s00d/nuxt-i18n-micro/tree/main/packages/path-strategy) és a [route-strategy](https://github.com/s00d/nuxt-i18n-micro/tree/main/packages/route-strategy) csomagok dokumentálják.
+
+A frissítési megjegyzésekért és a változások teljes listájáért lásd a [changelogot](https://github.com/s00d/nuxt-i18n-micro/blob/main/CHANGELOG.md).
+
+---

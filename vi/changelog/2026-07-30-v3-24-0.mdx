@@ -1,0 +1,66 @@
+---
+title: "v3.24.0 — SSR trên Node từ `public/`, không còn Rollup `raw:`"
+description: "Ghi chú phát hành: v3.24.0 — SSR trên Node từ public/, không còn Rollup raw:"
+---
+
+**Ngày**: 2026-07-30
+
+**Phiên bản**: `v3.24.0`
+
+![Bản phát hành v3.24.0](/images/3.24.0.png)
+
+Các bản build production cho Node không còn nhúng payload bản dịch dưới dạng Nitro `serverAssets` / Rollup `raw:` (RSS khi build lên tới nhiều GB với các catalog lớn). SSR đọc cùng cây `/{apiBaseUrl}/{page}/{locale}/data.json` mà client tải về — từ `public/` qua `readFile`. Edge vẫn giữ cơ chế nhúng của Nitro và nên ưu tiên `mode: 'source'`.
+
+## Có gì mới? {#what’s-new}
+
+### Node: SSR từ `public/<apiBaseUrl>` {#node-ssr-from-public/&lt;apibaseurl&gt;}
+
+- Các preset Node phục vụ `public/` từ ổ đĩa **không** đăng ký Nitro `serverAssets`.
+- Payload được sao chép vào `public/<apiBaseUrl>` (mặc định `_locales`) dưới dạng `{page}/{locale}/data.json`.
+- SSR tải chúng qua `#i18n-internal/payload-source` → `readFile` (đường dẫn production nằm cạnh `.output/server`).
+- `translationPayloads.serverAssets: true` vẫn có nghĩa là “SSR cục bộ” và **bắt buộc** sao chép vào public ngay cả khi `publicAssets` là false.
+
+Playground (so với cách nhúng `serverAssets` trước đây): ~**1.25 GB** / ~6–7 giây / `raw`=0 so với ~**3 GB** / ~13 giây / ~170 chunk raw.
+
+### Edge: chỉ dùng `serverAssets` khi cần {#edge-serverassets-only-when-needed}
+
+- Edge (`nitro.node === false`) vẫn nhúng qua Nitro `serverAssets` (`assets:i18n`) với cùng bố cục như `mode`.
+- Edge **không** bắt buộc sao chép vào public — hãy đặt `publicAssets: true` cho CDN/tĩnh.
+- Cảnh báo khi dùng Edge + `mode: 'premerged'` (nên dùng `mode: 'source'` cho catalog lớn).
+
+### `publicDir` khớp với URL phía client {#publicdir-aligns-with-client-urls}
+
+- `translationPayloads.publicDir` mặc định là **`apiBaseUrl`** (không phải `translationDir`).
+- Cây public/Edge premerged là `{page}/{locale}/data.json`, khớp với `$fetch('/_locales/...')`.
+- Giá trị mặc định của module không còn đặt `publicAssets: true` lồng nhau (deep-merge của Nuxt từng bắt buộc sao chép vào public ngay cả với `mode: 'source'`).
+
+Xem [Tùy chọn module — `translationPayloads`](/vi/api/module-options#translationpayloads), [Triển khai — serverless và Edge](/vi/guide/deployment#serverless-and-edge) và [Kiến trúc Cache & Storage](https://s00d.github.io/nuxt-i18n-micro/v3/api/i18n-cache-api).
+
+## Thay đổi phá vỡ tương thích {#breaking-changes}
+
+- **Không còn từ điển trong HTML payload SSR của Nuxt.** `payload.data['i18n-ssr-chunks']`, `setSsrChunk` và `seedFromSsrChunks` đã bị **xóa**. Cùng cách tiếp cận mặc định như `@nuxtjs/i18n` (`experimental.preload: false`): server giữ bản dịch trong bộ nhớ cho SSR; client tải `/{apiBaseUrl}/.../data.json` trong quá trình thiết lập plugin (`await switchContext`).
+- **`prerenderRoutes` mặc định là `false`.** Chỉ bật nếu bạn cần Nitro tạo ra các route handler khi `publicAssets` chưa ghi cây (`publicAssets` premerged đã tạo `{page}/{locale}/data.json`).
+- **`publicDir` mặc định là `apiBaseUrl`**, không phải `translationDir`. Output tĩnh chuyển từ ví dụ `public/locales/...` sang `public/_locales/{page}/{locale}/data.json` trừ khi bạn đặt `publicDir` một cách tường minh.
+- **Bố cục storage premerged** giờ là `{page}/{locale}/data.json` (trước đây là `pages/{page}/{locale}.json`). Mọi thứ đọc khóa Nitro/storage hoặc sao chép cây theo cấu trúc cũ đều phải cập nhật.
+- **Trên Node, `serverAssets: true` không còn có nghĩa là nhúng bằng Nitro** — nó có nghĩa là SSR cục bộ qua bản sao public. Cơ chế nhúng Rollup `raw:` thực sự chỉ còn dành cho Edge.
+
+## Di chuyển {#migration}
+
+1. Xóa mọi code đọc `payload.data['i18n-ssr-chunks']` hoặc gọi `seedFromSsrChunks` / `setSsrChunk`.
+2. Với host thuần tĩnh: giữ mặc định premerged + `publicAssets` (file nằm tại `/_locales/.../data.json`), hoặc đặt `prerenderRoutes: true` / lưu payload trên CDN.
+3. Với Cloudflare / Edge khác: đặt `translationPayloads: { mode: 'source' }` cho catalog lớn; chỉ thêm `publicAssets: true` nếu bạn cần bản sao tĩnh/CDN.
+4. Nếu bạn phụ thuộc vào payload trong `public/<translationDir>`, hãy đặt `translationPayloads.publicDir` hoặc trỏ công cụ tới `public/<apiBaseUrl>`.
+
+## Sửa lỗi: bỏ qua locale bị vô hiệu hóa trong payload public premerged {#fix-skip-disabled-locales-in-premerged-public-payloads}
+
+`preMergeLocales` giờ chỉ ghi `{page}/{locale}/data.json` cho các locale được truyền vào quá trình gộp (`locale.disabled: true` tại thời điểm build sẽ bị bỏ qua). Trước đây mọi locale JSON trên ổ đĩa đều được sao chép vào `public/`, nên Nitro static phục vụ các locale bị vô hiệu hóa với mã 200 và bỏ qua handler. `disabledLocales` tại runtime vẫn không thể gỡ các file đã được build — hãy dùng `locale.disabled` khi build nếu bật `publicAssets` / bản sao public cho SSR trên Node.
+
+## Vì sao điều này quan trọng {#why-it-matters}
+
+- Bản build Node luôn gọn nhẹ: không còn đột biến Rollup `raw:` lên tới nhiều GB từ các catalog bản dịch.
+- File public và URL `$fetch` phía client dùng chung một bố cục đường dẫn — hosting tĩnh hoạt động mà không cần ánh xạ lại đặc biệt.
+- Edge vẫn có thể nhúng payload `source` gọn nhẹ mà không bắt buộc phải có cây public trùng lặp.
+
+Changelog đầy đủ sẽ được công bố cùng bản phát hành trên [GitHub](https://github.com/s00d/nuxt-i18n-micro/blob/main/CHANGELOG.md).
+
+---

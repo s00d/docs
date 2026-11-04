@@ -1,0 +1,132 @@
+---
+title: "File di traduzione"
+description: "Dove risiedono le chiavi di traduzione, come i file root e di pagina si combinano con i fallback e come una pagina carica il suo dizionario."
+---
+
+Le traduzioni sono semplici file JSON: un file root per locale per le chiavi condivise, e un file per pagina e locale per le chiavi di quella pagina. Leggi questa pagina quando aggiungi pagine, condividi chiavi tra di esse o configuri i fallback. Scoprirai in quale file deve stare una chiave, cosa può vedere una pagina e quando viene caricato ciascun file.
+
+## Struttura {#layout}
+
+```text
+locales/
+├── en.json                 # root: menus, footer, buttons
+├── de.json
+└── pages/
+    ├── index/              # pages/index.vue
+    │   ├── en.json
+    │   └── de.json
+    ├── about/              # pages/about.vue
+    │   ├── en.json
+    │   └── de.json
+    └── products-id/        # pages/products/[id].vue
+        ├── en.json
+        └── de.json
+```
+
+- La cartella sotto `locales/pages/` è il **nome della route** Nuxt della pagina: `pages/products/[id].vue` è `products-id`, `pages/blog/[slug]/comments.vue` è `blog-slug-comments`.
+- Le chiavi possono essere annidate a qualsiasi profondità; `$t('auth.form.login')` legge `{ "auth": { "form": { "login": … } } }`.
+- `translationDir` sposta la cartella (`'locales'` per default, relativa alla root del progetto, anche con la struttura `app/` di Nuxt 4).
+- I file mancanti vengono creati come `{}` quando Nuxt risolve le pagine, a meno che non sia impostato [`disableWatcher`](/it/api/module-options#disablewatcher).
+
+## Cosa vede una pagina {#what-a-page-sees}
+
+![Ordine di ricerca di una chiave su /about in de: pages/about/de.json, de.json, pages/about/en.json, en.json. Vengono uniti in un unico about/de/data.json letto da $t](/images/diagrams/page-dictionary.svg)
+
+Il dizionario di una pagina è il suo file root unito al suo file di pagina, in profondità (a ogni livello). In caso di conflitto prevale il file di pagina:
+
+```json
+// locales/en.json
+{ "title": "My shop", "nav": { "home": "Home", "cart": "Cart" } }
+```
+
+```json
+// locales/pages/about/en.json
+{ "title": "About us", "nav": { "cart": "Basket" } }
+```
+
+```ts
+// on /about
+t('title') // 'About us'
+t('nav.home') // 'Home'   (root)
+t('nav.cart') // 'Basket' (page wins)
+// on any other page
+t('title') // 'My shop'
+```
+
+Una pagina senza una propria cartella riceve solo il dizionario root. Le chiavi delle altre pagine non sono visibili.
+
+### Locale di fallback {#fallback-locales}
+
+Una chiave mancante nella locale attiva viene presa dalla sua locale di fallback prima di mostrare la chiave stessa:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    locales: [
+      { code: 'en', iso: 'en-US' },
+      { code: 'de', iso: 'de-DE' },
+      { code: 'de-at', iso: 'de-AT', fallbackLocale: 'de' },
+    ],
+    defaultLocale: 'en',
+    fallbackLocale: 'en', // global, for every locale
+  },
+})
+```
+
+- Il `fallbackLocale` proprio di una locale viene seguito fino in fondo: `de-at` → `de` → `en`.
+- Il `fallbackLocale` globale è il livello più debole, sotto ogni catena.
+- Ogni locale della catena aggiunge il suo file root, poi il suo file di pagina, dal fallback più debole fino alla locale attiva. Quindi il file root della locale attiva prevale sul file di pagina di una locale di fallback.
+
+Senza fallback, una chiave mancante viene renderizzata come la chiave stessa (`'nav.home'`) e in sviluppo genera un avviso nella console del browser ([`missingWarn`](/it/api/module-options#missingwarn)).
+
+## Condivisione e altre sorgenti {#sharing-and-other-sources}
+
+| Esigenza | Opzione |
+| --- | --- |
+| Solo file root, nessuna cartella `pages/` | [`disablePageLocales: true`](/it/api/module-options#disablepagelocales) |
+| Due pagine leggono la stessa cartella di pagina | [`routesLocaleLinks`](/it/api/module-options#routeslocalelinks): `{ 'about-us': 'about' }` |
+| File root condivisi in un'altra cartella | [`additionalTranslationDirs`](/it/api/module-options#additionaltranslationdirs): `['common']` (prevale il `translationDir` principale) |
+| Chiavi da un layer Nuxt | I file dei layer vengono uniti, prevalgono i file del progetto. Vedi [Layer](/it/guide/layers) |
+| Chiavi aggiunte a runtime | l'hook [`i18n:register`](/it/api/events), `$mergeTranslations`, `$setTranslation` |
+| Chiavi inline in un componente di pagina | `$defineI18nRoute({ locales: { en: { … } } })`, vedi [Configurazione della pagina](/it/guide/per-component-translations) |
+
+## Come una pagina carica il suo dizionario {#how-a-page-loads-its-dictionary}
+
+![I file JSON delle locale vengono compilati in un albero di payload, salvati in public/ su Node o negli asset del server su Edge, letti da un loader server, quindi usati da $t sul server e scaricati per $t nel browser](/images/diagrams/translation-pipeline.svg)
+
+Il modulo crea un payload per pagina e locale: `/{apiBaseUrl}/{page}/{locale}/data.json` (`/_locales/about/de/data.json` per default).
+
+1. **Render sul server.** Nitro rileva la locale e la pagina carica il suo payload direttamente dal loader del server, senza richiesta HTTP. Il dizionario non viene scritto nel payload HTML, quindi le pagine restano leggere.
+2. **Idratazione.** Il browser scarica lo stesso payload. Il server ha già emesso un `<link rel="preload">` per esso, quindi il download parte insieme all'HTML.
+3. **Navigazione.** Il payload della pagina successiva sostituisce il dizionario. Le chiavi della pagina che si lascia continuano a risolversi finché non scompare (fine della transizione di pagina, o `page:finish`), così una pagina in dissolvenza non mostra per un attimo le chiavi grezze. Un chunk che non si carica (errore di rete, 4xx o 5xx, un body che non è un oggetto) lascia invariato il dizionario corrente, e la navigazione successiva lo ricarica. Lo stesso vale per un cambio di locale fallito: `$switchLocale` si risolve con `false`, e chiamarlo di nuovo, o cliccare di nuovo il selettore, riprova. Con le strategie a prefisso l'URL è già cambiato a quel punto, quindi `lang` e `$getLocale()` indicano la locale dell'URL mentre i vecchi testi restano sullo schermo.
+4. **Cache.** I payload caricati vengono messi in cache sul server e nel browser; in [Prestazioni](/it/guide/performance) trovi le impostazioni di dimensione e TTL.
+
+`translationPayloads.mode` decide come vengono costruiti i payload. `'premerged'` (default) scrive ogni file pagina × locale al momento della build. `'source'` mantiene i file sorgente e li unisce a ogni richiesta, il che è più compatto per cataloghi grandi su target Edge. Entrambi producono gli stessi dizionari. Dove finiscono i file per ciascun target di deploy è descritto in [Deployment](/it/guide/deployment).
+
+## Modifica in sviluppo {#editing-in-development}
+
+`nuxt dev` legge i file in tempo reale. Salvare un file di traduzione aggiorna sul posto il dizionario della pagina aperta: nessun reload, le chiavi rimosse scompaiono e una modifica a un file root raggiunge ogni pagina. Un file JSON non valido genera un avviso con il suo percorso e viene trattato come vuoto. Imposta [`hmr: false`](/it/api/module-options#hmr) per aggiornare manualmente.
+
+## Correlati {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Configurazione della pagina" icon="book-open" href="/it/guide/per-component-translations">
+
+Locale per pagina e traduzioni inline
+
+</Card>
+
+<Card title="Metodi" icon="brackets-curly" href="/it/api/methods">
+
+`$t`, `$tc`, `$tn`, `$td`
+
+</Card>
+
+<Card title="Deployment" icon="book-open" href="/it/guide/deployment">
+
+</Card>
+
+</CardGroup>

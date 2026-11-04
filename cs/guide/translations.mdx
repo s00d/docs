@@ -1,0 +1,132 @@
+---
+title: "Soubory s překlady"
+description: "Kde sídlí klíče překladů, jak se kořenové a stránkové soubory kombinují s fallbacky a jak stránka načítá svůj slovník."
+---
+
+Překlady jsou prosté soubory JSON: jeden kořenový soubor pro každé locale pro sdílené klíče a jeden soubor pro každou stránku a locale pro klíče dané stránky. Přečtěte si tuto stránku, když přidáváte stránky, sdílíte mezi nimi klíče nebo nastavujete fallbacky. Dozvíte se, do kterého souboru klíč patří, co stránka vidí a kdy se který soubor načítá.
+
+## Struktura {#layout}
+
+```text
+locales/
+├── en.json                 # root: menus, footer, buttons
+├── de.json
+└── pages/
+    ├── index/              # pages/index.vue
+    │   ├── en.json
+    │   └── de.json
+    ├── about/              # pages/about.vue
+    │   ├── en.json
+    │   └── de.json
+    └── products-id/        # pages/products/[id].vue
+        ├── en.json
+        └── de.json
+```
+
+- Složka pod `locales/pages/` je **název routy** stránky v Nuxtu: `pages/products/[id].vue` je `products-id`, `pages/blog/[slug]/comments.vue` je `blog-slug-comments`.
+- Klíče lze vnořovat do libovolné hloubky; `$t('auth.form.login')` čte `{ "auth": { "form": { "login": … } } }`.
+- `translationDir` přesouvá složku (ve výchozím stavu `'locales'`, relativně ke kořeni projektu, i při struktuře `app/` z Nuxtu 4).
+- Chybějící soubory se vytvoří jako `{}`, když Nuxt rozlišuje stránky, pokud není nastaveno [`disableWatcher`](/cs/api/module-options#disablewatcher).
+
+## Co stránka vidí {#what-a-page-sees}
+
+![Pořadí vyhledávání klíče na /about v de: pages/about/de.json, de.json, pages/about/en.json, en.json. Sloučí se do jednoho about/de/data.json, který čte $t](/images/diagrams/page-dictionary.svg)
+
+Slovník stránky je její kořenový soubor sloučený s jejím stránkovým souborem, a to hluboce (na každé úrovni). Při konfliktu vyhrává stránkový soubor:
+
+```json
+// locales/en.json
+{ "title": "My shop", "nav": { "home": "Home", "cart": "Cart" } }
+```
+
+```json
+// locales/pages/about/en.json
+{ "title": "About us", "nav": { "cart": "Basket" } }
+```
+
+```ts
+// on /about
+t('title') // 'About us'
+t('nav.home') // 'Home'   (root)
+t('nav.cart') // 'Basket' (page wins)
+// on any other page
+t('title') // 'My shop'
+```
+
+Stránka bez vlastní složky dostane pouze kořenový slovník. Klíče ostatních stránek nejsou viditelné.
+
+### Záložní locale {#fallback-locales}
+
+Klíč, který v aktivním locale chybí, se vezme z jeho záložního locale dřív, než se zobrazí samotný klíč:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    locales: [
+      { code: 'en', iso: 'en-US' },
+      { code: 'de', iso: 'de-DE' },
+      { code: 'de-at', iso: 'de-AT', fallbackLocale: 'de' },
+    ],
+    defaultLocale: 'en',
+    fallbackLocale: 'en', // global, for every locale
+  },
+})
+```
+
+- Vlastní `fallbackLocale` daného locale se sleduje až do konce: `de-at` → `de` → `en`.
+- Globální `fallbackLocale` je nejslabší vrstva, pod každým řetězcem.
+- Každé locale v řetězci přidá svůj kořenový soubor a pak svůj stránkový soubor, od nejslabšího fallbacku až po aktivní locale. Kořenový soubor aktivního locale tedy přebíjí stránkový soubor záložního locale.
+
+Bez fallbacku se chybějící klíč vykreslí jako klíč (`'nav.home'`) a ve vývojovém režimu zaloguje varování do konzole prohlížeče ([`missingWarn`](/cs/api/module-options#missingwarn)).
+
+## Sdílení a další zdroje {#sharing-and-other-sources}
+
+| Potřeba | Možnost |
+| --- | --- |
+| Pouze kořenové soubory, žádné složky `pages/` | [`disablePageLocales: true`](/cs/api/module-options#disablepagelocales) |
+| Dvě stránky čtou jednu stránkovou složku | [`routesLocaleLinks`](/cs/api/module-options#routeslocalelinks): `{ 'about-us': 'about' }` |
+| Sdílené kořenové soubory v jiné složce | [`additionalTranslationDirs`](/cs/api/module-options#additionaltranslationdirs): `['common']` (hlavní `translationDir` vyhrává) |
+| Klíče z vrstvy Nuxtu | Soubory vrstev se slučují, vlastní soubory projektu vyhrávají. Viz [Vrstvy](/cs/guide/layers) |
+| Klíče přidané za běhu | hook [`i18n:register`](/cs/api/events), `$mergeTranslations`, `$setTranslation` |
+| Klíče přímo v komponentě stránky | `$defineI18nRoute({ locales: { en: { … } } })`, viz [Konfigurace stránky](/cs/guide/per-component-translations) |
+
+## Jak stránka načítá svůj slovník {#how-a-page-loads-its-dictionary}
+
+![Soubory JSON locale se sestaví do stromu payloadů, uloženého v public/ na Node nebo v serverových assetech na Edge, čteného serverovým loaderem a pak používaného funkcí $t na serveru a stahovaného pro $t v prohlížeči](/images/diagrams/translation-pipeline.svg)
+
+Modul sestaví jeden payload pro každou stránku a locale: `/{apiBaseUrl}/{page}/{locale}/data.json` (ve výchozím stavu `/_locales/about/de/data.json`).
+
+1. **Vykreslení na serveru.** Nitro detekuje locale a stránka načte svůj payload přímo ze serverového loaderu, bez HTTP požadavku. Slovník se nezapisuje do HTML payloadu, takže stránky zůstávají malé.
+2. **Hydratace.** Prohlížeč stáhne stejný payload. Server pro něj už vygeneroval `<link rel="preload">`, takže stahování začne spolu s HTML.
+3. **Navigace.** Payload další stránky nahradí slovník. Klíče opouštěné stránky se stále rozlišují, dokud nezmizí (konec přechodu stránky nebo `page:finish`), takže mizející stránka neukáže holé klíče. Chunk, který se nepodaří načíst (chyba sítě, 4xx nebo 5xx, tělo, které není objekt), ponechá aktuální slovník na místě a další navigace ho načte znovu. Stejné je to s neúspěšným přepnutím locale: `$switchLocale` se vyřeší na `false` a jeho opětovné zavolání nebo opětovné kliknutí na přepínač akci zopakuje. Při prefixových strategiích se URL do té doby už změnila, takže `lang` a `$getLocale()` uvádějí locale z URL, zatímco na obrazovce zůstávají staré texty.
+4. **Cache.** Načtené payloady se ukládají do cache na serveru i v prohlížeči; nastavení velikosti a TTL najdete na stránce [Výkon](/cs/guide/performance).
+
+`translationPayloads.mode` určuje, jak se payloady sestavují. `'premerged'` (výchozí) zapíše při sestavení soubor pro každou kombinaci stránka × locale. `'source'` ponechá zdrojové soubory a slučuje je pro každý požadavek, což je u velkých katalogů na cílech Edge menší. Obě varianty dávají stejné slovníky. Kam soubory skončí pro jednotlivé cíle nasazení, popisuje stránka [Nasazení](/cs/guide/deployment).
+
+## Úpravy při vývoji {#editing-in-development}
+
+`nuxt dev` čte soubory živě. Uložení souboru s překlady obnoví slovník otevřené stránky na místě: bez reloadu, odstraněné klíče zmizí a změna kořenového souboru se projeví na každé stránce. Poškozený soubor JSON zaloguje varování se svou cestou a považuje se za prázdný. Nastavte [`hmr: false`](/cs/api/module-options#hmr), chcete-li obnovovat ručně.
+
+## Související {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Konfigurace stránky" icon="book-open" href="/cs/guide/per-component-translations">
+
+Locale pro jednotlivé stránky a vložené překlady
+
+</Card>
+
+<Card title="Metody" icon="brackets-curly" href="/cs/api/methods">
+
+`$t`, `$tc`, `$tn`, `$td`
+
+</Card>
+
+<Card title="Nasazení" icon="book-open" href="/cs/guide/deployment">
+
+</Card>
+
+</CardGroup>

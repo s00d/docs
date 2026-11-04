@@ -1,0 +1,139 @@
+---
+title: "Detecció del locale"
+description: "Com es tria el locale d'una pàgina o d'una petició a l'API: URL, query, estat, galeta, Accept-Language i valor per defecte, i quan es redirigeix un visitant."
+---
+
+Cada petició rep un locale, triat a partir de la mateixa llista de fonts i en el mateix ordre al servidor i al navegador. Llegiu això quan decidiu en quin idioma arriben els visitants nous, si es recorda la seva elecció i què veu la vostra API del servidor. Hi trobareu la precedència, la redirecció que fa cada estratègia i les opcions que activen o desactiven cada font.
+
+<Tip>
+
+**Requisits previs** — [Estratègies d'encaminament](/ca/guide/strategy)
+
+</Tip>
+
+## La precedència {#the-precedence}
+
+Guanya la primera font que indica un locale **habilitat**. Un valor no vàlid o mal format (un codi desconegut, una galeta trencada) s'ignora i compta la font següent.
+
+| # | Font | Compta quan |
+| --- | --- | --- |
+| 1 | Prefix de la URL (`/de/about`) | estratègies amb prefix. Amb `prefix_except_default` i `prefix_and_default` una URL sense prefix és el locale per defecte |
+| 2 | `?locale=de` | pàgines: només `no_prefix`. Funcions auxiliars de l'API del servidor: sempre, i abans de la URL |
+| 3 | Estat del locale definit per l'aplicació (`useI18nLocale().setLocale()`) | la URL no té locale |
+| 4 | Galeta | [`localeCookie`](/ca/api/module-options#localecookie) està definida (`'user-locale'` automàticament amb `no_prefix`) |
+| 5 | Capçalera `Accept-Language` | [`autoDetectLanguage`](/ca/api/module-options#autodetectlanguage) és `true` (per defecte) |
+| 6 | [`defaultLocale`](/ca/api/module-options#defaultlocale) | sempre |
+
+Així, amb una estratègia amb prefix, la URL decideix què mostra una pàgina; les fonts de preferència (3–5) només decideixen cap a on es **redirigeix** un visitant, i només a les rutes que permet `autoDetectPath`. Amb `no_prefix` no hi ha res a redirigir, i les fonts de preferència decideixen què mostra la pàgina.
+
+![Flux de decisió: un prefix de locale a la URL renderitza aquell locale. Sense prefix, no_prefix renderitza a partir de les fonts de preferència, prefix_and_default renderitza el locale per defecte, i prefix o prefix_except_default redirigeixen segons la preferència quan autoDetectPath permet la ruta](/images/diagrams/locale-detection.svg)
+
+## Redireccions per estratègia {#redirects-per-strategy}
+
+Les redireccions són un `302`, fetes al servidor abans que la pàgina es renderitzi, i per un middleware de ruta en les navegacions del client. La query i el hash es conserven. Amb [`redirects: false`](/ca/api/module-options#redirects) no se'n fa cap; els prefixos incorrectes continuen donant un 404.
+
+El visitant prefereix `de` (galeta o capçalera), `defaultLocale: 'en'`, `autoDetectPath: '/'` per defecte:
+
+| Petició | `prefix_except_default` | `prefix` | `prefix_and_default` | `no_prefix` |
+| --- | --- | --- | --- | --- |
+| `/` | → `/de` | → `/de` | `/` en `en` | `/` en `de` |
+| `/about` | `/about` en `en` | → `/de/about` | `/about` en `en` | `/about` en `de` |
+| `/fr/about` | `/fr/about` | `/fr/about` | `/fr/about` | — |
+| `/en/about` | 404 | `/en/about` | `/en/about` | — |
+
+`prefix_and_default` no redirigeix mai: una URL sense prefix pertany al locale per defecte, i els altres locales viuen sota el seu prefix. Un visitant que prefereix `en` no es redirigeix des de `/` amb `prefix_except_default`. Les destinacions no tenen barra final (`/de`, no `/de/`) i segueixen les rutes personalitzades (`/about` → `/de/ueber-uns`).
+
+Allà on decideixen la galeta o la capçalera (la redirecció des de `/`, totes les pàgines amb `no_prefix`), la resposta porta `Vary: Cookie, Accept-Language`, de manera que una CDN manté les respostes separades.
+
+### `autoDetectPath` {#autodetectpath}
+
+On poden moure un visitant les fonts de preferència:
+
+| Valor | La preferència compta a |
+| --- | --- |
+| `'/'` (per defecte) | només `/`. Els enllaços profunds es mantenen en l'idioma de la URL |
+| `'no_prefix'` | totes les rutes sense prefix de locale (`/about` → `/de/about`) |
+| `'/welcome'` | aquesta ruta exacta (s'ignora la barra final) |
+| `'*'` | totes les rutes, també les que tenen prefix: `/about` i `/fr/about` → `/de/about` quan el visitant prefereix `de` |
+
+- A les rutes que no permet, una URL sense prefix es tracta com el locale per defecte.
+- `prefix` és l'excepció: no té pàgines sense prefix, de manera que `/about` sempre va al locale del visitant (`/de/about` amb la galeta `de`, `/en/about` sense cap preferència).
+- Amb `'*'` el servidor ignora l'estat de l'aplicació, i una URL amb prefix ja no desa el seu propi locale a la galeta; la galeta canvia quan el visitant canvia d'idioma amb `$switchLocale`.
+
+<Warning>
+
+Amb `'*'`, els enllaços compartits s'obren en l'idioma del lector, cosa que pot sorprendre. Preferiu `'/'` o `'no_prefix'` tret que sigui això el que vulgueu.
+
+</Warning>
+
+## Accept-Language {#accept-language}
+
+La capçalera es llegeix tal com la defineix l'RFC 9110 i es compara amb els **codis** de locale de la vostra configuració:
+
+- Les entrades es proven segons el valor `q`, de més alt a més baix (`fr;q=0.1, de;q=0.9` → `de`). `q=0` vol dir "aquest idioma no"; una entrada amb un `q` mal format s'ignora. `*` no coincideix amb res.
+- `_` es llegeix com a `-` (`en_US` = `en-US`).
+- Per a cada entrada: el codi exacte, després les formes més curtes (`de-AT` → `de`) i després un locale regional del mateix idioma (`en` → `en-US`). Les formes exactes i les més curtes no depenen de l'ordre de `locales`; entre diverses coincidències regionals, guanya la primera de `locales`.
+- Els sistemes d'escriptura no es creuen mai: `zh-TW` i `zh-HK` impliquen el tradicional, `zh-CN` el simplificat, de manera que `zh-CN` no coincideix mai amb un locale `zh-Hant`.
+- Els locales deshabilitats no coincideixen mai.
+
+```ts
+// locales: [{ code: 'en' }, { code: 'de' }, { code: 'zh-Hant' }]
+// 'de-CH,de;q=0.9,en;q=0.8'  → 'de'
+// 'en-GB'                    → 'en'
+// 'zh-TW'                    → 'zh-Hant'
+// 'zh-CN'                    → no match, next source
+```
+
+Desactiveu la detecció per capçalera amb `autoDetectLanguage: false`; la galeta i l'estat continuen comptant.
+
+## La galeta {#the-cookie}
+
+- **Desactivada per defecte** per a les estratègies amb prefix (`localeCookie: null`). Llavors les redireccions funcionen només a partir de la capçalera, i l'elecció no es recorda entre visites. Definiu `localeCookie: 'user-locale'` per recordar-la.
+- Amb `no_prefix` és `'user-locale'` tret que definiu un altre nom. `localeCookie: null` també la desactiva allà.
+- S'escriu quan el visitant canvia d'idioma (`$switchLocale`, `<i18n-switcher>`, `useI18nLocale().setLocale()`), i en un renderitzat al servidor d'una pàgina amb prefix (`/fr/about` desa `fr`; no amb `autoDetectPath: '*'` i les redireccions activades, on la URL encara es pot moure). Una navegació del client a una pàgina també desa el locale d'aquella pàgina, fins i tot en una pàgina sense prefix del locale per defecte; una primera càrrega d'aquella URL no ho fa. Amb `no_prefix` i en mode hash, una navegació només desa un canvi. Un 404 no desa res, tret que `$switchLocale` hi arribi.
+- Dura un any (`path=/`, `SameSite=Lax`).
+- Amb `hashMode` la preferència es desa a la galeta `hash-locale`; el servidor i el client llegeixen la mateixa. El servidor renderitza aquell locale i, fora de `prefix`, no redirigeix mai; un locale al hash (`/#/de`) té prioritat i s'aplica just després de la hidratació. Amb `prefix` no hi ha cap pàgina a `/`, de manera que `/` es renderitza al navegador, que va a `/#/de` segons la galeta i després segons l'idioma del navegador (`autoDetectLanguage`); qualsevol altre document (`/about`, `/de`) redirigeix cap al hash.
+
+Llegiu i definiu la preferència amb [`useI18nLocale`](/ca/composables/useI18nLocale), no directament amb `useCookie` o `useState`.
+
+## La vostra pròpia detecció {#your-own-detection}
+
+Per triar el locale vosaltres mateixos (una preferència de l'usuari, un subdomini), crideu `useI18nLocale().setLocale(code)` en un plugin que s'executi abans del plugin del mòdul. Es converteix en la font 3, l'estat de l'aplicació. A [Detecció personalitzada del locale](/ca/guide/custom-auto-detect) hi ha la recepta completa, inclosa la desactivació de la detecció integrada.
+
+## Rutes de l'API del servidor {#server-api-routes}
+
+[`useLocaleServerMiddleware`](/ca/guide/server-side-translations) i `useTranslationServerMiddleware` fan servir el seu propi ordre, perquè una URL d'API rarament està localitzada:
+
+1. `?locale=`
+2. un paràmetre de ruta `[locale]`, o un prefix de locale a la ruta
+3. galeta (quan `localeCookie` està definida)
+4. `Accept-Language` (quan `autoDetectLanguage` està activat)
+5. `defaultLocale`
+
+`localeCookie: null` i `autoDetectLanguage: false` també desactiven aquí les fonts 3 i 4.
+
+## Sobreescriptures en temps d'execució {#runtime-overrides}
+
+Les [sobreescriptures en temps d'execució](/ca/guide/runtime-overrides) canvien la llista amb què es comparen les fonts:
+
+- Els `disabledLocales` en temps d'execució s'eliminen de tots els passos: una galeta o una capçalera que n'indiqui un s'ignora.
+- Un `defaultLocale` en temps d'execució és el pas 6 amb `prefix` i `no_prefix`.
+- Amb `prefix_except_default` i `prefix_and_default` el locale per defecte es fixa en compilar (les seves pàgines són les rutes sense prefix). Un `defaultLocale` en temps d'execució, o deshabilitar el valor per defecte de la compilació, s'ignora amb un avís.
+
+## Relacionat {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Detecció personalitzada del locale" icon="book-open" href="/ca/guide/custom-auto-detect">
+
+</Card>
+
+<Card title="Rutes del servidor i API" icon="book-open" href="/ca/guide/server-side-translations">
+
+</Card>
+
+<Card title="useI18nLocale" icon="brackets-curly" href="/ca/composables/useI18nLocale">
+
+</Card>
+
+</CardGroup>

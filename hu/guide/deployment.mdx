@@ -1,0 +1,440 @@
+---
+title: "Telepítés"
+description: "Telepítés Node szerverre, serverless vagy Edge környezetbe, illetve statikus webhelyként — hová kerülnek a fordítási payloadok, mire van szüksége az egyes platformoknak, proxyk és gyorsítótárazás."
+---
+
+A modul bármely Nitro presettel működik további konfiguráció nélkül: a fordítási fájlok helyét abból a presetből választja ki, amelyre buildelsz. Az alapértékek a legtöbb alkalmazásnál megfelelők; olvasd el a platformodra vonatkozó szakaszt. Ez az oldal ismerteti:
+
+- mi kerül a `.output/` mappába, és milyen fejléceket kapnak a payloadok;
+- mit kell módosítani statikus hosztolás, nagy katalógusok, alútvonal, proxy vagy CDN esetén.
+
+<Note>
+
+Valós hosztokon telepítve és ellenőrizve: Cloudflare Workers és Pages, Vercel és Vercel Edge, Netlify és Netlify Edge, Cloud Run és Deno Deploy, mindegyik azzal, amit a [Platformok](#platforms) szakasz felsorol. A többi presetet helyben buildeltük és futtattuk.
+
+</Note>
+
+## Hogyan jutnak el a fordítások {#how-translations-are-delivered}
+
+Build-időben a modul a `locales/` mappát (az összes réteget összefésülve) **payloadokká** alakítja: oldalanként és locale-onként egy JSON-fájllá. Két fogyasztó olvassa őket:
+
+- Az **SSR** a folyamaton belül tölti be a renderelt oldal payloadját — HTTP-kérés nélkül, és a szótár nem kerül be a HTML-be.
+- A **böngésző** hidratáláskor és navigációkor lekéri a `/_locales/<page>/<locale>/data.json?v=<dateBuild>` címet.
+
+A `_locales` az [`apiBaseUrl`](/hu/api/module-options#apibaseurl). Erre az URL-re a beépített szerverútvonal válaszol; a `public/` mappában lévő statikus másolat szerver nélkül válaszol rá.
+
+## Node szerver {#node-server}
+
+```bash
+npx nuxi build
+node .output/server/index.mjs
+```
+
+A `node-server` (az alapértelmezett preset), a `node-cluster`, a `bun`, a `deno-server` vagy bármely más preset esetén, amely a `public/` mappát a lemezről szolgálja ki, és a `public/` a `server/` mappa mellett van:
+
+- a payloadok a `.output/public/_locales/<page>/<locale>/data.json` helyre másolódnak;
+- az SSR `fs` segítségével olvassa őket ebből a mappából (semmi sem kerül a szervercsomagba);
+- a böngésző statikus fájlként vagy a szerverútvonalról kapja meg őket.
+
+Telepítsd a teljes `.output/` könyvtárat. A modulhoz Node 20 vagy újabb szükséges, és a Nuxtnak saját minimuma van: a Nuxt 4.5 a `^22.19.0 || ^24.11.0 || >=26.0.0` verziót deklarálja.
+
+Egy tartós terhelés alatt álló folyamat jóval több memóriát foglalhat, mint az élő heapje. Mielőtt konténerkorlátot állítasz be, olvasd el a [Memória Node szerveren](/hu/guide/performance#memory-on-a-node-server) szakaszt.
+
+Más elrendezés esetén a modul a következő szakaszban leírt módon beágyazza a payloadokat. Ez a következőkre vonatkozik:
+
+- egyéni `nitro.output.publicDir`, amelyet a build egyszer olvas be;
+- `serveStatic: true` olyan presetnél, amely máshol tárolja a statikus fájlokat.
+
+<Warning>
+
+Ha a build a `public/` mappát olvassa, de a mappa nem jut el a szerverre, mint az `aws-lambda` és `serveStatic: true` esetén, a szerver egy hibát naplóz, és az oldalak nyers kulcsokat mutatnak. A payloadok beágyazásához állítsd be a `nitro.serveStatic: false` értéket.
+
+</Warning>
+
+## Serverless és Edge {#serverless-and-edge}
+
+Ezek a presetek futásidőben nem tudják olvasni a `public/` mappát:
+
+- függvénypresetek, amelyek a `public/` mappát CDN-re szállítják vagy nem szolgálják ki: `vercel`, `netlify`, `aws-lambda`, `aws-amplify`, `azure-swa`, `firebase`, `stormkit`, `zeabur`, `node-listener`;
+- fájlrendszer nélküli Edge presetek: `cloudflare-module`, `cloudflare-pages`, `vercel-edge`, `netlify-edge`, `deno_deploy`;
+- `serveStatic: 'inline'`, például a `winterjs`.
+
+Itt a modul Nitro szerver-assetként (`assets:i18n`) beágyazza a payloadokat a szervercsomagba, és továbbra is megírja a nyilvános másolatot a böngésző számára.
+
+A teljes oldal × locale mátrix beágyazása nagy csomagot eredményez. Egy Edge platform korlátján túl a build figyelmeztet és megnevezi azt, lásd: [Csomagkorlátok](#bundle-limits-on-edge). Nagy katalógusok esetén válts `source` módra, amely a tömör forrásfájlokat ágyazza be, és futásidőben fésüli össze a gyökér-, oldal- és tartalékfordításokat:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    translationPayloads: {
+      mode: 'source',
+    },
+  },
+})
+```
+
+`source` módban a böngésző mindig a szerverútvonalról kéri le a payloadokat, amely kérésre fésüli össze őket (az esetleges nyilvános másolat a tömör forrásfát tartalmazza, amelyet csak a szerver olvas). Ehhez futó szerver kell, ezért tisztán statikus webhelyhez ne használd a `source` módot.
+
+### Csomagkorlátok Edge-en {#bundle-limits-on-edge}
+
+| Platform           | Korlát                                                                                 |
+| ------------------ | -------------------------------------------------------------------------------------- |
+| Cloudflare Workers | 64 MiB tömörítetlenül, Free és Paid csomagon. Nincs tömörített korlát. 1 s indulás, 128 MB memória |
+| Vercel Edge        | 1 MB gzip Hobby, 2 MB Pro, 4 MB Enterprise csomagon                                    |
+| Netlify Edge       | 20 MB tömörítve                                                                        |
+
+A build összegzi az általa beágyazott szótárakat, és csak a platform legalacsonyabb korlátján túl figyelmeztet. Csak a szótárakat számolja, így az alkalmazás ezen felül jön. Például 120 oldal × 4 locale egy 60 KB-os gyökérfájllal a következőt ágyazza be:
+
+| Mód | Beágyazva | Belefér |
+| --- | --- | --- |
+| `premerged` | 34.9 MiB | Cloudflare; Vercel Edge és Netlify Edge nem |
+| `source` | 5.7 MiB | Vercel Edge-en még mindig 3 MB gzip |
+
+Egy ekkora katalógushoz Vercel Edge-en [payload-hoszt](#app-baseurl-and-payload-hosts) szükséges.
+
+A `source` mód minden izolátumban oldalanként és locale-onként egy összefésülést fizet meg, ebben a példában kb. 1 ms-ot, hideg izolátumban 7 ms CPU-t. Ez a tartaléklánc méretével nő: 4 MB láncfájl esetén kb. 43 ms. A Netlify Edge kérésenként 50 ms CPU-t enged, a Cloudflare Free csomagja 10 ms-ot.
+
+### Dátumok Edge futtatókörnyezetekben {#dates-on-edge-runtimes}
+
+A `$td` a futtatókörnyezet `Intl` objektumát használja, amelynek ICU-adatai eltérhetnek a böngészőétől. Netlify Edge-en egy formázott dátum tartalmazhat U+202F (keskeny nem törő szóköz) karaktert ott, ahol a Chrome-ban normál szóköz van, így a Vue egy hidratálási eltérést naplóz, és a szöveg hidratáláskor kijavítja magát. A sima Nuxt sima `Intl`-lel ott ugyanígy viselkedik; a Deno Deploy nem.
+
+<Tip>
+
+Az `<i18n-t>` `date` vagy `relativeDate` beállítással már engedélyezi az eltérést. Sablonban használt `$td` esetén tedd a `data-allow-mismatch="text"` attribútumot az elemre.
+
+</Tip>
+
+## Statikus webhely (nuxi generate) {#static-site-nuxi-generate}
+
+```bash
+npx nuxi generate
+```
+
+A `nuxi build --preset <static preset>` ugyanezt teszi.
+
+- Az alapértelmezett `premerged` mód minden payloadot a `.output/public/_locales/` mappába ír, így bármely statikus hoszt kiszolgálhatja őket.
+- Az oldalak minden locale-ra előre renderelődnek: `prefix` esetén a modul minden lokalizált gyökeret (`/en`, `/de`) felvesz, a `/` pedig átirányító csonkként marad meg.
+- Hagyd kikapcsolva a [`prerenderRoutes`](/hu/api/module-options#translationpayloads) opciót: a nyilvános másolat már tartalmazza a payloadfájlokat.
+- `source` mód vagy `publicAssets: false` esetén a böngésző nem tud mit olvasni, és a build figyelmeztet.
+
+<Note>
+
+Nincs szerver, amely cookie-t vagy `Accept-Language`-et olvasna, így egy mentett locale az első betöltéskor nem irányítja át a `/` oldalt. `no_prefix` esetén a HTML az alapértelmezett locale-t tartalmazza, és a mentett cookie betöltéskor nem érvényesül: a `$switchLocale` a megnyitott oldalon továbbra is működik.
+
+</Note>
+
+Cloudflare Pages esetén lásd: [Cloudflare Pages](#cloudflare-pages).
+
+[Locale-domainekkel](/hu/guide/layers#multiple-domains) rendelkező build esetén futtasd a generate parancsot domainenként egyszer, a futás hostjaként megadott `NUXT_I18N_DOMAIN` változóval. Így minden fa az adott domain oldalait és payloadjait tartalmazza. A Nitrónak nincs változója a kimeneti mappához, ezért a sajátodat olvasd ki a konfigurációból:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: { output: { publicDir: process.env.PUBLIC_DIR } },
+})
+```
+
+```bash
+NUXT_I18N_DOMAIN=example.de PUBLIC_DIR=sites/example.de npx nuxi generate
+NUXT_I18N_DOMAIN=example.com PUBLIC_DIR=sites/example.com npx nuxi generate
+```
+
+- A mappákat a `.output` mappán kívül tartsd: minden futás kiüríti azt.
+- A többi domainre mutató abszolút linkek nem kerülnek bejárásra.
+- A változó nélkül egy `baseUrl` locale-lal rendelkező build figyelmeztet, és a build-konfigurációt generálja, amelyben ezek a locale-ok linkek, és nem kapnak oldalakat.
+- Node szerveren ugyanez a változó egyetlen domainhez köti a folyamatot, bármit is mond a `Host`.
+
+A statikus hoszt saját fejléceket alkalmaz ezekre a fájlokra; a gyorsítótárazást a hoszt konfigurációjában állítsd be. A modul `/_locales/*` szabálya a `_headers` révén eljut a Cloudflare Pages-hez, a `config.json` révén pedig a Vercelhez, `public, max-age=60` formában. `.gz` / `.br` testvérfájlok szállításához kapcsold be a `nitro.compressPublicAssets` opciót: a modul ugyanazokkal a beállításokkal tömöríti a payloadmásolatot.
+
+## Gyorsítótár-fejlécek és dateBuild {#cache-headers-and-datebuild}
+
+| Kérés                                                                                    | `Cache-Control`                                                                                                 |
+| ---------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Node szerver vagy útvonal, az aktuális `dateBuild`-del egyező `?v=`, nem üres szótár     | `private, max-age=<httpCacheDuration>, immutable`                                                               |
+| Node szerver vagy útvonal, `?v=` nélkül, régi értékkel, vagy üres szótár                 | `public, max-age=0, must-revalidate`                                                                            |
+| A `public/` hoszton lévő másolata, bármely `?v=`                                         | `public, max-age=60` ([`httpCacheControl`](/hu/api/module-options#other)) |
+| `source` mód, `cacheTtl` vagy `apiBaseServerHost`: egy szótár build nélkül is változhat  | mindig a `httpCacheControl` fejléc                                                                              |
+| Szerverútvonal, a szótár nem olvasható                                                   | `503`, `no-store`                                                                                               |
+| fejlesztői szerver                                                                       | nincs                                                                                                           |
+
+Miért néz ki így a táblázat:
+
+- Az aktuális `v` értékkel rendelkező URL hashelt assetként van rögzítve, és ezt csak az mondhatja meg, ami látja a query-t: a szerverútvonal, valamint egy Node szerver, amely a statikus fájljain beállítja a fejlécet.
+- `private`, így egy query-t figyelmen kívül hagyó CDN nem tud ebből a válaszból válaszolni a következő `v`-re.
+- Egy hoszt statikus fájljai egy `/_locales/**` útvonalszabályból kapnak útvonal-szintű fejlécet, amely nem látja a query-t, ezért rövid marad; egy ismételt betöltés így sem blokkol semmin.
+- Egy régi `v` kiszolgálható marad, mivel a gyorsítótárazott HTML hivatkozik rá.
+
+A `httpCacheControl: false` minden statikus fájlt `max-age=0, must-revalidate` értéken tart. A [`httpCacheDuration`](/hu/api/module-options#httpcacheduration) alapértéke egy év; a `0` nem küld fejlécet. A `$clearCache()` újravalidálja, amit legközelebb betölt.
+
+A Safari újra lekéri az előtöltött payloadot, ha nem használhatja újra a választ: `no-cache` és `ETag` esetén a második kérés `304`, ha pedig sem gyorsítótár-fejléc, sem validátor nincs, akkor második teljes letöltés. A `0`-nál nagyobb `max-age` egyetlen kérést eredményez. Ezt csak a validátort nem hozzáadó hoszton használt `httpCacheDuration: 0` fizeti meg.
+
+A [`dateBuild`](/hu/api/module-options#datebuild) a `?v=` értéke. Alapértelmezés szerint a fordítási fájljaid hash-e, így csak akkor változik, ha a fordítások változnak, és a böngészők megtartják a gyorsítótárazott payloadjaikat azokon a telepítéseken át, amelyek nem érintették őket. A tartaléklánccal is változik.
+
+- Egy érték rögzítéséhez állítsd be magad.
+- A `?v=` teljes elhagyásához állítsd `0` vagy `''` értékre; a payloadok ekkor soha nem `immutable`-ek.
+
+<Tip>
+
+Ha egy Node szerveren helyben lecseréltél egy szótárat, indítsd újra `NUXT_I18N_DATE_BUILD=<new value>` értékkel: újrabuildelés nélkül semmi más nem mozdítja el a `v` értéket.
+
+</Tip>
+
+### Gyökér- és deltafájlok {#root-and-delta-files}
+
+A `premerged` locale-onként egy gyökeret ír (`__root/<locale>/data.json`), és minden oldal fájljába csak azt, ami ettől eltér.
+
+- Az oldalfájl egy `__i18n_root` kulccsal jelöli meg a gyökeret, amelyhez képest készült.
+- A böngésző mindkettőt lekéri, az oldal semmit sem mutat, amíg mindkettő meg nem érkezik, és az SSR chunkonként egyszer fésüli össze őket.
+- A jelölés nélküli fájl teljes szótár, és önállóan is megáll: a fejlesztői mód, a `source` mód, a szerverútvonal és a még régebbi fájlokat tároló hoszt mind ilyet ad vissza, beállítás nélkül.
+
+Így aki közvetlenül olvassa a `_locales/*/data.json` fájlt, deltát olvas. A teljes fájlok megtartásához állítsd be a `translationPayloads.rootDelta: false` értéket.
+
+Egy telepítésen át nyitva maradt lap, amely új deltát kér, észleli, hogy az egy másik gyökérhez képest készült, és a megjelenítés előtt lekéri azt a gyökeret.
+
+### Ha egy szótár nem olvasható {#when-a-dictionary-cannot-be-read}
+
+Egy hosztról történő sikertelen lekérés (a 404 kivételével bármi), egy olvashatatlan vagy sérült fájl, illetve egy olyan 200-as válasz, amely nem JSON-objektum, nem kerül gyorsítótárba, és a következő kérés újra olvas:
+
+- az oldalrenderelés figyelmeztetést naplóz, nyers kulcsokat mutat az adott szótárhoz, és `503`-mal válaszol `Cache-Control: no-store` fejléccel, amely minden CDN-fejlécben ugyanaz (`CDN-Cache-Control`, `Cloudflare-CDN-Cache-Control`, `Netlify-CDN-Cache-Control`, `Vercel-CDN-Cache-Control`, `Surrogate-Control`, felülírva az útvonalszabályokból származókat), valamint `Retry-After: 60`;
+- a `/_locales/...` `503`-mal és `no-store` értékkel válaszol;
+- a `useTranslationServerMiddleware` olyan `t`-t ad, amely a kulccsal vagy az alapértékkel válaszol.
+
+Mi történik a kiesés alatt:
+
+- **Látogatók:** az 503-as válasz törzse maga az oldal. Hidratáláskor a böngésző újra beolvassa a szótárat, és a szöveg megjelenik, amint a hoszt helyreáll, a Vue egyetlen konzolhibájával a hidratálási eltérésről, mivel a szerver HTML-je a kulcsokat tartalmazta.
+- A **keresőrobotok** azt az utasítást kapják, hogy később térjenek vissza.
+- **Gyorsítótárak:** egy `swr` vagy `cache` útvonalszabály semmit sem tárol 400-as vagy annál magasabb státusszal, a CDN pedig `no-store`-t kap, így egyetlen gyorsítótár sem tartja meg a nyers kulcsokat, és a helyreállás utáni első kérés a valódi szöveget rendereli.
+- **A szabály által már gyorsítótárazott oldalak** változatlanok maradnak: az újravalidálás sikertelen, és semmit sem tárol. Vercelen egy sikertelen `isr` újravalidálás ugyanígy megtartja az utolsó oldalt.
+
+Ez minden olyan chunkra vonatkozik, amelyet egy renderelés betölt, beleértve egy sikertelen oldalchunkot rendelkezésre álló gyökérrel, valamint a renderelés későbbi szakaszában összefésült chunkot is. Az ép szótárral rendelkező oldal, az átirányítás és a hibaoldal megtartja a státuszát. Kivétel a [komponens-island](/hu/guide/server-side-translations): 200 marad, mivel egy 503 kivenné az oldalból, így egy olyan oldal, amelynek saját szótára betöltődik, megmaradhat egy island nyers kulcsaival. A kiesés alatti kérések mindegyike eléri a hosztot, a modulnak a válaszfejlécekre vonatkozó 60 másodpercen túl nincs saját időtúllépése.
+
+A hoszt 404-es válasza azt jelenti, hogy nincs ilyen fájlja, ami nem hiba. Az oldalrenderelés a gyökérszótárat mutatja, ahogy a böngésző is, a `/_locales/...` pedig ugyanazzal a 404-gyel válaszol. Egyiket sem tartja meg gyorsítótár, így egy megjelenő fájl a következő kérésnél beolvasásra kerül, cserébe egy ilyen oldal minden renderelése egy kérést jelent a hoszt felé. Ha gyökérfájl sincs, a szótár üres, és egy [prerender](/hu/guide/upgrade#server,-build-and-deployment) meghiúsul.
+
+A szerver a betöltött payloadokat egy folyamaton belüli, legfeljebb `cacheMaxSize` bejegyzést (alapértelmezés szerint 1000) tartalmazó LRU-gyorsítótárban tartja, amely beállítás esetén `cacheTtl` után újratölti a bejegyzést; mindkettőt a [Teljesítményhangolás](/hu/guide/performance) ismerteti, a [`cacheStorage`](/hu/guide/performance#shared-cache-for-several-instances) pedig a példányok között megosztott gyorsítótárat ad hozzá. Ne adj hozzá ezen felül Nitro `cache` útvonalszabályt a `/_locales/**` útvonalra: az a teljes URL alapján kulcsol, a query-t is beleértve, és egy harmadik másolatot tárol.
+
+## App baseURL és payload-hosztok {#app-baseurl-and-payload-hosts}
+
+Az **`app.baseURL`** nem igényel semmi mást. `app.baseURL: '/shop/'` esetén a böngésző a `/shop/_locales/...` címet kéri le; a másolat a `.output/public/_locales/` mappában marad, amelyet a Nitro a base alatt szolgál ki (statikus hosztnak a kimenetet a `/shop/` alá kell csatolnia). A locale-előtagok és a [kizárt útvonalak](/hu/guide/excluding-static-files) a base nélkül illeszkednek.
+
+Az **`app.cdnURL`** a payloadokat is áthelyezi, ha azok a `public/` mappában lévő fájlok: a böngésző a `<cdnURL>/_locales/...` címet kéri le és tölti elő.
+
+- A CDN-nek a `_locales/` mappát a `_nuxt/` mellett kell tartalmaznia, ezen az útvonalon.
+- Engedélyeznie kell a webhelyed eredetét (CORS), mivel a fájl `fetch` útján érkezik.
+- Az a szótár, amelyre csak a szerverútvonal válaszol (`source` mód, nincs nyilvános másolat), az alkalmazás eredetén marad.
+
+A futásidejű `NUXT_APP_BASE_URL` a `cloudflare-module` esetén Node-kompatibilitást (`nodejs_compat`) igényel. Kikapcsolt `nitro.cloudflare.nodeCompat` esetén — amire a Nitro régi dátumnál, flag nélkül is visszaesik — nem látja a változót, és a `/` alól szolgál ki, a sima Nuxtot is beleértve, miközben egy locale-átirányítás továbbra is a base-re mutat. Ott a `app.baseURL`-t build-időben állítsd be.
+
+Ha a payloadokat egy másik eredetről szeretnéd kiszolgálni, irányítsd oda a klienst és a szervert, és kapcsold ki a helyi kimeneteket:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    apiBaseClientHost: 'https://cdn.example.com',
+    apiBaseServerHost: 'https://cdn.example.com',
+    translationPayloads: {
+      serverHandler: false,
+      publicAssets: false,
+      serverAssets: false,
+    },
+  },
+})
+```
+
+- Node esetén a `serverAssets` ugyanezt a másolatot írja a szerver saját olvasásaihoz, és ez a fájl válaszol a `/_locales` címre: ezt is ki kell kapcsolni, akkor is, ha a szerverútvonalat megtartod a böngésző számára, mivel az sosem érné el.
+- A hosztnak ugyanazt a `<apiBaseUrl>/<page>/<locale>/data.json` elrendezést kell kiszolgálnia.
+- A build figyelmeztet, ha minden helyi kimenet ki van kapcsolva, és hiányzik a hoszt.
+
+Ugyanezek az értékek build-időben a `NUXT_I18N_APP_BASE_URL`, `NUXT_I18N_APP_BASE_CLIENT_HOST` és `NUXT_I18N_APP_BASE_SERVER_HOST` változókból is származhatnak. A `NUXT_I18N_APP_BASE_SERVER_HOST` futásidőben is működik, és felülírja a build-értéket. A részleteket lásd: [`apiBaseServerHost`](/hu/api/module-options#apibaseserverhost).
+
+## Platformok {#platforms}
+
+Csak az, amire a modulnak vagy a kimenetének szüksége van. A fiókok, régiók és CLI-bejelentkezések a platform dokumentációjában találhatók.
+
+### Cloudflare Workers {#cloudflare-workers}
+
+Preset: `cloudflare_module`. A `wrangler deploy` esbuilddel másodszor is becsomagolja a Nitro kimenetét, és ezt követően egy nyers `defineAsyncComponent(() => import('./X.vue'))` üresen renderelődik a szerveren. A Nuxt alapértelmezett hibaoldala is ilyen, így egy 404-nek üres a törzse, és a böngésző hidratálási eltérést naplóz. Ezután a kliens rendereli az oldalt, és a státusz 404 marad, de JavaScript nélkül az oldal üres. Ez a [nuxt#33270](https://github.com/nuxt/nuxt/issues/33270): a sima Nuxt a modul nélkül is ugyanígy viselkedik. Az oldalútvonalakat ez nem érinti.
+
+Kapcsold ki a második csomagolást:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: {
+    preset: 'cloudflare_module',
+    cloudflare: {
+      deployConfig: true, // `wrangler` below applies only with it
+      wrangler: {
+        no_bundle: true,
+        find_additional_modules: true,
+        rules: [{ type: 'ESModule', globs: ['**/*.mjs'] }],
+      },
+    },
+  },
+})
+```
+
+```bash
+npx nuxi build
+cd .output/server && npx wrangler deploy -c wrangler.json
+```
+
+Állítsd a `compatibilityDate` értékét `2024-09-19`-re vagy későbbre: egy régebbi dátum a legacy presetet választja, amely nem ír `wrangler.json` fájlt, és nem ad hibát. Ezután a 404 renderelődik, és a feltöltés is kisebb lesz: 190 KiB gzip a 246 KiB-tal szemben a tesztalkalmazáson. A saját `error.vue` a másik kiút, de az csak a hibaoldalt fedi le.
+
+Magának a modulnak nincs szüksége `nodejs_compat`-ra. A korlátokat lásd: [Csomagkorlátok](#bundle-limits-on-edge).
+
+### Cloudflare Pages {#cloudflare-pages}
+
+Használd a `cloudflare-pages-static` presetet. A `nuxi generate --preset cloudflare-pages` egy szerverbuild `index.html` nélkül.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: {
+    preset: 'cloudflare-pages-static',
+    prerender: { autoSubfolderIndex: false },
+  },
+})
+```
+
+```bash
+npx nuxi generate
+npx wrangler pages project create my-site --production-branch main --force
+npx wrangler pages deploy dist --project-name my-site --branch main
+```
+
+- **Kimenet.** A preset a `dist/` mappába ír, nem a `.output/public` mappába.
+- **`--force`.** Enélkül egy új wrangler (itt 4.156) a `pages project create` parancsot a Workersnek adja át. Vele klasszikus Pages-projektet kapsz. Egyszer kell, a létrehozáshoz.
+- **`autoSubfolderIndex: false`.** A Pages a `/de` címre 308-cal válaszol a `/de/` címre, miközben a canonical és a `hreflang` a `/de` címet nevezi meg, így átirányításra mutatnak. Ezzel az opcióval a fájl `de.html`, és az átirányítás megszűnik.
+- **A `NUXT_E1005` a konzolban egy 404 esetén** normál 404. A Nuxt azért jelzi így, mert a `404.html` a kliensen indul, még az alkalmazás csatolása előtt. Az oldal működik, és a sima Nuxt is ugyanezt a sort írja ki.
+
+### Vercel és Vercel Edge {#vercel-and-vercel-edge}
+
+`vercel` és `vercel_edge` presetek, az alkalmazás módosítása nélkül. A tagek `metaBaseUrl` nélkül is működnek, a platform továbbított fejlécei alapján. A Vercel Edge csomagkorlátja kicsi: lásd: [Csomagkorlátok](#bundle-limits-on-edge). Megosztott gyorsítótárhoz használd az [`upstash` drivert](/hu/guide/performance#upstash-on-vercel-and-vercel-edge).
+
+### Netlify {#netlify}
+
+`netlify` és `netlify_edge` presetek.
+
+```bash
+npx nuxi build --preset netlify
+npx netlify deploy --prod --no-build --dir dist --functions .netlify/functions-internal
+```
+
+- **Hagyd beállítatlanul a `nitro.output` értéket.** A preset maga írja a `.netlify/` és a `dist/` mappát.
+- **Tarts egy `package.json` fájlt abban a mappában, ahonnan telepítesz.** Enélkül a CLI a szülőmappát nézi, és nem telepít függvényt, hiba nélkül.
+- **A Netlify Edge** egyedül `--dir dist` kapcsolóval telepít. Lásd: [Dátumok Edge futtatókörnyezetekben](#dates-on-edge-runtimes).
+
+### Cloud Run {#cloud-run}
+
+Használd az alapértelmezett `node-server` buildet. A `gcloud run deploy --source` parancsnak `Dockerfile` kell a kimeneti mappában, ha a docker nem fut helyben:
+
+```dockerfile
+# .output/Dockerfile
+FROM node:22-slim
+WORKDIR /app
+COPY . .
+ENV NODE_ENV=production
+CMD ["node", "server/index.mjs"]
+```
+
+```bash
+cd .output && gcloud run deploy my-app --source .
+```
+
+A tagek `metaBaseUrl` nélkül is működnek, a platform továbbított fejlécei alapján.
+
+### Deno Deploy {#deno-deploy}
+
+Preset: `deno_deploy`. A `deno deploy` felváltja a `deployctl`-t. Hozz létre egy dinamikus alkalmazást `server/index.ts` belépési ponttal, és a kimeneti mappából telepíts.
+
+### Firebase {#firebase}
+
+| Termék | Beállítás |
+| --- | --- |
+| App Hosting | A Node buildet futtatja: használd az alapértelmezett presetet vagy a `firebase-app-hosting`-ot, és Node 20+ verziót |
+| Cloud Functions | A `firebase` preset beágyazza a payloadokat, és `firebase-functions` szükséges hozzá |
+| Hosting (statikus) | A `.output/public` mappát fájlokként szolgálja ki, így a `/_locales/**` a Hosting fejléceit kapja |
+
+Statikus Hostingon, ha a JSON rossz `Content-Type`-pal vagy gyorsítótárazással érkezik, adj hozzá egy `headers` bejegyzést a `/_locales/**` útvonalhoz a `firebase.json` fájlban. A Nuxt `routeRules` fejlécei nem vonatkoznak azokra a fájlokra, amelyeket a Hosting maga szolgál ki; a payloadútvonal saját `Content-Type` és `Cache-Control` fejlécet állít be a szervert ténylegesen elérő válaszokon.
+
+### AWS Amplify {#aws-amplify}
+
+Az `aws-amplify` a statikus fájlokat a számítási mappája mellett tartja, nem a szerver mellett, így a payloadok úgy ágyazódnak be, mint egy függvényplatformon.
+
+### Egy build több példánya {#several-instances-of-one-build}
+
+Egyetlen artefaktum környezeti változókkal példányonként eltérő alapértelmezett vagy letiltott locale-lal futhat: lásd: [Futásidejű felülírások](/hu/guide/runtime-overrides). A csak futásidőben letiltott locale statikus fájljai továbbra is a `public/` mappában vannak; ha ezek nem lehetnek elérhetők, build-időben tiltsd le.
+
+A távoli hosztról szótárakat betöltő példányok megoszthatják azokat Redisben, Upstashben, Cloudflare KV-ben vagy D1-ben, Deno KV-ben vagy más Nitro-tárolóban, így a backend egy kérést kap példányonkénti egy helyett. Ez gyorsítótár, nem a fordítások forrása: lásd: [Megosztott gyorsítótár több példányhoz](/hu/guide/performance#shared-cache-for-several-instances).
+
+## Proxy vagy CDN mögött {#behind-a-proxy-or-cdn}
+
+Az alkalmazásnak a kérésből kell megtudnia a nyilvános hostot és a sémát.
+
+| A proxy ezt küldi                            | Sima build                                       | Build `baseUrl`-lel a locale-okon                                                 |
+| -------------------------------------------- | ------------------------------------------------ | --------------------------------------------------------------------------------- |
+| A valódi `Host`                              | Nincs mit beállítani                             | Nincs mit beállítani                                                              |
+| Az eredet `Host`-ja, plusz `X-Forwarded-Host` | Nincs mit beállítani                            | [`trustForwardedHost: true`](/hu/api/module-options#trustforwardedhost)           |
+| Egyiket sem                                  | [`metaBaseUrl`](/hu/api/module-options#metabaseurl) | Egyik beállítás sem segít: minden kérés az eredet hostjának tűnik, ezért a proxyt módosítsd |
+
+- **`swr` vagy `cache` alatti útvonalak.** Itt a táblázat nem érvényes: lásd: [HTML gyorsítótárazása](#caching-html). Állítsd be a `metaBaseUrl` vagy a `site.url` értéket.
+- **`X-Forwarded-Proto`.** Küldd el, különben HTTPS-proxy mögött a canonical URL-ek `http://`-vel kezdődnek. A `metaBaseUrl` ezt is javítja.
+- **Domain-buildben** a domain választja ki a tagek alap-URL-jét. Ott nem a `metaTrustForwardedHost` választja ki a domaint, hanem kizárólag a `trustForwardedHost`.
+- **Az átirányítások relatívak, és a locale-cookie-nak nincs `Domain` attribútuma,** így mindkettő a nyilvános hoston marad.
+
+<Warning>
+
+**Rögzítsd a `metaBaseUrl` értéket, ha az eredet elérhető marad** — Egy `metaBaseUrl` vagy `site.url` nélküli sima buildben a canonical, a `hreflang` és az `og:url` a kérésből veszi a hostját. A [`metaTrustForwardedHost`](/hu/api/module-options#metatrustforwardedhost) alapértelmezés szerint be van kapcsolva, így egy `X-Forwarded-Host: evil.example` fejlécet tartalmazó közvetlen kérés `https://evil.example` értéket kap ezekben a tagekben, és egy előtte álló gyorsítótár terjeszti ezt az oldalt. Egy platformhoszt, például a `*.workers.dev`, pontosan ilyen eredet. A `metaBaseUrl` ezt a `Host` esetére is lezárja. Egy domain-build ismert hostja megtartja a saját `baseUrl`-jét. `trustForwardedHost: true` esetén egy közvetlen kliens kiválaszthatja egy másik domain oldalát, ezért ezt csak olyan proxy mögött kapcsold be, amely felülírja a fejlécet.
+
+</Warning>
+
+## HTML gyorsítótárazása {#caching-html}
+
+A legtöbb URL biztonságosan gyorsítótárazható, mert megnevezi a locale-ját. Ezek a látogatótól függenek:
+
+| Beállítás                      | URL-ek                                            |
+| ------------------------------ | ------------------------------------------------- |
+| Alapértelmezett, `autoDetectPath: '/'` | `/`                                       |
+| `prefix`                       | `/` és minden előtag nélküli URL, amelyek csak átirányítanak |
+| `autoDetectPath: '*'`          | Minden URL                                        |
+| `no_prefix`                    | Minden oldal                                      |
+
+- **`Vary`.** Ezek a válaszok `Vary` fejlécet tartalmaznak: `Cookie`-val, ha a [`localeCookie`](/hu/api/module-options#localecookie) be van állítva, és `Accept-Language`-dzsel, ha az `autoDetectLanguage` be van kapcsolva. Egy ezt tiszteletben tartó gyorsítótár elkülöníti a válaszokat.
+- **A `Vary`-t figyelmen kívül hagyó gyorsítótárnak,** például a „mindent URL alapján gyorsítótárazz” beállításnak, ki kell hagynia ezeket az URL-eket. Különben az egyik látogató `302 /de` válasza eljut a következő látogatóhoz, egy tárolt alapértelmezett oldal pedig mindenkinél megszünteti az átirányítást. A `/` útvonalon a `redirects: false` is beállítható. A Nitro útvonal-gyorsítótára az útvonal és a `varies` lista alapján kulcsol, ezért a `/` útvonalat is tartsd távol az `swr` és `cache` szabályoktól.
+- **`Set-Cookie`.** Beállított `localeCookie` esetén minden előtag alatti, szerveren renderelt oldal `Set-Cookie` fejlécet tartalmaz, amelyet egy helyesen működő CDN nem tárol. Gyorsítótárazott HTML-hez hagyd kikapcsolva a `localeCookie`-t, vagy távolítsd el a fejlécet az edge-en.
+- **Az `swr` és `cache` szabályokhoz `metaBaseUrl` vagy `site.url` szükséges.** A Nitro egy ilyen útvonalat csak a `cache.varies` listában szereplő fejlécekkel renderel, így a `Host`, az `X-Forwarded-Host` és az `X-Forwarded-Proto` eltűnik, a kérés URL-je pedig `http://localhost` lesz. Rögzített eredet nélkül ezeken az útvonalakon a canonical, a `hreflang` és az `og:url` minden platformon a `http://localhost` címre mutat. A sima Nuxt `useRequestURL()` függvénye ott ugyanezt olvassa. Ha a hostot ehelyett a látogatótól vennénk, az egyik látogató `X-Forwarded-Host` értéke bekerülne abba az oldalba, amelyet minden látogató megkap. A domain-buildet ez nem érinti: annak tagjei a locale-ok `baseUrl` értékét használják.
+
+  Ha egy build több hostot szolgál ki, és egyetlen eredet sem megfelelő, engedd a szabálynak látni a fejléceket, és értékenként tarts meg egy másolatot: `'/blog/**': { swr: 60, cache: { varies: ['host', 'x-forwarded-host', 'x-forwarded-proto'] } }`. Minden eltérő érték új gyorsítótár-bejegyzés, így egy kitalált fejléceket küldő kliens feltölti a gyorsítótárat: tedd az eredetet egy olyan proxy mögé, amely beállítja őket.
+- **`swr` és `cache` szabályok domain-buildben.** A modul minden ilyen szabály `cache.varies` listájához hozzáadja a `host` értéket, `trustForwardedHost` esetén pedig az `x-forwarded-host` értéket is, hogy egy domain ne szolgálja ki egy másiknak a saját oldalát. A `cache: false` értékű szabály változatlan marad. Az `isr` a platform gyorsítótára: ellenőrizd, hogy a host alapján kulcsol-e. Ha a host része a kulcsnak, egy kitalált hostokat küldő kliens gyorsítótár-bejegyzéseket ad hozzá.
+
+A payloadfájlokat lásd: [Gyorsítótár-fejlécek és dateBuild](#cache-headers-and-datebuild).
+
+## Kapcsolódó {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Teljesítményhangolás" icon="book-open" href="/hu/guide/performance">
+
+</Card>
+
+<Card title="Futásidejű felülírások" icon="book-open" href="/hu/guide/runtime-overrides">
+
+</Card>
+
+<Card title="translationPayloads referencia" icon="brackets-curly" href="/hu/api/module-options#translationpayloads">
+
+</Card>
+
+<Card title="Rétegek és domainek" icon="book-open" href="/hu/guide/layers">
+
+</Card>
+
+<Card title="SEO" icon="book-open" href="/hu/guide/seo">
+
+</Card>
+
+</CardGroup>

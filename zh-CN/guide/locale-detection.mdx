@@ -1,0 +1,139 @@
+---
+title: "Locale 检测"
+description: "页面或 API 请求的 locale 是如何选定的：URL、查询参数、状态、Cookie、Accept-Language 和默认值，以及访客何时会被重定向。"
+---
+
+每个请求都会得到一个 locale，服务端和浏览器按相同的顺序从同一组来源中选取。当你需要决定首次访问者进入哪种语言、是否记住他们的选择，以及你的服务端 API 看到什么时，请阅读本文。本文介绍优先级、每种策略的重定向行为，以及开启或关闭各个来源的选项。
+
+<Tip>
+
+**前提条件** — [路由策略](/zh-CN/guide/strategy)
+
+</Tip>
+
+## 优先级 {#the-precedence}
+
+第一个指定了**已启用** locale 的来源胜出。无效或格式错误的值（未知代码、损坏的 Cookie）会被跳过，由下一个来源决定。
+
+| # | 来源 | 生效条件 |
+| --- | --- | --- |
+| 1 | URL 前缀（`/de/about`） | 前缀策略。在 `prefix_except_default` 和 `prefix_and_default` 下，不带前缀的 URL 即为默认 locale |
+| 2 | `?locale=de` | 页面：仅限 `no_prefix`。服务端 API 辅助函数：始终生效，且优先于 URL |
+| 3 | 应用设置的 locale 状态（`useI18nLocale().setLocale()`） | URL 中没有 locale |
+| 4 | Cookie | 已设置 [`localeCookie`](/zh-CN/api/module-options#localecookie)（在 `no_prefix` 下自动为 `'user-locale'`） |
+| 5 | `Accept-Language` 请求头 | [`autoDetectLanguage`](/zh-CN/api/module-options#autodetectlanguage) 为 `true`（默认） |
+| 6 | [`defaultLocale`](/zh-CN/api/module-options#defaultlocale) | 始终生效 |
+
+因此，在前缀策略下，由 URL 决定页面显示的内容；偏好来源（3–5）只决定访客被**重定向**到哪里，而且只在 `autoDetectPath` 允许的路径上生效。在 `no_prefix` 下没有可重定向的目标，由偏好来源决定页面显示的内容。
+
+![决策流程：URL 中带有 locale 前缀时，渲染该 locale。没有前缀时，no_prefix 根据偏好来源渲染，prefix_and_default 渲染默认 locale，prefix 或 prefix_except_default 在 autoDetectPath 允许该路径时按偏好重定向](/images/diagrams/locale-detection.svg)
+
+## 各策略的重定向 {#redirects-per-strategy}
+
+重定向为 `302`，在页面渲染前由服务端执行；客户端导航时则由路由中间件执行。查询参数和 hash 会被保留。设置 [`redirects: false`](/zh-CN/api/module-options#redirects) 时不会发生任何重定向；错误的前缀仍然返回 404。
+
+访客偏好 `de`（Cookie 或请求头），`defaultLocale: 'en'`，默认 `autoDetectPath: '/'`：
+
+| 请求 | `prefix_except_default` | `prefix` | `prefix_and_default` | `no_prefix` |
+| --- | --- | --- | --- | --- |
+| `/` | → `/de` | → `/de` | `/`，使用 `en` | `/`，使用 `de` |
+| `/about` | `/about`，使用 `en` | → `/de/about` | `/about`，使用 `en` | `/about`，使用 `de` |
+| `/fr/about` | `/fr/about` | `/fr/about` | `/fr/about` | — |
+| `/en/about` | 404 | `/en/about` | `/en/about` | — |
+
+`prefix_and_default` 从不重定向：不带前缀的 URL 属于默认 locale，其他 locale 位于各自的前缀下。在 `prefix_except_default` 下，偏好 `en` 的访客不会从 `/` 被重定向。重定向目标不带末尾斜杠（`/de`，而非 `/de/`），并遵循自定义路径（`/about` → `/de/ueber-uns`）。
+
+凡是由 Cookie 或请求头决定的情况（从 `/` 的重定向、`no_prefix` 下的每个页面），响应都会带有 `Vary: Cookie, Accept-Language`，以便 CDN 分别缓存不同的响应。
+
+### `autoDetectPath` {#autodetectpath}
+
+偏好来源可以在哪些位置移动访客：
+
+| 值 | 偏好生效的位置 |
+| --- | --- |
+| `'/'`（默认） | 仅 `/`。深层链接保持 URL 中的语言 |
+| `'no_prefix'` | 所有不带 locale 前缀的路径（`/about` → `/de/about`） |
+| `'/welcome'` | 仅该路径（忽略末尾斜杠） |
+| `'*'` | 所有路径，包括带前缀的路径：访客偏好 `de` 时，`/about` 和 `/fr/about` → `/de/about` |
+
+- 在不允许的路径上，不带前缀的 URL 被视为默认 locale。
+- `prefix` 是例外：它没有不带前缀的页面，因此 `/about` 总是跳转到访客的 locale（Cookie 为 `de` 时到 `/de/about`，没有偏好时到 `/en/about`）。
+- 使用 `'*'` 时，服务端会忽略应用的状态，带前缀的 URL 也不再将自身的 locale 记录到 Cookie 中；只有当访客通过 `$switchLocale` 切换时，Cookie 才会改变。
+
+<Warning>
+
+使用 `'*'` 时，分享的链接会以读者的语言打开，这可能出乎意料。除非这正是你想要的，否则请优先使用 `'/'` 或 `'no_prefix'`。
+
+</Warning>
+
+## Accept-Language {#accept-language}
+
+该请求头按照 RFC 9110 的定义解析，并与配置中的 locale **代码**进行匹配：
+
+- 条目按 `q` 值从高到低依次尝试（`fr;q=0.1, de;q=0.9` → `de`）。`q=0` 表示“不要这种语言”；`q` 格式错误的条目会被忽略。`*` 不匹配任何内容。
+- `_` 按 `-` 处理（`en_US` = `en-US`）。
+- 对每个条目：先匹配完全相同的代码，然后匹配更短的形式（`de-AT` → `de`），再匹配同一语言的地区 locale（`en` → `en-US`）。完全匹配和更短形式不依赖 `locales` 的顺序；如果有多个地区匹配，`locales` 中靠前的胜出。
+- 绝不跨文字系统匹配：`zh-TW` 和 `zh-HK` 表示繁体，`zh-CN` 表示简体，因此 `zh-CN` 永远不会匹配 `zh-Hant` locale。
+- 已禁用的 locale 永远不会被匹配。
+
+```ts
+// locales: [{ code: 'en' }, { code: 'de' }, { code: 'zh-Hant' }]
+// 'de-CH,de;q=0.9,en;q=0.8'  → 'de'
+// 'en-GB'                    → 'en'
+// 'zh-TW'                    → 'zh-Hant'
+// 'zh-CN'                    → no match, next source
+```
+
+使用 `autoDetectLanguage: false` 关闭请求头检测；Cookie 和状态仍然生效。
+
+## Cookie {#the-cookie}
+
+- 在前缀策略下**默认关闭**（`localeCookie: null`）。此时重定向仅依据请求头，且选择不会在多次访问之间被记住。设置 `localeCookie: 'user-locale'` 即可记住选择。
+- 在 `no_prefix` 下，除非你设置了其他名称，否则为 `'user-locale'`。在这里 `localeCookie: null` 同样可以关闭它。
+- 它会在访客切换语言时写入（`$switchLocale`、`<i18n-switcher>`、`useI18nLocale().setLocale()`），也会在服务端渲染带前缀的页面时写入（`/fr/about` 会保存 `fr`；但在 `autoDetectPath: '*'` 且开启重定向时不会，因为此时 URL 仍可能变化）。客户端导航到某个页面时也会保存该页面的 locale，包括默认 locale 的不带前缀页面；而首次加载该 URL 时则不会。在 `no_prefix` 和 hash 模式下，导航只会保存变化。404 不会保存任何内容，除非 `$switchLocale` 跳转到了它。
+- 有效期为一年（`path=/`、`SameSite=Lax`）。
+- 在 `hashMode` 下，偏好改为保存在 `hash-locale` Cookie 中；服务端和客户端读取同一个 Cookie。服务端渲染该 locale，并且在 `prefix` 之外从不重定向；hash 中的 locale（`/#/de`）优先于它，并在 hydration 后立即生效。在 `prefix` 下，`/` 上没有页面，因此 `/` 在浏览器中渲染，浏览器依据 Cookie、再依据浏览器语言（`autoDetectLanguage`）跳转到 `/#/de`；其他任何文档（`/about`、`/de`）都会重定向到 hash 中。
+
+请使用 [`useI18nLocale`](/zh-CN/composables/useI18nLocale) 读取和设置偏好，而不要直接使用 `useCookie` 或 `useState`。
+
+## 自定义检测 {#your-own-detection}
+
+如果要自行选择 locale（用户设置、子域名），请在一个先于模块插件运行的插件中调用 `useI18nLocale().setLocale(code)`。它会成为来源 3，即应用的状态。[自定义 locale 检测](/zh-CN/guide/custom-auto-detect)提供了完整做法，包括如何关闭内置检测。
+
+## 服务端 API 路由 {#server-api-routes}
+
+[`useLocaleServerMiddleware`](/zh-CN/guide/server-side-translations) 和 `useTranslationServerMiddleware` 使用自己的顺序，因为 API URL 很少进行本地化：
+
+1. `?locale=`
+2. `[locale]` 路由参数，或路径中的 locale 前缀
+3. Cookie（已设置 `localeCookie` 时）
+4. `Accept-Language`（开启 `autoDetectLanguage` 时）
+5. `defaultLocale`
+
+在这里，`localeCookie: null` 和 `autoDetectLanguage: false` 同样会关闭来源 3 和 4。
+
+## 运行时覆盖 {#runtime-overrides}
+
+[运行时覆盖](/zh-CN/guide/runtime-overrides)会改变各来源所匹配的列表：
+
+- 运行时的 `disabledLocales` 会从每一步中移除：指定了其中某个 locale 的 Cookie 或请求头会被跳过。
+- 在 `prefix` 和 `no_prefix` 下，运行时的 `defaultLocale` 即为第 6 步。
+- 在 `prefix_except_default` 和 `prefix_and_default` 下，默认 locale 在构建时固定（其页面就是不带前缀的路由）。运行时的 `defaultLocale` 或禁用构建时的默认 locale 都会被忽略，并给出警告。
+
+## 相关内容 {#related}
+
+<CardGroup cols={2}>
+
+<Card title="自定义 locale 检测" icon="book-open" href="/zh-CN/guide/custom-auto-detect">
+
+</Card>
+
+<Card title="服务端路由与 API" icon="book-open" href="/zh-CN/guide/server-side-translations">
+
+</Card>
+
+<Card title="useI18nLocale" icon="brackets-curly" href="/zh-CN/composables/useI18nLocale">
+
+</Card>
+
+</CardGroup>

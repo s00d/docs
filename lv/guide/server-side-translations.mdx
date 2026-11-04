@@ -1,0 +1,120 @@
+---
+title: "Servera maršruti un API"
+description: "Tulkojiet virknes un nolasiet pieprasījuma lokāli Nitro servera maršrutos un API apstrādātājos."
+---
+
+Servera apstrādātāji mapēs `server/api/` un `server/routes/` var tulkot virknes un nolasīt pieprasījuma lokāli ar divām automātiski importētām palīgfunkcijām. Izmantojiet tās API atbildēm, e-pastiem, plūsmām vai jebkam, kas tiek renderēts ārpus Vue lapas. Tās lasa tos pašus tulkojumu failus kā jūsu lapas un nosaka lokāli no pieprasījuma.
+
+## Tulkošana apstrādātājā {#translate-in-a-handler}
+
+```ts
+// server/api/greeting.get.ts
+export default defineEventHandler(async (event) => {
+  const t = await useTranslationServerMiddleware(event)
+  return { message: t('greeting', { name: 'Ada' }) }
+})
+```
+
+```bash
+curl 'http://localhost:3000/api/greeting?locale=de'
+# {"message":"Hallo, Ada!"}
+```
+
+`useTranslationServerMiddleware(event, defaultLocale?, locale?)` ir asinhrona un atgriež `t(key, params?, defaultValue?)`. `t` atgriež virkni, interpolē `{name}` parametrus un, ja atslēgas trūkst, atgriež netukšu `defaultValue`, citādi pašu atslēgu.
+
+`t` redz tikai `index` daļu: saknes failus (`locales/<locale>.json`) plus `locales/pages/index/`, ja tā eksistē (ar `disablePageLocales` tikai saknes failus). Citu lapu atslēgas netiek ielādētas. Tām ielādējiet daļu paši:
+
+```ts
+const { data } = await loadTranslationsFromServer('de', 'about') // Translations object of the about page
+```
+
+## Pieprasījuma lokāles nolasīšana {#read-the-request-locale}
+
+```ts
+// server/api/locale.get.ts
+export default defineEventHandler((event) => {
+  const { current, isDefault, locale } = useLocaleServerMiddleware(event)
+  return { current, isDefault, dir: locale?.dir ?? 'ltr' }
+})
+```
+
+`useLocaleServerMiddleware(event, defaultLocale?, locale?)` ir sinhrona un atgriež:
+
+```ts
+interface LocaleInfo {
+  current: string // detected locale code
+  default: string // defaultLocale, runtime overrides included (fixed at build under prefix_except_default / prefix_and_default)
+  fallback: string // fallbackLocale, else the default
+  available: string[] // enabled locale codes
+  locale: Locale | null // the config entry of `current`
+  isDefault: boolean
+  isFallback: boolean
+}
+```
+
+## Kā tiek izvēlēta lokāle {#how-the-locale-is-chosen}
+
+Abas palīgfunkcijas izmanto vienu un to pašu secību katrā servera maršrutā, gan `/api`, gan citos:
+
+1. `?locale=` vaicājums (pirmā vērtība, ja atkārtots);
+2. `[locale]` maršruta parametrs vai lokāles prefikss ceļā (`/de/...`);
+3. lokāles sīkdatne, ja iestatīts [`localeCookie`](/lv/api/module-options#localecookie) (`hash-locale` režīmā `hashMode`);
+4. `Accept-Language`, ja ieslēgts `autoDetectLanguage` (q-vērtības tiek ievērotas);
+5. `defaultLocale`.
+
+Nederīgi un atspējoti kodi tiek izlaisti katrā solī. Šī ir API secība; lapas renderēšana ar prefiksu stratēģijām ignorē `?locale=`. Abas secības ir salīdzinātas lapā [Lokāles noteikšana](/lv/guide/locale-detection).
+
+## Lokāles piespiešana {#force-a-locale}
+
+Nododiet trešo argumentu, lai izlaistu noteikšanu, piemēram, uzdevumā, kas sūta e-pastu lietotāja valodā:
+
+```ts
+export default defineEventHandler(async (event) => {
+  const user = await getUser(event) // your code
+  const t = await useTranslationServerMiddleware(event, undefined, user.locale)
+  return sendMail(user.email, t('mail.welcome.subject'))
+})
+```
+
+Otrais arguments aizstāj `defaultLocale` šī izsaukuma noteikšanā, tāpēc tam nav efekta, ja lokāle ir piespiesta. Vārdnīcas tiek kešotas katram pieprasījumam un katrai lokālei, kā arī starp pieprasījumiem servera tulkojumu kešatmiņā, tāpēc palīgfunkcijas vairākkārtēja izsaukšana ir lēta.
+
+## Servera komponentes {#server-components}
+
+Servera komponente (`.server.vue`, `<NuxtIsland>`) renderējas no sava URL, `/__nuxt_island/...`, tāpēc tā neredz lapas URL, un Nuxt tai nodod tikai tās props. Nododiet lokāli kā `locale` prop. Tad tā renderējas šajā lokālē, un pārslēgšana to ielādē atkārtoti, jo props ir daļa no islanda URL un kešatmiņas atslēgas. Nosaukums ir rezervēts: jebkurš iespējotas lokāles kods prop ar nosaukumu `locale` iestata renderēšanas lokāli, tāpēc prop, kas nozīmē ko citu, piemēram, skaitļu formātu, dodiet citu nosaukumu:
+
+```vue
+<!-- components/Greeting.server.vue -->
+<template><p>{{ $t('greeting') }}</p></template>
+<script setup lang="ts">
+defineProps<{ locale?: string }>()
+</script>
+```
+
+```vue
+<template>
+  <Greeting :locale="$getLocale()" />
+  <NuxtIsland name="Greeting" :props="{ locale: $getLocale() }" />
+</template>
+```
+
+Bez šī prop tā renderējas sīkdatnes lokālē, citādi noklusējuma lokālē, neatkarīgi no URL, un tā neseko pārslēgšanai. Tās `$t` redz `index` daļu: saknes failus plus `locales/pages/index/`.
+
+## Saistītie materiāli {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Lokāles noteikšana" icon="book-open" href="/lv/guide/locale-detection">
+
+</Card>
+
+<Card title="Tulkojumu faili" icon="book-open" href="/lv/guide/translations">
+
+</Card>
+
+<Card title="Izvietošana" icon="book-open" href="/lv/guide/deployment">
+
+No kurienes serveris lasa tulkojumus
+
+</Card>
+
+</CardGroup>

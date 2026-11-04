@@ -1,0 +1,139 @@
+---
+title: "Phát hiện locale"
+description: "Cách locale được chọn cho một trang hoặc một request API: URL, query, state, cookie, Accept-Language và mặc định, cùng thời điểm khách truy cập bị chuyển hướng."
+---
+
+Mỗi request nhận đúng một locale, được chọn từ cùng một danh sách nguồn theo cùng một thứ tự ở cả server lẫn trình duyệt. Hãy đọc phần này khi bạn quyết định khách truy cập lần đầu sẽ đến với ngôn ngữ nào, lựa chọn của họ có được ghi nhớ hay không, và API server của bạn nhận được gì. Bạn sẽ nắm được thứ tự ưu tiên, kiểu chuyển hướng mà mỗi chiến lược thực hiện, và các tùy chọn để bật hoặc tắt từng nguồn.
+
+<Tip>
+
+**Điều kiện tiên quyết** — [Chiến lược định tuyến](/vi/guide/strategy)
+
+</Tip>
+
+## Thứ tự ưu tiên {#the-precedence}
+
+Nguồn đầu tiên chỉ ra một locale **đang được bật** sẽ thắng. Một giá trị không hợp lệ hoặc sai định dạng (một mã không xác định, một cookie bị hỏng) sẽ bị bỏ qua và nguồn tiếp theo được tính.
+
+| # | Nguồn | Được tính khi |
+| --- | --- | --- |
+| 1 | Tiền tố URL (`/de/about`) | các chiến lược có tiền tố. Dưới `prefix_except_default` và `prefix_and_default`, một URL không có tiền tố là locale mặc định |
+| 2 | `?locale=de` | trang: chỉ với `no_prefix`. Các hàm trợ giúp API server: luôn luôn, và trước cả URL |
+| 3 | State locale do ứng dụng đặt (`useI18nLocale().setLocale()`) | URL không có locale |
+| 4 | Cookie | [`localeCookie`](/vi/api/module-options#localecookie) được đặt (tự động là `'user-locale'` dưới `no_prefix`) |
+| 5 | Header `Accept-Language` | [`autoDetectLanguage`](/vi/api/module-options#autodetectlanguage) là `true` (mặc định) |
+| 6 | [`defaultLocale`](/vi/api/module-options#defaultlocale) | luôn luôn |
+
+Vì vậy, dưới một chiến lược có tiền tố, URL quyết định trang hiển thị gì; các nguồn ưu tiên của người dùng (3–5) chỉ quyết định khách truy cập được **chuyển hướng** đến đâu, và chỉ trên những đường dẫn mà `autoDetectPath` cho phép. Dưới `no_prefix` không có gì để chuyển hướng, và các nguồn ưu tiên quyết định trang hiển thị gì.
+
+![Luồng quyết định: một tiền tố locale trong URL sẽ render locale đó. Nếu không có, no_prefix render theo các nguồn ưu tiên, prefix_and_default render locale mặc định, còn prefix hoặc prefix_except_default chuyển hướng theo ưu tiên khi autoDetectPath cho phép đường dẫn đó](/images/diagrams/locale-detection.svg)
+
+## Chuyển hướng theo từng chiến lược {#redirects-per-strategy}
+
+Chuyển hướng là mã `302`, được thực hiện trên server trước khi trang render, và bởi một route middleware đối với điều hướng phía client. Query và hash được giữ nguyên. Với [`redirects: false`](/vi/api/module-options#redirects) sẽ không có chuyển hướng nào; tiền tố sai vẫn trả về 404.
+
+Khách truy cập ưu tiên `de` (cookie hoặc header), `defaultLocale: 'en'`, `autoDetectPath: '/'` mặc định:
+
+| Request | `prefix_except_default` | `prefix` | `prefix_and_default` | `no_prefix` |
+| --- | --- | --- | --- | --- |
+| `/` | → `/de` | → `/de` | `/` bằng `en` | `/` bằng `de` |
+| `/about` | `/about` bằng `en` | → `/de/about` | `/about` bằng `en` | `/about` bằng `de` |
+| `/fr/about` | `/fr/about` | `/fr/about` | `/fr/about` | — |
+| `/en/about` | 404 | `/en/about` | `/en/about` | — |
+
+`prefix_and_default` không bao giờ chuyển hướng: một URL không có tiền tố thuộc về locale mặc định, và các locale khác nằm dưới tiền tố của chúng. Một khách truy cập ưu tiên `en` sẽ không bị chuyển hướng từ `/` dưới `prefix_except_default`. Đích chuyển hướng không có dấu gạch chéo ở cuối (`/de`, không phải `/de/`) và tuân theo đường dẫn tùy chỉnh (`/about` → `/de/ueber-uns`).
+
+Ở bất kỳ đâu mà cookie hoặc header quyết định (chuyển hướng từ `/`, mọi trang dưới `no_prefix`), response mang header `Vary: Cookie, Accept-Language`, để CDN lưu riêng các câu trả lời.
+
+### `autoDetectPath` {#autodetectpath}
+
+Nơi các nguồn ưu tiên có thể chuyển khách truy cập:
+
+| Giá trị | Ưu tiên được tính trên |
+| --- | --- |
+| `'/'` (mặc định) | chỉ `/`. Các liên kết sâu giữ nguyên ngôn ngữ của URL |
+| `'no_prefix'` | mọi đường dẫn không có tiền tố locale (`/about` → `/de/about`) |
+| `'/welcome'` | đúng đường dẫn đó (dấu gạch chéo cuối bị bỏ qua) |
+| `'*'` | mọi đường dẫn, kể cả đường dẫn có tiền tố: `/about` và `/fr/about` → `/de/about` khi khách truy cập ưu tiên `de` |
+
+- Trên những đường dẫn không được cho phép, một URL không có tiền tố được coi là locale mặc định.
+- `prefix` là ngoại lệ: nó không có trang không tiền tố, nên `/about` luôn đi tới locale của khách truy cập (`/de/about` với cookie `de`, `/en/about` khi không có ưu tiên).
+- Với `'*'`, server bỏ qua state của ứng dụng, và một URL có tiền tố không còn ghi locale của chính nó vào cookie; cookie chỉ thay đổi khi khách truy cập chuyển đổi bằng `$switchLocale`.
+
+<Warning>
+
+Với `'*'`, các liên kết được chia sẻ sẽ mở bằng ngôn ngữ của người đọc, điều này có thể gây bất ngờ. Hãy ưu tiên `'/'` hoặc `'no_prefix'` trừ khi đó đúng là điều bạn muốn.
+
+</Warning>
+
+## Accept-Language {#accept-language}
+
+Header được đọc theo định nghĩa của RFC 9110 và được so khớp với các **mã** locale trong cấu hình của bạn:
+
+- Các mục được thử theo giá trị `q`, cao nhất trước (`fr;q=0.1, de;q=0.9` → `de`). `q=0` nghĩa là "không phải ngôn ngữ này"; một mục có `q` sai định dạng sẽ bị bỏ qua. `*` không khớp với gì cả.
+- `_` được đọc như `-` (`en_US` = `en-US`).
+- Với mỗi mục: mã chính xác, sau đó là các dạng ngắn hơn (`de-AT` → `de`), rồi đến một locale theo vùng của cùng ngôn ngữ (`en` → `en-US`). Dạng chính xác và dạng ngắn hơn không phụ thuộc vào thứ tự của `locales`; khi có nhiều locale theo vùng cùng khớp, locale đứng đầu trong `locales` sẽ thắng.
+- Hệ chữ viết không bao giờ bị lẫn: `zh-TW` và `zh-HK` ngụ ý chữ Phồn thể, `zh-CN` là Giản thể, nên `zh-CN` không bao giờ khớp với một locale `zh-Hant`.
+- Các locale bị tắt không bao giờ khớp.
+
+```ts
+// locales: [{ code: 'en' }, { code: 'de' }, { code: 'zh-Hant' }]
+// 'de-CH,de;q=0.9,en;q=0.8'  → 'de'
+// 'en-GB'                    → 'en'
+// 'zh-TW'                    → 'zh-Hant'
+// 'zh-CN'                    → no match, next source
+```
+
+Tắt việc phát hiện qua header bằng `autoDetectLanguage: false`; cookie và state vẫn được tính.
+
+## Cookie {#the-cookie}
+
+- **Tắt theo mặc định** với các chiến lược có tiền tố (`localeCookie: null`). Khi đó chuyển hướng chỉ dựa vào header, và lựa chọn không được ghi nhớ giữa các lần truy cập. Đặt `localeCookie: 'user-locale'` để ghi nhớ nó.
+- Dưới `no_prefix`, cookie là `'user-locale'` trừ khi bạn đặt tên khác. `localeCookie: null` cũng tắt nó ở đó.
+- Cookie được ghi khi khách truy cập chuyển đổi (`$switchLocale`, `<i18n-switcher>`, `useI18nLocale().setLocale()`), và khi server render một trang dưới một tiền tố (`/fr/about` lưu `fr`; không áp dụng dưới `autoDetectPath: '*'` khi bật chuyển hướng, vì URL vẫn có thể thay đổi). Một điều hướng phía client đến một trang cũng lưu locale của trang đó, kể cả trên một trang không tiền tố của locale mặc định; lần tải đầu tiên của URL đó thì không. Dưới `no_prefix` và ở chế độ hash, một điều hướng chỉ lưu khi có thay đổi. Một trang 404 không lưu gì, trừ khi `$switchLocale` dẫn đến nó.
+- Cookie tồn tại một năm (`path=/`, `SameSite=Lax`).
+- Dưới `hashMode`, ưu tiên được lưu trong cookie `hash-locale` thay vào đó; server và client đọc cùng một cookie. Server render locale đó và, ngoài `prefix`, không bao giờ chuyển hướng; một locale trong hash (`/#/de`) thắng cookie và được áp dụng ngay sau khi hydration. Dưới `prefix` không có trang nào ở `/`, nên `/` được render trong trình duyệt, nơi nó đi tới `/#/de` theo cookie, rồi theo ngôn ngữ của trình duyệt (`autoDetectLanguage`); mọi tài liệu khác (`/about`, `/de`) đều chuyển hướng vào hash.
+
+Hãy đọc và đặt ưu tiên bằng [`useI18nLocale`](/vi/composables/useI18nLocale), không dùng trực tiếp `useCookie` hay `useState`.
+
+## Tự phát hiện locale {#your-own-detection}
+
+Để tự chọn locale (theo cài đặt của người dùng, theo subdomain), hãy gọi `useI18nLocale().setLocale(code)` trong một plugin chạy trước plugin của module. Nó trở thành nguồn 3, state của ứng dụng. [Phát hiện locale tùy chỉnh](/vi/guide/custom-auto-detect) có hướng dẫn đầy đủ, bao gồm cả việc tắt cơ chế phát hiện tích hợp sẵn.
+
+## Route API server {#server-api-routes}
+
+[`useLocaleServerMiddleware`](/vi/guide/server-side-translations) và `useTranslationServerMiddleware` dùng thứ tự riêng, vì URL của API hiếm khi được bản địa hóa:
+
+1. `?locale=`
+2. một route param `[locale]`, hoặc một tiền tố locale trong đường dẫn
+3. cookie (khi `localeCookie` được đặt)
+4. `Accept-Language` (khi `autoDetectLanguage` được bật)
+5. `defaultLocale`
+
+`localeCookie: null` và `autoDetectLanguage: false` cũng tắt nguồn 3 và 4 ở đây.
+
+## Ghi đè lúc runtime {#runtime-overrides}
+
+[Ghi đè lúc runtime](/vi/guide/runtime-overrides) thay đổi danh sách mà các nguồn được so khớp:
+
+- Các `disabledLocales` lúc runtime bị loại khỏi mọi bước: một cookie hoặc header chỉ ra một trong số đó sẽ bị bỏ qua.
+- Một `defaultLocale` lúc runtime là bước 6 dưới `prefix` và `no_prefix`.
+- Dưới `prefix_except_default` và `prefix_and_default`, locale mặc định được cố định lúc build (các trang của nó là các route không tiền tố). Một `defaultLocale` lúc runtime, hoặc việc tắt locale mặc định lúc build, sẽ bị bỏ qua kèm cảnh báo.
+
+## Liên quan {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Phát hiện locale tùy chỉnh" icon="book-open" href="/vi/guide/custom-auto-detect">
+
+</Card>
+
+<Card title="Route server và API" icon="book-open" href="/vi/guide/server-side-translations">
+
+</Card>
+
+<Card title="useI18nLocale" icon="brackets-curly" href="/vi/composables/useI18nLocale">
+
+</Card>
+
+</CardGroup>

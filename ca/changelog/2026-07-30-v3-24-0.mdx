@@ -1,0 +1,66 @@
+---
+title: "v3.24.0 — SSR de Node des de `public/`, sense `raw:` de Rollup"
+description: "Notes de la versió: v3.24.0 — SSR de Node des de public/, sense raw: de Rollup"
+---
+
+**Data**: 2026-07-30
+
+**Versió**: `v3.24.0`
+
+![Versió v3.24.0](/images/3.24.0.png)
+
+Les compilacions de producció de Node ja no incrusten els payloads de traducció com a `serverAssets` de Nitro / `raw:` de Rollup (RSS de compilació de diversos GB en catàlegs grans). L'SSR llegeix el mateix arbre `/{apiBaseUrl}/{page}/{locale}/data.json` que obté el client, des de `public/` mitjançant `readFile`. Edge manté una incrustació de Nitro i hauria de preferir `mode: 'source'`.
+
+## Què hi ha de nou? {#what’s-new}
+
+### Node: SSR des de `public/<apiBaseUrl>` {#node-ssr-from-public/&lt;apibaseurl&gt;}
+
+- Els presets de Node que serveixen `public/` des del disc **no** registren `serverAssets` de Nitro.
+- Els payloads es copien a `public/<apiBaseUrl>` (per defecte `_locales`) com a `{page}/{locale}/data.json`.
+- L'SSR els carrega a través de `#i18n-internal/payload-source` → `readFile` (camí de producció al costat de `.output/server`).
+- `translationPayloads.serverAssets: true` continua volent dir "SSR local" i **força** aquesta còpia pública encara que `publicAssets` sigui false.
+
+Playground (enfront de la incrustació anterior amb `serverAssets`): ~**1,25 GB** / ~6–7 s / `raw`=0 enfront de ~**3 GB** / ~13 s / ~170 fragments raw.
+
+### Edge: `serverAssets` només quan cal {#edge-serverassets-only-when-needed}
+
+- Edge (`nitro.node === false`) continua incrustant mitjançant `serverAssets` de Nitro (`assets:i18n`) amb la mateixa estructura que `mode`.
+- Edge **no** força una còpia pública: definiu `publicAssets: true` per a CDN/estàtic.
+- Mostra un avís quan es combina Edge + `mode: 'premerged'` (preferiu `mode: 'source'` per a catàlegs grans).
+
+### `publicDir` s'alinea amb els URL del client {#publicdir-aligns-with-client-urls}
+
+- `translationPayloads.publicDir` és per defecte **`apiBaseUrl`** (no `translationDir`).
+- L'arbre públic/Edge prefusionat és `{page}/{locale}/data.json`, coincidint amb `$fetch('/_locales/...')`.
+- Els valors per defecte del mòdul ja no defineixen `publicAssets: true` niat (la fusió profunda de Nuxt forçava la còpia pública fins i tot per a `mode: 'source'`).
+
+Vegeu [Opcions del mòdul — `translationPayloads`](/ca/api/module-options#translationpayloads), [Desplegament — serverless i Edge](/ca/guide/deployment#serverless-and-edge) i [Arquitectura de memòria cau i emmagatzematge](https://s00d.github.io/nuxt-i18n-micro/v3/api/i18n-cache-api).
+
+## Canvis incompatibles {#breaking-changes}
+
+- **Cap diccionari al payload HTML d'SSR de Nuxt.** `payload.data['i18n-ssr-chunks']`, `setSsrChunk` i `seedFromSsrChunks` s'han **eliminat**. La mateixa postura per defecte que `@nuxtjs/i18n` (`experimental.preload: false`): el servidor manté les traduccions a la memòria per a l'SSR; el client carrega `/{apiBaseUrl}/.../data.json` durant la configuració del plugin (`await switchContext`).
+- **`prerenderRoutes` és per defecte `false`.** Activeu-ho només si necessiteu que Nitro materialitzi les rutes del handler quan `publicAssets` no ha escrit ja l'arbre (`publicAssets` prefusionat ja genera `{page}/{locale}/data.json`).
+- **El valor per defecte de `publicDir` és `apiBaseUrl`**, no `translationDir`. La sortida estàtica es mou de, p. ex., `public/locales/...` a `public/_locales/{page}/{locale}/data.json` tret que definiu `publicDir` explícitament.
+- **L'estructura d'emmagatzematge prefusionada** ara és `{page}/{locale}/data.json` (abans era `pages/{page}/{locale}.json`). Qualsevol cosa que llegís claus de Nitro/emmagatzematge o copiés arbres amb l'estructura antiga s'ha d'actualitzar.
+- **A Node, `serverAssets: true` ja no vol dir incrustació de Nitro**: vol dir SSR local mitjançant la còpia pública. La incrustació real amb `raw:` de Rollup queda només per a Edge.
+
+## Migració {#migration}
+
+1. Elimineu qualsevol codi que llegís `payload.data['i18n-ssr-chunks']` o cridés `seedFromSsrChunks` / `setSsrChunk`.
+2. Per a allotjaments purament estàtics: mantingueu el valor per defecte prefusionat + `publicAssets` (els fitxers queden a `/_locales/.../data.json`), o definiu `prerenderRoutes: true` / allotgeu els payloads en una CDN.
+3. Per a Cloudflare / altres Edge: definiu `translationPayloads: { mode: 'source' }` en catàlegs grans; afegiu `publicAssets: true` només si necessiteu una còpia estàtica/CDN.
+4. Si depeníeu de payloads sota `public/<translationDir>`, definiu `translationPayloads.publicDir` o feu que les eines apuntin a `public/<apiBaseUrl>`.
+
+## Correcció: ometre els idiomes desactivats als payloads públics prefusionats {#fix-skip-disabled-locales-in-premerged-public-payloads}
+
+`preMergeLocales` ara escriu `{page}/{locale}/data.json` només per als idiomes passats a la fusió (s'ometen els que tenen `locale.disabled: true` en temps de compilació). Abans, cada idioma JSON del disc es copiava a `public/`, de manera que el servidor estàtic de Nitro servia idiomes desactivats amb 200 i se saltava el handler. `disabledLocales` en temps d'execució continua sense poder despublicar fitxers ja compilats: feu servir `locale.disabled` en compilar quan `publicAssets` / la còpia pública d'SSR de Node estigui activada.
+
+## Per què és important {#why-it-matters}
+
+- Les compilacions de Node es mantenen lleugeres: cap pic de diversos GB de `raw:` de Rollup per culpa dels catàlegs de traducció.
+- Els fitxers públics i els URL de `$fetch` del client comparteixen una mateixa estructura de camins: l'allotjament estàtic funciona sense cap reassignació especial.
+- Edge pot continuar incrustant payloads `source` compactes sense forçar un arbre públic duplicat.
+
+El registre de canvis complet es publicarà amb la versió a [GitHub](https://github.com/s00d/nuxt-i18n-micro/blob/main/CHANGELOG.md).
+
+---

@@ -1,0 +1,147 @@
+---
+title: "Az alkalmazás tesztelése"
+description: "$t-t használó komponensek egységtesztelése a @i18n-micro/test-utils és a Vitest segítségével, valamint a lokalizált oldalak end-to-end ellenőrzése."
+---
+
+A `useI18n()`-t hívó komponenseknek egységtesztekben szükségük van egy i18n példányra. A `@i18n-micro/test-utils` egy hamis `useI18n()`-t ad valódi fordítási, többesszám- és formázási logikával, így egy komponenst a saját szótáraiddal, Nuxt szerver nélkül csatolhatsz. Az útválasztáshoz és az átirányításokhoz futtasd a valódi modult end-to-end a `@nuxt/test-utils` segítségével.
+
+Ez az oldal az alkalmazásod teszteléséről szól. Arról, hogy ez a repository hogyan teszteli magát a modult, [A modul tesztelése](https://s00d.github.io/nuxt-i18n-micro/contributing/testing) oldal szól.
+
+## Telepítés {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add -D @i18n-micro/test-utils @nuxt/test-utils vitest @vue/test-utils happy-dom
+```
+
+```bash npm
+npm install -D @i18n-micro/test-utils @nuxt/test-utils vitest @vue/test-utils happy-dom
+```
+
+</CodeGroup>
+
+## A useI18n mockolása {#mock-usei18n}
+
+```ts
+// tests/unit-setup.ts
+import { setupNuxtI18nMock } from '@i18n-micro/test-utils'
+import { mockNuxtImport } from '@nuxt/test-utils/runtime'
+import { beforeEach, vi } from 'vitest'
+
+export const { i18n, useI18n, setTranslationsFromJson } = setupNuxtI18nMock({
+  spy: vi.fn, // every method becomes a vi.fn, so you can assert calls
+  beforeEach, // reset state and reseed `translations` before each test
+  translations: { welcome: 'Welcome' },
+})
+
+mockNuxtImport('useI18n', () => useI18n)
+```
+
+```ts
+// vitest.config.ts
+import { defineVitestConfig } from '@nuxt/test-utils/config'
+
+export default defineVitestConfig({
+  test: {
+    environment: 'nuxt',
+    setupFiles: ['./tests/unit-setup.ts'],
+  },
+})
+```
+
+A `mockNuxtImport`-ot tartsd a setup fájlban: a `@nuxt/test-utils`-nak át kell alakítania. A `setupNuxtI18nMock` privát fordítási gyorsítótárat használ, így a párhuzamosan futó tesztfájlok nem osztoznak az állapoton.
+
+## Teszt írása {#write-a-test}
+
+```vue
+<!-- components/Greeting.vue -->
+<script setup lang="ts">
+const { $t } = useI18n()
+</script>
+
+<template>
+  <p>{{ $t('welcome') }}</p>
+</template>
+```
+
+```ts
+// tests/greeting.spec.ts
+import { mountSuspended } from '@nuxt/test-utils/runtime'
+import { expect, it } from 'vitest'
+import Greeting from '~/components/Greeting.vue'
+import de from '~/locales/de.json'
+import { i18n, setTranslationsFromJson } from './unit-setup'
+
+it('renders the German greeting', async () => {
+  await setTranslationsFromJson('de', de)
+  i18n.setLocale('de')
+
+  const wrapper = await mountSuspended(Greeting)
+  expect(wrapper.text()).toBe('Willkommen') // de.json: { "welcome": "Willkommen" }
+})
+```
+
+A hamis példány ugyanazokat a metódusokat teszi elérhetővé, mint a valódi `useI18n()` (`$t`, `$tc`, `$tn`, `$td`, `$has`, `$localePath`, …, `$`-ral és anélkül), valamint setter függvényeket a tesztekhez: `setLocale`, `setLocales`, `setDefaultLocale`, `setRouteName`, `setTranslationsFromJson`, `loadPageTranslations`, `mergeTranslations`, `setMissingHandler`.
+
+A `$localePath` és a `$switchLocalePath` csonkok, amelyek a `strategy` beállításnak megfelelően látják el előtaggal az útvonalat (valódi router nélkül). A valódi linkeket és átirányításokat end-to-end teszteld.
+
+## Alacsonyabb szintű segédfüggvények {#lower-level-helpers}
+
+| Segédfüggvény | Mire használd |
+| --- | --- |
+| `createIsolatedFakeI18n(options)` | Izolált hamis példány a Nuxt `useI18n` bekötése nélkül, pl. sima `@vue/test-utils` `mount`-hoz `global.mocks`-szal. |
+| `createFakeI18n(options)` | Hamis példány a megosztott modul-gyorsítótáron (hívd meg a `resetI18n()`-t a `beforeEach`-ben), vagy izoláltan az `isolated: true` beállítással. |
+| `createI18nTestContext(options)` | A mindkettő mögötti kontextus, ha több hamis példányra van szükséged. |
+| `t`, `tc`, `ts`, `tn`, `td`, `tdr`, `has` | Közvetlen hívások a megosztott kontextuson, egyszerű függvények teszteléséhez. |
+
+A mock egy `BaseI18n`: a `t`, `tc`, `tn`, `td`, `tdr` és `has` a valódiak, valódi szótárakon, így a teszt azt látja, amit az alkalmazás mutat.
+
+A fenti factory segédfüggvények a `locale`, `defaultLocale`, `locales`, `routeName`, `strategy`, `translations` és `messages` (locale-onkénti szótárak) opciókat fogadják. Egy teljes példaprojekt található itt: [`packages/test-utils/example`](https://github.com/s00d/nuxt-i18n-micro/tree/main/packages/test-utils/example).
+
+## End-to-end tesztek {#end-to-end-tests}
+
+Az útválasztáshoz, az átirányításokhoz, a SEO-címkékhez és a payload-betöltéshez a valódi modulra van szükség. Indítsd el az alkalmazásodat a `@nuxt/test-utils/e2e` segítségével:
+
+```ts
+// tests/e2e/locales.test.ts
+import { $fetch, fetch, setup } from '@nuxt/test-utils/e2e'
+import { describe, expect, it } from 'vitest'
+
+describe('locales', async () => {
+  await setup({ server: true })
+
+  it('serves the German page', async () => {
+    expect(await $fetch('/de')).toContain('lang="de-DE"')
+  })
+
+  it('redirects / for a German browser', async () => {
+    const res = await fetch('/', { headers: { 'accept-language': 'de' }, redirect: 'manual' })
+    expect(res.headers.get('location')).toBe('/de')
+  })
+})
+```
+
+A második teszt `prefix` stratégiát feltételez (vagy `prefix_except_default`-ot egy másik alapértelmezett locale-lal); arról, hogy a `/` mikor irányít át, lásd: [Locale-felismerés](/hu/guide/locale-detection).
+
+## Kapcsolódó {#related}
+
+<CardGroup cols={2}>
+
+<Card title="A modul tesztelése" icon="code-pull-request" href="https://s00d.github.io/nuxt-i18n-micro/contributing/testing">
+
+</Card>
+
+<Card title="useI18n" icon="brackets-curly" href="/hu/composables/useI18n">
+
+</Card>
+
+<Card title="Locale-felismerés" icon="book-open" href="/hu/guide/locale-detection">
+
+</Card>
+
+<Card title="Storybook" icon="book-open" href="/hu/guide/storybook">
+
+</Card>
+
+</CardGroup>

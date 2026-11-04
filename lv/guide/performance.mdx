@@ -1,0 +1,261 @@
+---
+title: "Veiktspējas pielāgošana"
+description: "Iestatījumi, kas maina atmiņu, datu apjomu un kešošanu, un kā izmērīt, ko jūsu lietotne piegādā."
+---
+
+Noklusējumi ir pielāgoti tipiskai lietotnei: viens JSON datu fails katrai lapai un lokalizācijai, tulkojumi netiek iekļauti HTML, ierobežotas kešatmiņas serverī. Šajā lapā ir uzskaitīti tie daži iestatījumi, kurus vērts mainīt, ja katalogs ir liels, serverim ir ierobežota atmiņa vai dati nāk no cita hosta. Izmērītus skaitļus salīdzinājumā ar `@nuxtjs/i18n` un vienkāršu Nuxt skatiet [Etalontesti](/lv/guide/performance-results).
+
+## Ko noklusējumi jau dara {#what-the-defaults-already-do}
+
+- **Viens datu fails katrai lapai.** Būve sapludina saknes, lapas un rezerves lokalizācijas atslēgas failā `/_locales/<page>/<locale>/data.json`, tāpēc lapa ielādē vienu failu un `$t` ir viena uzmeklēšana.
+- **HTML nav vārdnīcas.** SSR glabā tulkojumus servera atmiņā; pārlūks ielādē datus, nevis parsē tos no `__NUXT_DATA__`.
+- **Pārlūka kešatmiņa.** `?v=` mainās tikai tad, kad mainās tulkojumi, tāpēc pārlūks saglabā savus datus starp izvietošanām, kas tos neskāra. Hosta statiskā kopija ir svaiga 60 sekundes un pēc tam tiek atkārtoti validēta: atkārtota ielāde gaida vienu `304`. Servera maršruts atbild ar `immutable` uz gadu ([Izvietošana](/lv/guide/deployment#cache-headers-and-datebuild)).
+- **Ierobežota servera atmiņa.** Serveris pēc noklusējuma kešo ne vairāk kā 1000 datu failus un izmet vismazāk nesen izmantotos.
+
+## Tulkojumu sadalīšana pa lapām {#split-translations-by-page}
+
+Atslēgas, kas tiek izmantotas vienā lapā, pieder failā `locales/pages/<page>/<locale>.json`, nevis saknes failos: saknes atslēgas ir katras lapas datu daļa. Skatiet [Tulkojumu faili](/lv/guide/translations).
+
+Šo sadalījumu maina divi iestatījumi:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    // pages that show the same keys share one payload: /de/products/123 loads the products payload
+    routesLocaleLinks: { 'products-id': 'products' },
+    // or: no page files at all, every page loads only the root dictionary
+    // disablePageLocales: true,
+  },
+})
+```
+
+[`routesLocaleLinks`](/lv/api/module-options#routeslocalelinks) samazina dublētus datus saistītiem maršrutiem. [`disablePageLocales`](/lv/api/module-options#disablepagelocales) der mazām lietotnēm, kurās viena vārdnīca katrai lokalizācijai ir vienkāršāka.
+
+## Servera kešatmiņas {#server-caches}
+
+| Iestatījums | Noklusējums | Efekts |
+| --- | --- | --- |
+| [`cacheMaxSize`](/lv/api/module-options#cachemaxsize) | `0` | Maksimālais ierakstu skaits datu kešatmiņās. `0` = bez ierobežojuma pārlūkā, 1000 serverī. |
+| [`cacheTtl`](/lv/api/module-options#cachettl) | `0` | Sekundes, pēc kurām kešots ieraksts tiek pārlādēts. `0` = nekad; iestatiet to, ja dati nāk no `apiBaseServerHost` un mainās bez atkārtotas izvietošanas. |
+| `serverTranslationPreload` | `false` | Ielādēt `index` datus Nitro starpprogrammatūrā katram lapas pieprasījumam, lai servera palīgfunkcijas un sākumlapa tos izmantotu atkārtoti. |
+
+Samaziniet `cacheMaxSize` mazā instancē ar daudzām lapām × lokalizācijām. Lokāli rediģētiem tulkojumiem TTL nekad nav vajadzīgs: izstrādes režīms lasa failus tiešraidē, produkcijas dati mainās tikai ar izvietošanu.
+
+## Atmiņa Node serverī {#memory-on-a-node-server}
+
+Pastāvīgā slodzē Node serveris var aizņemt aptuveni 12 reizes vairāk par savu dzīvo kaudzi un tā arī palikt. Stresa testā ar 100k atslēgām katrā lapā 90 MB dzīvā kaudze darbojās ar aptuveni 1,1 GB RSS. Tā nav noplūde. Pēc viena pārmērīgi liela GC cikla V8 paaugstina savu kaudzes limitu un, kamēr slodze turpinās, patur atbrīvotās lapas pūlā atkārtotai izmantošanai. Aptuveni 8 sekundes pēc slodzes beigām pūls iztukšojas un RSS nokrītas līdz aptuveni 160 MB. `global.gc()` šo atmiņu neatgriež. Vienkāršs Nuxt bez moduļa dara to pašu, proporcionāli savai mazākajai kaudzei.
+
+Tas maksā rezervi: ja atmiņas limits ir zem šī līmeņa un kaudzei nav ierobežojuma, process var tikt nogalināts. Iestatiet ierobežojumu, kas iekļaujas jūsu limitā un ir krietni virs dzīvās kaudzes:
+
+```bash
+NODE_OPTIONS=--max-old-space-size=512 node .output/server/index.mjs
+```
+
+| 100k atslēgu, 12 lokalizācijas, 5 līdz 30 minūtes slodzes | Noklusējums | `--max-old-space-size=512` |
+| --- | --- | --- |
+| RSS slodzē | aptuveni 1150 MB | 254-287 MB |
+| Pieprasījumi sekundē | 624 | 517-572 |
+
+Tātad ierobežojums apmaina 8 līdz 10 % caurlaidspējas pret atmiņu. Parasta izmēra katalogam ir mazāka kaudze un mazāks lēciens. Šie mērījumi veikti macOS ar Node 22, nevis konteinerā.
+
+## Parsēšanas laiks un `dir` {#parse-time-and-dir}
+
+`dir: 'auto'` lokalizācijai liek pārlūkam parsēšanas laikā noteikt virzienu no satura. Chromium vidē DOMContentLoaded pie 20 000 elementiem bija aptuveni 1,1 s ar `dir="auto"` un 0,1 s bez tā, bet pie 5000 elementiem aptuveni 130 ms pret 45 ms. Atstājiet `dir` neiestatītu vai iestatiet to uz `ltr` vai `rtl` ([Teksta virziens](/lv/guide/seo#text-direction)).
+
+## Koplietota kešatmiņa vairākām instancēm {#shared-cache-for-several-instances}
+
+Ja ir vairākas vienas būves instances, [`cacheStorage`](/lv/api/module-options#other) dod tām vienu vārdnīcu kešatmiņu jebkurā Nitro krātuvē, izmantojot savienojumu, ko jūsu lietotne konfigurē `nitro.storage`. Modulis nepievieno ne savienotāju, ne atkarību.
+
+**Tā ir kešatmiņa, nevis avots.** Tulkojumi nāk no iegultajiem vai publiskajiem datiem vai no `apiBaseServerHost`. Tiek ierakstīts tikai tas, kas nācis no avota, un atslēgas satur būvi, tāpēc krātuve, kuru aizpildāt manuāli, netiek lasīta. Lai pasniegtu tulkojumus no KV vai datubāzes, novietojiet nelielu maršrutu, kas to lasa, adresē `apiBaseServerHost`.
+
+**Kad tas palīdz.** Tikai ar attālinātu `apiBaseServerHost`. Trīs instances, apstaigājot 39 vārdnīcas, bez tā veica 117 pieprasījumus hostam un ar to — 48. Ja faili ir diskā, trāpījums krātuvē nav ātrāks par failu, un pirmā caurstaigāšana 12 lapām aizņēma 280-296 ms bez opcijas un 308-325 ms ar aizpildītu Redis, tāpēc atstājiet to neiestatītu. Priekšiestatījumā, kas iegulda vārdnīcas, tas bez hosta neko nedara, un būve to paziņo.
+
+Auksta vārdnīca, viens klients, katram viena caurstaigāšana, tāpēc aptuveni, un lielākā daļa ir attālums līdz hostam:
+
+| Krātuve | No hosta | No krātuves |
+| --- | --- | --- |
+| Cloudflare KV | aptuveni 300 ms | aptuveni 110 ms |
+| D1 | aptuveni 230 ms | aptuveni 115 ms |
+| Deno KV | aptuveni 430 ms | aptuveni 100 ms |
+| Upstash, Vercel serverless | aptuveni 445 ms | aptuveni 245 ms |
+| Upstash, Vercel Edge | aptuveni 505 ms | aptuveni 235 ms |
+
+### Redis {#redis}
+
+Jūsu projektā ir vajadzīgs `ioredis`.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      redis: { driver: 'redis', url: process.env.REDIS_URL },
+    },
+  },
+  i18n: {
+    cacheStorage: 'redis', // the mount name
+    apiBaseServerHost: 'https://translations.internal',
+    cacheTtl: 300,
+  },
+})
+```
+
+### Upstash Vercel un Vercel Edge vidē {#upstash-on-vercel-and-vercel-edge}
+
+Abos izmantojiet draiveri `upstash`: tas sazinās caur REST, savukārt draiverim `redis` vajadzīgs TCP. Jūsu projektā ir vajadzīgs `@upstash/redis`, un tas nolasa `UPSTASH_REDIS_REST_URL` un `UPSTASH_REDIS_REST_TOKEN` no vides.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      upstash: { driver: 'upstash' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'upstash',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+### Cloudflare KV {#cloudflare-kv}
+
+Piesaistiet nosaukumvietu Worker kā `I18N_KV` (`kv_namespaces` tā wrangler konfigurācijā).
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      kv: { driver: 'cloudflare-kv-binding', binding: 'I18N_KV' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'kv',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+Hostam, kas ir cits Worker tajā pašā kontā, ir vajadzīgs saderības karodziņš `global_fetch_strictly_public`, citādi pieprasījums to nesasniedz.
+
+### Cloudflare D1 {#cloudflare-d1}
+
+`nitro.storage` nevar saturēt datubāzes objektu, tāpēc draiveri piemontē Nitro spraudnis. Piemontējums tiek pārbaudīts pirmajā lietošanas reizē, tāpēc ar to pietiek laicīgi. Piesaistiet datubāzi kā `I18N_DB` (`d1_databases`) un pievienojiet projektam `unstorage`.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    experimental: { database: true },
+    database: {
+      default: { connector: 'cloudflare-d1', options: { bindingName: 'I18N_DB' } },
+    },
+  },
+  i18n: {
+    cacheStorage: 'd1',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+```ts
+// server/plugins/i18n-storage.ts
+import dbDriver from 'unstorage/drivers/db0'
+
+export default defineNitroPlugin(() => {
+  useStorage().mount('d1', dbDriver({ database: useDatabase() }))
+})
+```
+
+Draiveris `db0` ir atzīmēts kā eksperimentāls un ignorē TTL: veco būvju rindas paliek, līdz tās izdzēšat.
+
+### Deno KV {#deno-kv}
+
+Deno Deploy vidē izveidojiet datubāzi (`deno deploy database provision <name> --kind denokv`), piešķiriet to lietotnei (`deno deploy database assign`) un izmantojiet draiveri:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      kv: { driver: 'deno-kv' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'kv',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+### Kā tas darbojas {#how-it-behaves}
+
+Vārdnīca tiek meklēta instances paša kešatmiņā, tad koplietotajā krātuvē, tad tās avotā. Instances paša kešatmiņa paliek, jo `$t` ir sinhrons un tam koks vajadzīgs atmiņā: tas nodala to, kas ielādē, no tā, kas pasniedz, nevis ietaupa atmiņu.
+
+- **Kas ielādē.** Ar attālinātu hostu — viena ielāde no aizmugursistēmas katrai vārdnīcai, nevis katrai instancei. Instances, kurām tajā pašā brīdī ir kešatmiņas garām trāpījums, katra to ielādē, jo nav bloķēšanas.
+- **Lapas bez savas vārdnīcas** netiek saglabātas, lai izdomāti lapu nosaukumi nevarētu pievienot atslēgas. Katra instance šādu lapu ielādē no hosta vienreiz, un Workers vidē, kur izolāti nāk un iet, tā ir pastāvīga plūsma.
+- **Hosts nedarbojas.** Lapas ar saglabātu vārdnīcu darbojas. Lapa bez tās tiek attēlota no saglabātās saknes vārdnīcas ar savām atslēgām neapstrādātā veidā, ar [`503`, ko neviena kešatmiņa nesaglabā](/lv/guide/deployment#when-a-dictionary-cannot-be-read), un `/_locales` tai atbild ar `503`, līdz hosts atkal darbojas. `useTranslationServerMiddleware` atbild ar atslēgām vārdnīcai, kuru nevar nolasīt.
+- **Hosts** ir `NUXT_I18N_APP_BASE_SERVER_HOST` izpildlaikā vai citādi `apiBaseServerHost` no būves, tāpat kā bez opcijas. Priekšiestatījumā, kas iegulda vārdnīcas (Cloudflare, Vercel, Netlify, skatiet [Izvietošana](/lv/guide/deployment#serverless-and-edge)), slānis darbojas tikai ar hostu: dati jau ir pakotnē, un kopija KV būtu tīkla nolasīšana tam, kas jau ir atmiņā.
+- **Atslēgas** ir `i18n-micro:<buildId>~<dateBuild>~<fallbackLocale>~<host>:<locale>:<page>`, tāpēc divas būves pakāpeniskā izvietošanā nekad nelasa viena otru, un tāpat arī divas viena artefakta aizmugursistēmas. Katrai instancei jānāk no vienas būves (viens artefakts vai fiksēts Nuxt [`buildId`](https://nuxt.com/docs/api/nuxt-config#buildid)); atsevišķi uzbūvētas instances vienkārši nekoplieto. Ar fiksētu `buildId` un `dateBuild: 0` divas dažādas būves koplieto atslēgas. Tiek meklētas tikai iespējotās lokalizācijas, un lapu nosaukumi, kas garāki par 200 rakstzīmēm, izlaiž slāni.
+- **Kas tiek saglabāts.** Vārdnīca pirms ierakstīšanas tiek salīdzināta ar saknes vārdnīcu (`__root`) un tiek ierakstīta tikai tad, ja tā satur katru saknes atslēgu un atšķiras no saknes. Tāpēc izdomāta lapa, uz kuru atbildēts ar sakni, nepievieno atslēgu, un tāpat arī 200 kļūdas pamatteksts lapai. Katra instance šādu lapu nolasa no avota vienreiz. Hostam uz nezināmām lapām jāatbild ar sakni, tukšu objektu vai 404 un jāpasniedz `__root`. Hosts bez `__root` vai tāds, kas pasniedz lapas bez saknes atslēgām, neko nekoplieto. Ja hosts uz pašu `__root` atbild ar pareizi formatētu kļūdu, tā tiek saglabāta: ja aizmugursistēma to var izdarīt, turiet `cacheTtl` īsu.
+- **Derīguma termiņš.** Ieraksts beidzas `cacheTtl` sekundes pēc ierakstīšanas vai pēc vienas dienas, ja `cacheTtl` ir `0`, lai veco būvju atslēgas nevarētu uzkrāties. Vērtība var palikt instances paša kešatmiņā vēl vienu `cacheTtl` un renderēšanas gabalu kešatmiņā vēl vienu: aizmugursistēmas izmaiņas parādās trīs `cacheTtl` laikā. Draiveri bez derīguma termiņa (`fs`) patur vecās atslēgas, līdz tās noņemat.
+- **Kad krātuve kļūdās**, lapa nekļūdās. Nolasīšana var ilgt 1 sekundi, kas aptver savienojuma rokasspiedienu un Cloudflare KV atslēgu, kas tajā vietā ir auksta. Pēc kļūmes limits ir 250 ms, līdz krātuve atkal atbild. Trīs kļūmes pēc kārtas aizver slāni uz 5 sekundēm. Kamēr tas ir aizvērts un kamēr nolasīšana tikko ir neizdevusies, nekas netiek ierakstīts. Neizdevies ieraksts neko neaizver, tāpēc tikai lasāma replika turpina apkalpot nolasījumus. Krātuve, kuras atbildes aizņem ilgāk par šiem limitiem, tiek uzskatīta par kļūdainu: garām trāpījums, un vārdnīca nāk no sava avota. Ar ioredis tas sākas ap 400 ms katrai komandai, jo tā rokasspiediens aizņem trīs turp-atpakaļ ceļus. Modulis reģistrē vienu brīdinājumu minūtē; ioredis papildus izdrukā savas kļūdas. Vērtība, kas nav vārdnīca, tiek uzskatīta par garām trāpījumu un tiek pārrakstīta. Nezināms piemontējuma nosaukums pirmajā lietošanas reizē brīdina vienreiz; pēc tam lietotne darbojas bez slāņa.
+- **Kad avots kļūdās**, neviens kļūmi nesaglabā. Neizdevusies ielāde vai nenolasāms fails nenonāk nevienā kešatmiņā — ne šajā, ne instances pašas —, un nākamais pieprasījums lasa atkal. Skatiet [Izvietošana](/lv/guide/deployment#when-a-dictionary-cannot-be-read).
+- **Izslēgts izstrādes režīmā un prerenderēšanas laikā**, kas lasa savus failus un nedrīkst būt atkarīgi no jūsu produkcijas Redis.
+- **Atzīšana par nederīgu.** Nav attīrīšanas izsaukuma: jauna būve izmanto jaunas atslēgas. Lai nekavējoties atsvaidzinātu strādājošu būvi, noņemiet `i18n-micro:` atslēgas no krātuves un restartējiet instances. `clearCache` un HMR skar tikai procesa stāvokli.
+- Izpildlaika izmaiņas (`$mergeTranslations`, `$defineI18nRoute`) paliek renderēšanā vai pārlūkā, kas tās veica, un nekad netiek ierakstītas krātuvē.
+
+## Datu apjoms {#payload-size}
+
+Būve brīdina, kad datu izvade pārsniedz `translationPayloads.warnFileCount` (500 failu) vai `warnSizeBytes` (10 MB). Kad tā notiek:
+
+- pārvietojiet tikai lapai paredzētās atslēgas ārā no saknes failiem;
+- sasaistiet maršrutus, kas rāda tās pašas atslēgas (`routesLocaleLinks`);
+- bezservera vai Edge vidē izmantojiet `translationPayloads.mode: 'source'`, lai servera pakotne ieguldītu kompaktus avotus, nevis katru lapu × lokalizāciju ([Izvietošana](/lv/guide/deployment#serverless-and-edge)). Edge būve pati brīdina, ja tiek pārsniegts platformas limits ([Pakotņu limiti](/lv/guide/deployment#bundle-limits-on-edge));
+- ieslēdziet `nitro.compressPublicAssets`, lai iegūtu statisko datu `.gz` / `.br` kopijas.
+
+## Mērīšana {#measuring}
+
+Repozitorijs ar `pnpm run budget:payload` seko līdzi tam, ko piegādā playground; pašreizējie skaitļi:
+
+Izmērīts `playground` uz `/`, `/de`:
+
+| Mērījums | Izmērs |
+| --- | --- |
+| Tulkojumu avoti diskā | 7.8 MB |
+| Pasniegti kā atsevišķi datu faili | 23.9 MB |
+| Lielākais iekļautais `__NUXT_DATA__` | 0.4 KB |
+| Klienta resursi | 624.4 KB |
+
+Playground ir testa stends ar ģenerētām vārdnīcām līdz 100k atslēgām, tāpēc tie nav skaitļi, kurus gaidīt no īstas
+lietotnes — tie ir fiksēts atskaites punkts mērījumiem. Budžets neizdodas, ja tie negaidīti pieaug,
+un tā tiek pamanītas nejaušas izmaiņas tajā, ko satur dati.
+
+Palaidiet etalontestu komplektu pats ar `pnpm test:performance`; kā tas darbojas, aprakstīts [etalontestu metodoloģijā](https://s00d.github.io/nuxt-i18n-micro/contributing/performance-methodology).
+
+## Saistītās lapas {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Etalontesti" icon="book-open" href="/lv/guide/performance-results">
+
+</Card>
+
+<Card title="Izvietošana" icon="book-open" href="/lv/guide/deployment">
+
+</Card>
+
+<Card title="Tulkojumu faili" icon="book-open" href="/lv/guide/translations">
+
+</Card>
+
+</CardGroup>

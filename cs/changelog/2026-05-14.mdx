@@ -1,0 +1,83 @@
+---
+title: "v3.20.0 — refaktoring běhové vrstvy a rozdělení přesměrování"
+description: "Poznámky k vydání: v3.20.0 — refaktoring běhové vrstvy a rozdělení přesměrování"
+---
+
+**Datum**: 2026-05-14
+
+**Verze**: `v3.20.0`
+
+![v3.20.0 release](/images/3.20.0.png)
+
+Toto vydání refaktoruje běhové prostředí Nuxtu do samostatné vrstvy **`NuxtI18n`**, rozděluje zpracování přesměrování na serveru a klientovi a opravuje několik regresí v SSR/hydrataci. Veřejné composables a volby `nuxt.config` zůstávají pro typické aplikace stejné.
+
+## Co je nového? {#what’s-new}
+
+### `NuxtI18n` a `NuxtTranslationLoader` {#nuxti18n-&-nuxttranslationloader}
+
+Běhová logika i18n se přesouvá z monolitického pluginu do specializovaných tříd:
+
+- **`NuxtI18n`** — vrstva zobrazení aktivních překladů (`$t`, `$has`, kontext locale/trasy, slučování/úklid při přechodu)
+- **`NuxtTranslationLoader`** — načítá chunky, přepíná kontext při navigaci, předává SSR payload
+- **`createNuxtI18nPluginApi`** — tenké rozhraní pluginu (`$switchLocale`, `$localeRoute` atd.)
+
+Viz aktualizované stránky [Architektura cache a úložiště](https://s00d.github.io/nuxt-i18n-micro/v3/api/i18n-cache-api) a [Výkon](/cs/guide/performance).
+
+### SSR payload přes `useState('i18n-ssr-chunks')` {#ssr-payload-via-usestate‘i18n-ssr-chunks’}
+
+Překlady z SSR se serializují přes **stav Nuxtu**, nikoli přes značku script `window.__I18N__`:
+
+1. Server načte chunky → `useState('i18n-ssr-chunks')`
+2. Klient hydratuje → `translationStorage.seedFromSsrChunks()`
+3. Žádné dodatečné požadavky při prvním vykreslení
+
+Starší cesta čtení přes `window.__I18N__` je **odstraněna**.
+
+### Rozdělení architektury přesměrování {#redirect-architecture-split}
+
+Přesměrování jsou nyní specifická pro prostředí, což přináší srozumitelnější chování a méně trhání na klientovi:
+
+| Prostředí      | Komponenta                     | Role                                       |
+| -------------- | ------------------------------ | ------------------------------------------ |
+| **Server SSR** | `06.redirect.ts` (pouze server) | 302 před renderováním, kontroly 404, synchronizace cookie |
+| **Klient SPA** | `i18n-redirect.global.ts`      | Globální middleware tras při navigaci      |
+
+Přesměrování na klientovi odvozují locale z **cílové trasy**, zachovávají **query string a hash** a respektují `redirects: false` (middleware není registrován). Viz [Detekce locale — přesměrování podle strategie](/cs/guide/locale-detection#redirects-per-strategy).
+
+### Načasování hooku `i18n:register` {#i18nregister-hook-timing}
+
+Plugin **`05.hooks`** (`dependsOn: i18n-plugin-loader`) vyvolá `i18n:register` poté, co je loader připraven — při startu i při navigaci — takže uživatelské pluginy událost spolehlivě obdrží. Vypnout jej lze pomocí `hooks: false`. Viz [Události](/cs/api/events).
+
+### Extrakce `defineI18nRoute` při sestavení {#build-time-definei18nroute-extraction}
+
+Vite unplugin při sestavení prochází soubory stránek `.vue` a zapisuje meta tras pro `@i18n-micro/route-strategy`. Běhové `$defineI18nRoute` ve `script setup` zůstává pro vývoj a inline konfiguraci. Viz [Překlady pro jednotlivé komponenty](/cs/guide/per-component-translations).
+
+## Opravy chyb {#bug-fixes}
+
+- **Hydratace SSR** — klonování reaktivních SSR chunků před `Object.freeze` (opravuje pády `#locale` / 404 na klientovi)
+- **Přepnutí locale** — nahrazení vrstvy zobrazení při změně locale (žádné zastaralé klíče z předchozí locale)
+- **Přesměrování na klientovi** — locale z cílové trasy; query/hash zachovány při přesměrování
+- **`has()`** — kontroluje pouze aktivní locale; záložní locale se uplatňuje v `$t()`, nikoli v `$has()`
+- **Meta `defineI18nRoute`** — cache pro každou instanci pluginu; nejdelší shoda `rootDir`; správné cesty `pages/index` vs `pages/index/index`
+
+## Dokumentace {#documentation}
+
+Průvodci a reference API byly aktualizovány pro novou architekturu:
+
+- [Strategie](/cs/guide/strategy), [Upgrade na v3](https://s00d.github.io/nuxt-i18n-micro/v3/guide/v3-upgrade), [Vlastní detekce jazyka](/cs/guide/custom-auto-detect)
+- [FAQ — přepnutí locale beze změny URL](/cs/guide/faq#can-i-switch-locale-without-changing-the-url?)
+- [Konfigurace](https://s00d.github.io/nuxt-i18n-micro/v3/guide/configuration) — chování `redirects` a `hooks`
+
+## Zpětně nekompatibilní změny {#breaking-changes}
+
+Žádné pro standardní použití `nuxt.config` + composables. Změnily se interní cesty a mechanismus vkládání SSR; aplikace, které spoléhaly na ruční vkládání `window.__I18N__`, musí místo toho používat payload Nuxtu / API modulu.
+
+## Proč na tom záleží {#why-it-matters}
+
+- **Spolehlivější předání SSR → klient** — nativní stav Nuxtu místo ad-hoc globálních proměnných
+- **Srozumitelnější model přesměrování** — serverové 302 před vykreslením; klientský middleware jen tam, kde je potřeba
+- **Snazší údržba** — běhové prostředí rozdělené do testovatelných celků se specializovanými regresními testy
+
+Úplný changelog bude zveřejněn s vydáním na [GitHubu](https://github.com/s00d/nuxt-i18n-micro/blob/main/CHANGELOG.md).
+
+---

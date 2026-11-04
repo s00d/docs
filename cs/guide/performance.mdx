@@ -1,0 +1,261 @@
+---
+title: "Ladění výkonu"
+description: "Nastavení, která mění paměť, velikost payloadů a cachování, a jak změřit, co vaše aplikace dodává."
+---
+
+Výchozí hodnoty jsou vyladěné pro typickou aplikaci: jeden JSON payload na stránku a locale, překlady mimo HTML, omezené cache na serveru. Tato stránka uvádí těch několik nastavení, která má smysl měnit, když je katalog velký, server má omezenou paměť nebo payloady přicházejí z jiného hostitele. Naměřená čísla ve srovnání s `@nuxtjs/i18n` a čistým Nuxtem najdete v [Benchmarcích](/cs/guide/performance-results).
+
+## Co už dělají výchozí hodnoty {#what-the-defaults-already-do}
+
+- **Jeden payload na stránku.** Sestavení slučuje kořenové klíče, klíče stránky a klíče záložního locale do `/_locales/<page>/<locale>/data.json`, takže stránka načte jeden soubor a `$t` je jediné vyhledání.
+- **Žádný slovník v HTML.** SSR drží překlady v paměti serveru; prohlížeč stahuje payload, místo aby ho parsoval z `__NUXT_DATA__`.
+- **Cache prohlížeče.** `?v=` se mění jen tehdy, když se změní překlady, takže si prohlížeč ponechá payloady i přes nasazení, která se jich nedotkla. Statická kopie u hostitele je čerstvá 60 sekund a poté se revaliduje: opakované načtení čeká na jednu odpověď `304`. Serverová routa odpovídá `immutable` po dobu jednoho roku ([Nasazení](/cs/guide/deployment#cache-headers-and-datebuild)).
+- **Omezená paměť serveru.** Server ve výchozím stavu cachuje nejvýše 1000 payloadů a zahazuje ty nejdéle nepoužité.
+
+## Rozdělení překladů podle stránek {#split-translations-by-page}
+
+Klíče používané na jedné stránce patří do `locales/pages/<page>/<locale>.json`, nikoli do kořenových souborů: kořenové klíče jsou součástí payloadu každé stránky. Viz [Soubory s překlady](/cs/guide/translations).
+
+Toto rozdělení mění dvě nastavení:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    // pages that show the same keys share one payload: /de/products/123 loads the products payload
+    routesLocaleLinks: { 'products-id': 'products' },
+    // or: no page files at all, every page loads only the root dictionary
+    // disablePageLocales: true,
+  },
+})
+```
+
+[`routesLocaleLinks`](/cs/api/module-options#routeslocalelinks) omezuje duplicitní payloady pro související routy. [`disablePageLocales`](/cs/api/module-options#disablepagelocales) se hodí pro malé aplikace, kde je jeden slovník na locale jednodušší.
+
+## Serverové cache {#server-caches}
+
+| Nastavení | Výchozí | Účinek |
+| --- | --- | --- |
+| [`cacheMaxSize`](/cs/api/module-options#cachemaxsize) | `0` | Maximální počet položek v cache payloadů. `0` = bez limitu v prohlížeči, 1000 na serveru. |
+| [`cacheTtl`](/cs/api/module-options#cachettl) | `0` | Počet sekund, po kterých se položka v cache znovu načte. `0` = nikdy; nastavte ho, když payloady přicházejí z `apiBaseServerHost` a mění se bez nového nasazení. |
+| `serverTranslationPreload` | `false` | Načte payload `index` v middleware Nitro pro každý požadavek na stránku, takže ho serverové pomocné funkce a domovská stránka použijí znovu. |
+
+Na malé instanci s mnoha stránkami × locale snižte `cacheMaxSize`. Lokálně upravované překlady TTL nikdy nepotřebují: ve vývoji se soubory čtou živě, produkční payloady se mění jen s nasazením.
+
+## Paměť na serveru Node {#memory-on-a-node-server}
+
+Při ustálené zátěži může server Node setrvat na zhruba 12násobku své živé haldy a zůstat tam. Při zátěžovém testu se 100k klíči na stránku běžela živá halda o velikosti 90 MB na zhruba 1,1 GB RSS. Nejde o únik paměti. Po jednom příliš velkém cyklu GC zvýší V8 limit haldy a uvolněné stránky drží v poolu pro opětovné použití, dokud zátěž trvá. Zhruba 8 sekund po skončení zátěže se pool vyprázdní a RSS klesne na zhruba 160 MB. `global.gc()` tuto paměť nevrátí. Čistý Nuxt bez modulu se chová stejně, úměrně své menší haldě.
+
+Stojí to rezervu: s limitem paměti pod touto úrovní a bez omezení haldy může být proces ukončen. Nastavte limit, který odpovídá vašemu omezení a je výrazně nad živou haldou:
+
+```bash
+NODE_OPTIONS=--max-old-space-size=512 node .output/server/index.mjs
+```
+
+| 100k klíčů, 12 locale, 5 až 30 minut zátěže | Výchozí | `--max-old-space-size=512` |
+| --- | --- | --- |
+| RSS při zátěži | zhruba 1 150 MB | 254-287 MB |
+| Požadavky za sekundu | 624 | 517-572 |
+
+Limit tedy vyměňuje 8 až 10 % propustnosti za paměť. Katalog běžné velikosti má menší haldu a menší skok. Tato měření proběhla na macOS s Node 22, nikoli v kontejneru.
+
+## Čas parsování a `dir` {#parse-time-and-dir}
+
+`dir: 'auto'` u locale nutí prohlížeč určovat směr z obsahu během parsování. V Chromiu byl DOMContentLoaded při 20 000 elementech zhruba 1,1 s s `dir="auto"` a 0,1 s bez něj, a při 5 000 elementech zhruba 130 ms oproti 45 ms. Ponechte `dir` nenastavené nebo ho nastavte na `ltr` nebo `rtl` ([Směr textu](/cs/guide/seo#text-direction)).
+
+## Sdílená cache pro více instancí {#shared-cache-for-several-instances}
+
+Při více instancích jednoho sestavení jim [`cacheStorage`](/cs/api/module-options#other) poskytne jednu cache slovníků v libovolném úložišti Nitro, přes připojení, které vaše aplikace konfiguruje v `nitro.storage`. Modul nepřidává žádný konektor ani závislost.
+
+**Je to cache, ne zdroj.** Překlady pocházejí z vložených nebo veřejných payloadů, případně z `apiBaseServerHost`. Zapisuje se jen to, co přišlo ze zdroje, a klíče nesou sestavení, takže úložiště, které naplníte ručně, se nečte. Pokud chcete servírovat překlady z KV nebo databáze, umístěte na `apiBaseServerHost` malou routu, která je z nich čte.
+
+**Kdy pomáhá.** Pouze se vzdáleným `apiBaseServerHost`. Tři instance procházející 39 slovníků provedly bez ní 117 požadavků na hostitele a s ní 48. Se soubory na disku není zásah v úložišti rychlejší než soubor a první průchod přes 12 stránek trval 280-296 ms bez této možnosti a 308-325 ms s naplněným Redisem, takže ji nechte nenastavenou. Na presetu, který vkládá slovníky, bez hostitele nedělá nic, a sestavení na to upozorní.
+
+Studený slovník, jeden klient, jeden průchod pro každý, takže hrubě, a většinu tvoří vzdálenost k hostiteli:
+
+| Úložiště | Z hostitele | Z úložiště |
+| --- | --- | --- |
+| Cloudflare KV | zhruba 300 ms | zhruba 110 ms |
+| D1 | zhruba 230 ms | zhruba 115 ms |
+| Deno KV | zhruba 430 ms | zhruba 100 ms |
+| Upstash, Vercel serverless | zhruba 445 ms | zhruba 245 ms |
+| Upstash, Vercel Edge | zhruba 505 ms | zhruba 235 ms |
+
+### Redis {#redis}
+
+Vyžaduje `ioredis` ve vašem projektu.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      redis: { driver: 'redis', url: process.env.REDIS_URL },
+    },
+  },
+  i18n: {
+    cacheStorage: 'redis', // the mount name
+    apiBaseServerHost: 'https://translations.internal',
+    cacheTtl: 300,
+  },
+})
+```
+
+### Upstash na Vercelu a Vercel Edge {#upstash-on-vercel-and-vercel-edge}
+
+Na obou použijte ovladač `upstash`: komunikuje přes REST, zatímco ovladač `redis` potřebuje TCP. Vyžaduje `@upstash/redis` ve vašem projektu a čte `UPSTASH_REDIS_REST_URL` a `UPSTASH_REDIS_REST_TOKEN` z prostředí.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      upstash: { driver: 'upstash' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'upstash',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+### Cloudflare KV {#cloudflare-kv}
+
+Navažte namespace na Worker jako `I18N_KV` (`kv_namespaces` v jeho konfiguraci wrangler).
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      kv: { driver: 'cloudflare-kv-binding', binding: 'I18N_KV' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'kv',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+Hostitel, který je jiným Workerem na stejném účtu, vyžaduje příznak kompatibility `global_fetch_strictly_public`, jinak se k němu fetch nedostane.
+
+### Cloudflare D1 {#cloudflare-d1}
+
+`nitro.storage` nemůže obsahovat databázový objekt, proto ovladač připojuje plugin Nitro. Připojení se kontroluje při prvním použití, takže je to dostatečně brzy. Navažte databázi jako `I18N_DB` (`d1_databases`) a mějte ve svém projektu `unstorage`.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    experimental: { database: true },
+    database: {
+      default: { connector: 'cloudflare-d1', options: { bindingName: 'I18N_DB' } },
+    },
+  },
+  i18n: {
+    cacheStorage: 'd1',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+```ts
+// server/plugins/i18n-storage.ts
+import dbDriver from 'unstorage/drivers/db0'
+
+export default defineNitroPlugin(() => {
+  useStorage().mount('d1', dbDriver({ database: useDatabase() }))
+})
+```
+
+Ovladač `db0` je označen jako experimentální a ignoruje TTL: řádky starých sestavení zůstávají, dokud je nesmažete.
+
+### Deno KV {#deno-kv}
+
+Na Deno Deploy vytvořte databázi (`deno deploy database provision <name> --kind denokv`), přiřaďte ji aplikaci (`deno deploy database assign`) a použijte ovladač:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      kv: { driver: 'deno-kv' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'kv',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+### Jak se chová {#how-it-behaves}
+
+Slovník se hledá ve vlastní cache instance, poté ve sdíleném úložišti a nakonec u svého zdroje. Vlastní cache instance zůstává, protože `$t` je synchronní a potřebuje strom v paměti: tím se odděluje, kdo stahuje, od toho, kdo servíruje; paměť to nešetří.
+
+- **Kdo stahuje.** Se vzdáleným hostitelem jeden fetch z backendu na slovník místo jednoho na instanci. Instance, které minou ve stejném okamžiku, ho stáhnou každá zvlášť, protože neexistuje zámek.
+- **Stránky bez vlastního slovníku** se neukládají, aby smyšlené názvy stránek nemohly přidávat klíče. Každá instance stáhne takovou stránku z hostitele jednou a na Workerech, kde isolaty přicházejí a odcházejí, to představuje stálý slabý proud požadavků.
+- **Hostitel je nedostupný.** Stránky s uloženým slovníkem fungují. Stránka bez něj se vykreslí z uloženého kořenového slovníku, s vlastními klíči v surové podobě, s [`503`, který žádná cache neuchová](/cs/guide/deployment#when-a-dictionary-cannot-be-read), a `/_locales` pro ni odpovídá `503`, dokud se hostitel nevrátí. `useTranslationServerMiddleware` odpovídá klíči pro slovník, který nedokáže přečíst.
+- **Hostitelem** je za běhu `NUXT_I18N_APP_BASE_SERVER_HOST`, jinak `apiBaseServerHost` ze sestavení, stejně jako bez této možnosti. Na presetu, který vkládá slovníky (Cloudflare, Vercel, Netlify, viz [Nasazení](/cs/guide/deployment#serverless-and-edge)), se vrstva uplatní jen s hostitelem: data už jsou v bundlu a kopie v KV by byla síťovým čtením toho, co drží paměť.
+- **Klíče** mají tvar `i18n-micro:<buildId>~<dateBuild>~<fallbackLocale>~<host>:<locale>:<page>`, takže dvě sestavení při postupném nasazení nikdy nečtou data toho druhého, a stejně tak ani dva backendy jednoho artefaktu. Každá instance musí pocházet z jednoho sestavení (jeden artefakt nebo pevně nastavené [`buildId`](https://nuxt.com/docs/api/nuxt-config#buildid) v Nuxtu); instance sestavené samostatně prostě nesdílejí. S pevným `buildId` a `dateBuild: 0` dvě různá sestavení klíče sdílejí. Vyhledávají se jen povolená locale a názvy stránek delší než 200 znaků vrstvu přeskakují.
+- **Co se ukládá.** Slovník se před zápisem porovná s kořenovým (`__root`) a uloží se jen tehdy, když obsahuje všechny kořenové klíče a od kořenového se liší. Smyšlená stránka zodpovězená kořenovým slovníkem tak nepřidá žádný klíč, a stejně tak ani tělo chyby se stavem 200 na stránce. Každá instance přečte takovou stránku ze zdroje jednou. Hostitel musí na neznámé stránky odpovídat kořenovým slovníkem, prázdným objektem nebo 404 a servírovat `__root`. Hostitel bez `__root` nebo hostitel, který servíruje stránky bez kořenových klíčů, nesdílí nic. Pokud hostitel odpoví na samotné `__root` správně formovanou chybou, ta se uloží: pokud to backend může udělat, držte `cacheTtl` krátké.
+- **Vypršení.** Položka vyprší `cacheTtl` sekund po zápisu, nebo po jednom dni, když je `cacheTtl` rovno `0`, takže se klíče starých sestavení nemohou hromadit. Hodnota může zůstat ve vlastní cache instance po další `cacheTtl` a v cache chunků renderu ještě o jednu: změny na backendu se projeví do trojnásobku `cacheTtl`. Ovladače bez vypršení (`fs`) drží staré klíče, dokud je neodstraníte.
+- **Když úložiště selže**, stránka neselže. Čtení může trvat 1 sekundu, což pokryje navázání spojení i klíč Cloudflare KV, který je v daném místě studený. Po selhání je limit 250 ms, dokud úložiště znovu neodpoví. Tři selhání za sebou vrstvu na 5 sekund uzavřou. Dokud je uzavřená, a také hned po selhání čtení, se nic nezapisuje. Neúspěšný zápis nic neuzavírá, takže replika pouze pro čtení dál obsluhuje čtení. Úložiště, jehož odpovědi trvají déle než tyto limity, se považuje za selhávající: jde o miss a slovník přichází ze svého zdroje. U ioredis to začíná zhruba na 400 ms na příkaz, protože jeho navázání spojení trvá tři round tripy. Modul zaloguje jedno varování za minutu; ioredis k tomu vypisuje vlastní chyby. Hodnota, která není slovníkem, se považuje za miss a přepíše se. Neznámý název připojení jednou varuje při prvním použití; aplikace pak běží bez vrstvy.
+- **Když selže zdroj**, selhání si nic neuchová. Neúspěšný fetch nebo nečitelný soubor se nedostane do žádné cache, ani do této, ani do vlastní cache instance, a další požadavek čte znovu. Viz [Nasazení](/cs/guide/deployment#when-a-dictionary-cannot-be-read).
+- **Vypnuto ve vývoji a při prerenderu**, které čtou své soubory a nesmí potřebovat váš produkční Redis.
+- **Invalidace.** Neexistuje žádné volání pro vyčištění: nové sestavení používá nové klíče. Chcete-li běžící sestavení obnovit okamžitě, odstraňte klíče `i18n-micro:` z úložiště a restartujte instance. `clearCache` a HMR se dotýkají jen stavu procesu.
+- Změny za běhu (`$mergeTranslations`, `$defineI18nRoute`) zůstávají v renderu nebo prohlížeči, který je provedl, a nikdy se nezapisují do úložiště.
+
+## Velikost payloadů {#payload-size}
+
+Sestavení varuje, když výstup payloadů překročí `translationPayloads.warnFileCount` (500 souborů) nebo `warnSizeBytes` (10 MB). V takovém případě:
+
+- přesuňte klíče používané jen na stránce z kořenových souborů;
+- propojte routy, které zobrazují stejné klíče (`routesLocaleLinks`);
+- na serverless nebo Edge použijte `translationPayloads.mode: 'source'`, aby serverový bundle vkládal kompaktní zdroje místo každé kombinace stránka × locale ([Nasazení](/cs/guide/deployment#serverless-and-edge)). Sestavení pro Edge samo varuje po překročení limitu platformy ([Limity bundlu](/cs/guide/deployment#bundle-limits-on-edge));
+- zapněte `nitro.compressPublicAssets` pro kopie statických payloadů `.gz` / `.br`.
+
+## Měření {#measuring}
+
+Repozitář sleduje, co playground dodává, pomocí `pnpm run budget:payload`; aktuální čísla:
+
+Měřeno na `playground` přes `/`, `/de`:
+
+| Měření | Velikost |
+| --- | --- |
+| Zdroje překladů na disku | 7.8 MB |
+| Servírováno jako samostatné soubory payloadů | 23.9 MB |
+| Největší inline `__NUXT_DATA__` | 0.4 KB |
+| Klientské soubory | 624.4 KB |
+
+Playground je testovací prostředí s generovanými slovníky až o 100k klíčích, takže to nejsou hodnoty, které lze očekávat od skutečné
+aplikace — jsou to pevný bod, vůči kterému se měří. Rozpočet selže, když neočekávaně narostou,
+a tak se odhalí nechtěná změna toho, co payload nese.
+
+Sadu benchmarků si spusťte sami pomocí `pnpm test:performance`; jak funguje, je popsáno v [metodice benchmarků](https://s00d.github.io/nuxt-i18n-micro/contributing/performance-methodology).
+
+## Související {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Benchmarky" icon="book-open" href="/cs/guide/performance-results">
+
+</Card>
+
+<Card title="Nasazení" icon="book-open" href="/cs/guide/deployment">
+
+</Card>
+
+<Card title="Soubory s překlady" icon="book-open" href="/cs/guide/translations">
+
+</Card>
+
+</CardGroup>

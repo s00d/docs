@@ -1,0 +1,139 @@
+---
+title: "Detectarea locale-ului"
+description: "Cum este ales locale-ul pentru o pagină sau o cerere API: URL, query, stare, cookie, Accept-Language și valoarea implicită, și când este redirecționat un vizitator."
+---
+
+Fiecare cerere primește un singur locale, ales din aceeași listă de surse, în aceeași ordine, pe server și în browser. Citiți această pagină atunci când decideți cum ajung vizitatorii noi la o limbă, dacă alegerea lor este reținută și ce vede API-ul serverului. Veți găsi ordinea de prioritate, redirecționarea făcută de fiecare strategie și opțiunile care activează sau dezactivează fiecare sursă.
+
+<Tip>
+
+**Cerințe preliminare** — [Strategii de rutare](/ro/guide/strategy)
+
+</Tip>
+
+## Ordinea de prioritate {#the-precedence}
+
+Câștigă prima sursă care indică un locale **activat**. O valoare invalidă sau incorectă (un cod necunoscut, un cookie corupt) este ignorată și contează următoarea sursă.
+
+| # | Sursă | Contează când |
+| --- | --- | --- |
+| 1 | Prefixul din URL (`/de/about`) | strategii cu prefix. În cazul `prefix_except_default` și `prefix_and_default`, un URL fără prefix este locale-ul implicit |
+| 2 | `?locale=de` | pagini: doar `no_prefix`. Helperii API de pe server: întotdeauna și înaintea URL-ului |
+| 3 | Starea de locale setată de aplicație (`useI18nLocale().setLocale()`) | URL-ul nu are locale |
+| 4 | Cookie | [`localeCookie`](/ro/api/module-options#localecookie) este setat (`'user-locale'` automat în cazul `no_prefix`) |
+| 5 | Antetul `Accept-Language` | [`autoDetectLanguage`](/ro/api/module-options#autodetectlanguage) este `true` (implicit) |
+| 6 | [`defaultLocale`](/ro/api/module-options#defaultlocale) | întotdeauna |
+
+Așadar, cu o strategie cu prefix, URL-ul decide ce afișează o pagină; sursele de preferință (3–5) decid doar unde este **redirecționat** un vizitator și doar pe căile permise de `autoDetectPath`. În cazul `no_prefix` nu există nimic de redirecționat, iar sursele de preferință decid ce afișează pagina.
+
+![Decision flow: a locale prefix in the URL renders that locale. Without one, no_prefix renders from the preference sources, prefix_and_default renders the default locale, and prefix or prefix_except_default redirect by preference when autoDetectPath allows the path](/images/diagrams/locale-detection.svg)
+
+## Redirecționări pentru fiecare strategie {#redirects-per-strategy}
+
+Redirecționările sunt de tip `302`, făcute pe server înainte ca pagina să fie randată, și de un middleware de rută pentru navigările pe client. Query-ul și hash-ul sunt păstrate. Cu [`redirects: false`](/ro/api/module-options#redirects) nu are loc nicio redirecționare; prefixele greșite produc în continuare un 404.
+
+Vizitatorul preferă `de` (cookie sau antet), `defaultLocale: 'en'`, `autoDetectPath: '/'` implicit:
+
+| Cerere | `prefix_except_default` | `prefix` | `prefix_and_default` | `no_prefix` |
+| --- | --- | --- | --- | --- |
+| `/` | → `/de` | → `/de` | `/` în `en` | `/` în `de` |
+| `/about` | `/about` în `en` | → `/de/about` | `/about` în `en` | `/about` în `de` |
+| `/fr/about` | `/fr/about` | `/fr/about` | `/fr/about` | — |
+| `/en/about` | 404 | `/en/about` | `/en/about` | — |
+
+`prefix_and_default` nu redirecționează niciodată: un URL fără prefix aparține locale-ului implicit, iar celelalte locale-uri se află sub prefixul lor. Un vizitator care preferă `en` nu este redirecționat de la `/` în cazul `prefix_except_default`. Destinațiile nu au bară oblică la final (`/de`, nu `/de/`) și respectă căile personalizate (`/about` → `/de/ueber-uns`).
+
+Oriunde decide cookie-ul sau antetul (redirecționarea de la `/`, fiecare pagină în cazul `no_prefix`), răspunsul conține `Vary: Cookie, Accept-Language`, astfel încât un CDN păstrează răspunsurile separate.
+
+### `autoDetectPath` {#autodetectpath}
+
+Unde pot sursele de preferință să mute un vizitator:
+
+| Valoare | Preferința contează pe |
+| --- | --- |
+| `'/'` (implicit) | doar `/`. Linkurile directe rămân în limba URL-ului |
+| `'no_prefix'` | fiecare cale fără prefix de locale (`/about` → `/de/about`) |
+| `'/welcome'` | exact acea cale (bara oblică de la final este ignorată) |
+| `'*'` | fiecare cale, inclusiv cele cu prefix: `/about` și `/fr/about` → `/de/about` când vizitatorul preferă `de` |
+
+- Pe căile pe care nu le permite, un URL fără prefix este tratat ca locale-ul implicit.
+- `prefix` este excepția: nu are pagini fără prefix, deci `/about` merge întotdeauna la locale-ul vizitatorului (`/de/about` cu cookie-ul `de`, `/en/about` fără nicio preferință).
+- Cu `'*'`, serverul ignoră starea aplicației, iar un URL cu prefix nu își mai înregistrează propriul locale în cookie; cookie-ul se schimbă când vizitatorul comută cu `$switchLocale`.
+
+<Warning>
+
+Cu `'*'`, linkurile partajate se deschid în limba cititorului, ceea ce poate surprinde. Preferați `'/'` sau `'no_prefix'`, dacă nu este exact ceea ce doriți.
+
+</Warning>
+
+## Accept-Language {#accept-language}
+
+Antetul este citit așa cum îl definește RFC 9110 și comparat cu **codurile** de locale din configurație:
+
+- Intrările sunt încercate după valoarea `q`, de la cea mai mare (`fr;q=0.1, de;q=0.9` → `de`). `q=0` înseamnă „nu această limbă”; o intrare cu un `q` incorect este ignorată. `*` nu se potrivește cu nimic.
+- `_` este citit ca `-` (`en_US` = `en-US`).
+- Pentru fiecare intrare: codul exact, apoi formele mai scurte (`de-AT` → `de`), apoi un locale regional al aceleiași limbi (`en` → `en-US`). Potrivirile exacte și formele mai scurte nu depind de ordinea din `locales`; dintre mai multe potriviri regionale, câștigă prima din `locales`.
+- Scrierile nu sunt niciodată amestecate: `zh-TW` și `zh-HK` implică scrierea tradițională, `zh-CN` pe cea simplificată, deci `zh-CN` nu se potrivește niciodată cu un locale `zh-Hant`.
+- Locale-urile dezactivate nu se potrivesc niciodată.
+
+```ts
+// locales: [{ code: 'en' }, { code: 'de' }, { code: 'zh-Hant' }]
+// 'de-CH,de;q=0.9,en;q=0.8'  → 'de'
+// 'en-GB'                    → 'en'
+// 'zh-TW'                    → 'zh-Hant'
+// 'zh-CN'                    → no match, next source
+```
+
+Dezactivați detectarea din antet cu `autoDetectLanguage: false`; cookie-ul și starea contează în continuare.
+
+## Cookie-ul {#the-cookie}
+
+- **Dezactivat implicit** pentru strategiile cu prefix (`localeCookie: null`). Redirecționările funcționează atunci doar pe baza antetului, iar alegerea nu este reținută între vizite. Setați `localeCookie: 'user-locale'` pentru a o reține.
+- În cazul `no_prefix` este `'user-locale'`, dacă nu setați alt nume. `localeCookie: null` îl dezactivează și acolo.
+- Este scris când vizitatorul comută (`$switchLocale`, `<i18n-switcher>`, `useI18nLocale().setLocale()`) și la o randare pe server a unei pagini cu prefix (`/fr/about` stochează `fr`; nu și în cazul `autoDetectPath: '*'` cu redirecționările activate, unde URL-ul se poate încă schimba). O navigare pe client către o pagină stochează și locale-ul acelei pagini, inclusiv pe o pagină fără prefix a locale-ului implicit; prima încărcare a acelui URL nu o face. În cazul `no_prefix` și în modul hash, o navigare stochează doar o schimbare. Un 404 nu stochează nimic, cu excepția cazului în care `$switchLocale` ajunge pe el.
+- Durează un an (`path=/`, `SameSite=Lax`).
+- În cazul `hashMode`, preferința se află în schimb în cookie-ul `hash-locale`; serverul și clientul îl citesc pe același. Serverul randează acel locale și, în afara `prefix`, nu redirecționează niciodată; un locale din hash (`/#/de`) are prioritate față de el și se aplică imediat după hidratare. În cazul `prefix` nu există nicio pagină pe `/`, deci `/` este randat în browser, care merge la `/#/de` după cookie, apoi după limba browserului (`autoDetectLanguage`); orice alt document (`/about`, `/de`) redirecționează în hash.
+
+Citiți și setați preferința cu [`useI18nLocale`](/ro/composables/useI18nLocale), nu direct cu `useCookie` sau `useState`.
+
+## Propria detectare {#your-own-detection}
+
+Pentru a alege singur locale-ul (o setare a utilizatorului, un subdomeniu), apelați `useI18nLocale().setLocale(code)` într-un plugin care rulează înaintea plugin-ului modulului. Acesta devine sursa 3, starea aplicației. [Detectarea personalizată a locale-ului](/ro/guide/custom-auto-detect) conține rețeta completă, inclusiv dezactivarea detectării încorporate.
+
+## Rute API de pe server {#server-api-routes}
+
+[`useLocaleServerMiddleware`](/ro/guide/server-side-translations) și `useTranslationServerMiddleware` folosesc propria ordine, deoarece un URL de API este rareori localizat:
+
+1. `?locale=`
+2. un parametru de rută `[locale]` sau un prefix de locale în cale
+3. cookie (când `localeCookie` este setat)
+4. `Accept-Language` (când `autoDetectLanguage` este activat)
+5. `defaultLocale`
+
+`localeCookie: null` și `autoDetectLanguage: false` dezactivează sursele 3 și 4 și aici.
+
+## Suprascrieri la runtime {#runtime-overrides}
+
+[Suprascrierile la runtime](/ro/guide/runtime-overrides) modifică lista cu care sunt comparate sursele:
+
+- `disabledLocales` de la runtime sunt eliminate din fiecare pas: un cookie sau un antet care indică unul dintre ele este ignorat.
+- Un `defaultLocale` de la runtime reprezintă pasul 6 în cazul `prefix` și `no_prefix`.
+- În cazul `prefix_except_default` și `prefix_and_default`, locale-ul implicit este fixat la build (paginile sale sunt rutele fără prefix). Un `defaultLocale` de la runtime sau dezactivarea locale-ului implicit de la build este ignorat, cu un avertisment.
+
+## Vezi și {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Detectarea personalizată a locale-ului" icon="book-open" href="/ro/guide/custom-auto-detect">
+
+</Card>
+
+<Card title="Rute de server și API" icon="book-open" href="/ro/guide/server-side-translations">
+
+</Card>
+
+<Card title="useI18nLocale" icon="brackets-curly" href="/ro/composables/useI18nLocale">
+
+</Card>
+
+</CardGroup>

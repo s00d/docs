@@ -1,0 +1,261 @@
+---
+title: "Suorituskyvyn viritys"
+description: "Asetukset, jotka vaikuttavat muistiin, kuormien kokoon ja välimuistitukseen, sekä miten mitata, mitä sovelluksesi toimittaa."
+---
+
+Oletukset on viritetty tyypilliselle sovellukselle: yksi JSON-kuorma sivua ja lokaalia kohden, käännökset pidetty poissa HTML:stä, rajatut välimuistit palvelimella. Tämä sivu luettelee ne harvat asetukset, joita kannattaa muuttaa, kun katalogi on suuri, palvelimen muisti on rajallinen tai kuormat tulevat toiselta isännältä. Mitatut luvut verrattuna `@nuxtjs/i18n`-moduuliin ja pelkkään Nuxtiin löydät sivulta [Vertailuarvot](/fi/guide/performance-results).
+
+## Mitä oletukset jo tekevät {#what-the-defaults-already-do}
+
+- **Yksi kuorma sivua kohden.** Build yhdistää juuri-, sivu- ja varalokaalin avaimet tiedostoon `/_locales/<page>/<locale>/data.json`, joten sivu lataa yhden tiedoston ja `$t` on yksittäinen haku.
+- **Ei sanakirjaa HTML:ssä.** SSR pitää käännökset palvelimen muistissa; selain hakee kuorman sen sijaan, että jäsentäisi sen `__NUXT_DATA__`-datasta.
+- **Selaimen välimuisti.** `?v=` muuttuu vain käännösten muuttuessa, joten selain säilyttää kuormansa julkaisujen yli, jotka eivät koskeneet niihin. Isännän staattinen kopio on tuore 60 sekuntia ja validoidaan sen jälkeen uudelleen: toistuva lataus odottaa yhtä `304`-vastausta. Palvelinreitti vastaa `immutable`-otsakkeella vuoden ajan ([Julkaisu](/fi/guide/deployment#cache-headers-and-datebuild)).
+- **Rajattu palvelimen muisti.** Palvelin tallentaa oletuksena välimuistiin enintään 1000 kuormaa ja pudottaa vähiten äskettäin käytetyt.
+
+## Jaa käännökset sivuittain {#split-translations-by-page}
+
+Yhdellä sivulla käytetyt avaimet kuuluvat tiedostoon `locales/pages/<page>/<locale>.json`, eivät juuritiedostoihin: juuriavaimet ovat osa jokaisen sivun kuormaa. Katso [Käännöstiedostot](/fi/guide/translations).
+
+Kaksi asetusta muuttaa tätä jakoa:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    // pages that show the same keys share one payload: /de/products/123 loads the products payload
+    routesLocaleLinks: { 'products-id': 'products' },
+    // or: no page files at all, every page loads only the root dictionary
+    // disablePageLocales: true,
+  },
+})
+```
+
+[`routesLocaleLinks`](/fi/api/module-options#routeslocalelinks) vähentää toisiinsa liittyvien reittien päällekkäisiä kuormia. [`disablePageLocales`](/fi/api/module-options#disablepagelocales) sopii pieniin sovelluksiin, joissa yksi sanakirja lokaalia kohden on yksinkertaisempi.
+
+## Palvelimen välimuistit {#server-caches}
+
+| Asetus | Oletus | Vaikutus |
+| --- | --- | --- |
+| [`cacheMaxSize`](/fi/api/module-options#cachemaxsize) | `0` | Kuormavälimuistien merkintöjen enimmäismäärä. `0` = ei rajaa selaimessa, 1000 palvelimella. |
+| [`cacheTtl`](/fi/api/module-options#cachettl) | `0` | Sekunnit, joiden jälkeen välimuistissa oleva merkintä ladataan uudelleen. `0` = ei koskaan; aseta, kun kuormat tulevat `apiBaseServerHost`-isännältä ja muuttuvat ilman uutta julkaisua. |
+| `serverTranslationPreload` | `false` | Lataa `index`-kuorma Nitro-väliohjelmistossa jokaiselle sivupyynnölle, jotta palvelimen apufunktiot ja etusivu käyttävät sitä uudelleen. |
+
+Pienennä `cacheMaxSize`-arvoa pienellä instanssilla, jolla on monta sivua × lokaalia. Paikallisesti muokatut käännökset eivät koskaan tarvitse TTL:ää: kehitystila lukee tiedostot suoraan, ja tuotannon kuormat muuttuvat vain julkaisun myötä.
+
+## Muisti Node-palvelimella {#memory-on-a-node-server}
+
+Tasaisen kuorman alla Node-palvelin voi asettua noin 12-kertaiseksi elävään keoonsa nähden ja pysyä siinä. Rasitustestissä, jossa oli 100k avainta sivua kohden, 90 Mt:n elävä keko toimi noin 1,1 Gt:n RSS:llä. Kyse ei ole vuodosta. Yhden ylisuuren GC-kierroksen jälkeen V8 nostaa kekonsa rajaa ja pitää vapautetut sivut poolissa uudelleenkäyttöä varten niin kauan kuin kuorma kestää. Noin 8 sekuntia kuorman loppumisen jälkeen pooli tyhjenee ja RSS laskee noin 160 Mt:uun. `global.gc()` ei palauta tätä muistia. Pelkkä Nuxt ilman moduulia toimii samoin, skaalattuna pienempään kekoonsa.
+
+Se maksaa liikkumavaraa: jos muistiraja on tämän tason alapuolella eikä keolle ole ylärajaa, prosessi voidaan tappaa. Aseta yläraja, joka mahtuu rajaasi ja on reilusti elävän keon yläpuolella:
+
+```bash
+NODE_OPTIONS=--max-old-space-size=512 node .output/server/index.mjs
+```
+
+| 100k avainta, 12 lokaalia, 5–30 minuuttia kuormaa | Oletus | `--max-old-space-size=512` |
+| --- | --- | --- |
+| RSS kuorman alla | noin 1 150 Mt | 254–287 Mt |
+| Pyyntöjä sekunnissa | 624 | 517–572 |
+
+Yläraja siis vaihtaa 8–10 % läpäisykyvystä muistiin. Tavallisen kokoisella katalogilla on pienempi keko ja pienempi askel. Nämä ajot tehtiin macOS:llä Node 22:lla, ei kontissa.
+
+## Jäsennysaika ja `dir` {#parse-time-and-dir}
+
+Lokaalin `dir: 'auto'` saa selaimen päättelemään suunnan sisällöstä jäsennyksen aikana. Chromiumissa DOMContentLoaded 20 000 elementillä oli noin 1,1 s `dir="auto"`-asetuksella ja 0,1 s ilman sitä, ja 5 000 elementillä noin 130 ms vastaan 45 ms. Jätä `dir` asettamatta tai aseta se arvoon `ltr` tai `rtl` ([Tekstin suunta](/fi/guide/seo#text-direction)).
+
+## Jaettu välimuisti useille instansseille {#shared-cache-for-several-instances}
+
+Kun samasta buildista on useita instansseja, [`cacheStorage`](/fi/api/module-options#other) antaa niille yhden sanakirjavälimuistin missä tahansa Nitro-tallennustilassa, sovelluksesi `nitro.storage`-asetuksessa määrittämän yhteyden kautta. Moduuli ei lisää liitintä eikä riippuvuutta.
+
+**Se on välimuisti, ei lähde.** Käännökset tulevat upotetuista tai julkisista kuormista tai `apiBaseServerHost`-isännältä. Vain lähteestä tullut kirjoitetaan, ja avaimet sisältävät buildin, joten käsin täytettyä tallennustilaa ei lueta. Jos haluat tarjoilla käännöksiä KV:stä tai tietokannasta, aseta `apiBaseServerHost`-osoitteeseen pieni reitti, joka lukee sen.
+
+**Milloin siitä on hyötyä.** Vain etäisen `apiBaseServerHost`-isännän kanssa. Kolme instanssia, jotka kävivät läpi 39 sanakirjaa, tekivät isännälle 117 pyyntöä ilman sitä ja 48 sen kanssa. Kun tiedostot ovat levyllä, osuma tallennustilassa ei ole tiedostoa nopeampi, ja ensimmäinen läpikäynti 12 sivun yli kesti 280–296 ms ilman asetusta ja 308–325 ms täytetyn Redisin kanssa, joten jätä se asettamatta. Esiasetuksella, joka upottaa sanakirjat, se ei tee mitään ilman isäntää, ja build ilmoittaa siitä.
+
+Kylmä sanakirja, yksi asiakas, yksi läpikäynti kullekin, joten luvut ovat karkeita, ja suurin osa niistä on etäisyyttä isäntään:
+
+| Tallennustila | Isännältä | Tallennustilasta |
+| --- | --- | --- |
+| Cloudflare KV | noin 300 ms | noin 110 ms |
+| D1 | noin 230 ms | noin 115 ms |
+| Deno KV | noin 430 ms | noin 100 ms |
+| Upstash, Vercel serverless | noin 445 ms | noin 245 ms |
+| Upstash, Vercel Edge | noin 505 ms | noin 235 ms |
+
+### Redis {#redis}
+
+Vaatii `ioredis`-paketin projektiisi.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      redis: { driver: 'redis', url: process.env.REDIS_URL },
+    },
+  },
+  i18n: {
+    cacheStorage: 'redis', // the mount name
+    apiBaseServerHost: 'https://translations.internal',
+    cacheTtl: 300,
+  },
+})
+```
+
+### Upstash Vercelissä ja Vercel Edgessä {#upstash-on-vercel-and-vercel-edge}
+
+Käytä molemmissa `upstash`-ajuria: se käyttää RESTiä, kun taas `redis`-ajuri tarvitsee TCP:n. Se vaatii `@upstash/redis`-paketin projektiisi ja lukee `UPSTASH_REDIS_REST_URL`- ja `UPSTASH_REDIS_REST_TOKEN`-muuttujat ympäristöstä.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      upstash: { driver: 'upstash' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'upstash',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+### Cloudflare KV {#cloudflare-kv}
+
+Sido nimiavaruus Workeriin nimellä `I18N_KV` (`kv_namespaces` sen wrangler-konfiguraatiossa).
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      kv: { driver: 'cloudflare-kv-binding', binding: 'I18N_KV' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'kv',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+Isäntä, joka on toinen Worker samalla tilillä, tarvitsee `global_fetch_strictly_public`-yhteensopivuuslipun, muuten haku ei tavoita sitä.
+
+### Cloudflare D1 {#cloudflare-d1}
+
+`nitro.storage` ei voi sisältää tietokantaobjektia, joten Nitro-lisäosa liittää ajurin. Liitos tarkistetaan ensimmäisellä käyttökerralla, joten se on riittävän aikaisin. Sido tietokanta nimellä `I18N_DB` (`d1_databases`) ja lisää `unstorage` projektiisi.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    experimental: { database: true },
+    database: {
+      default: { connector: 'cloudflare-d1', options: { bindingName: 'I18N_DB' } },
+    },
+  },
+  i18n: {
+    cacheStorage: 'd1',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+```ts
+// server/plugins/i18n-storage.ts
+import dbDriver from 'unstorage/drivers/db0'
+
+export default defineNitroPlugin(() => {
+  useStorage().mount('d1', dbDriver({ database: useDatabase() }))
+})
+```
+
+`db0`-ajuri on merkitty kokeelliseksi ja se ohittaa TTL:n: vanhojen buildien rivit säilyvät, kunnes poistat ne.
+
+### Deno KV {#deno-kv}
+
+Deno Deployssa luo tietokanta (`deno deploy database provision <name> --kind denokv`), liitä se sovellukseen (`deno deploy database assign`) ja käytä ajuria:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      kv: { driver: 'deno-kv' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'kv',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+### Miten se toimii {#how-it-behaves}
+
+Sanakirjaa haetaan ensin instanssin omasta välimuistista, sitten jaetusta tallennustilasta ja sitten sen lähteestä. Instanssin oma välimuisti säilyy, koska `$t` on synkroninen ja tarvitsee puun muistissa: tämä erottaa hakijan tarjoilijasta, se ei säästä muistia.
+
+- **Kuka hakee.** Etäisen isännän kanssa yksi haku taustajärjestelmästä sanakirjaa kohden instanssikohtaisen haun sijaan. Instanssit, joilta puuttuu sanakirja samalla hetkellä, hakevat sen kukin, koska lukkoa ei ole.
+- **Sivuja ilman omaa sanakirjaa** ei tallenneta, jotta keksityt sivunimet eivät voi lisätä avaimia. Jokainen instanssi hakee tällaisen sivun isännältä kerran, ja Workereissa, joissa isolaatit tulevat ja menevät, se on tasainen pieni virta.
+- **Isäntä on alhaalla.** Sivut, joilla on tallennettu sanakirja, toimivat. Sivu, jolla ei ole sellaista, renderöidään tallennetusta juurisanakirjasta omat avaimensa raakoina, [`503`-vastauksella, jota mikään välimuisti ei säilytä](/fi/guide/deployment#when-a-dictionary-cannot-be-read), ja `/_locales` vastaa sille `503`, kunnes isäntä palaa. `useTranslationServerMiddleware` vastaa avaimilla sanakirjalle, jota se ei voi lukea.
+- **Isäntä** on ajonaikainen `NUXT_I18N_APP_BASE_SERVER_HOST` tai muuten buildin `apiBaseServerHost`, samoin kuin ilman asetusta. Esiasetuksella, joka upottaa sanakirjat (Cloudflare, Vercel, Netlify, katso [Julkaisu](/fi/guide/deployment#serverless-and-edge)), kerros on käytössä vain isännän kanssa: data on jo paketissa, ja kopio KV:ssä olisi verkkoluku sille, mikä on jo muistissa.
+- **Avaimet** ovat muotoa `i18n-micro:<buildId>~<dateBuild>~<fallbackLocale>~<host>:<locale>:<page>`, joten kaksi buildia liukuvassa julkaisussa eivät koskaan lue toistensa avaimia, eivätkä myöskään saman artefaktin kaksi taustajärjestelmää. Jokaisen instanssin on tultava yhdestä buildista (yksi artefakti tai kiinnitetty Nuxtin [`buildId`](https://nuxt.com/docs/api/nuxt-config#buildid)); erikseen rakennetut instanssit eivät yksinkertaisesti jaa. Kiinnitetyllä `buildId`-arvolla ja `dateBuild: 0` -asetuksella kaksi eri buildia kuitenkin jakaa avaimet. Vain käytössä olevia lokaaleja haetaan, ja yli 200 merkin sivunimet ohittavat kerroksen.
+- **Mitä tallennetaan.** Sanakirjaa verrataan juurisanakirjaan (`__root`) ennen kirjoittamista, ja se tallennetaan vain, jos se sisältää jokaisen juuriavaimen ja poikkeaa juuresta. Näin juurella vastattu keksitty sivu ei lisää avainta, eikä myöskään sivun 200-virherunko. Jokainen instanssi lukee tällaisen sivun lähteestä kerran. Isännän on vastattava tuntemattomiin sivuihin juurella, tyhjällä objektilla tai 404:llä ja tarjoiltava `__root`. Isäntä ilman `__root`-sanakirjaa tai isäntä, joka tarjoilee sivuja ilman juuriavaimia, ei jaa mitään. Jos isäntä vastaa itse `__root`-pyyntöön hyvin muotoillulla virheellä, se tallennetaan: pidä `cacheTtl` lyhyenä, jos taustajärjestelmä voi tehdä niin.
+- **Vanheneminen.** Merkintä vanhenee `cacheTtl` sekuntia kirjoittamisen jälkeen tai vuorokauden jälkeen, kun `cacheTtl` on `0`, joten vanhojen buildien avaimet eivät voi kasautua. Arvo voi säilyä instanssin omassa välimuistissa vielä yhden `cacheTtl`-jakson ja renderöinnin palavälimuistissa vielä yhden: taustajärjestelmän muutokset näkyvät kolminkertaisen `cacheTtl`-ajan kuluessa. Ajurit ilman vanhenemista (`fs`) säilyttävät vanhat avaimet, kunnes poistat ne.
+- **Kun tallennustila pettää**, sivu ei petä. Luku saa kestää 1 sekunnin, mikä kattaa yhteyden kättelyn ja Cloudflare KV -avaimen, joka on kylmä kyseisessä sijainnissa. Virheen jälkeen raja on 250 ms, kunnes tallennustila vastaa taas. Kolme peräkkäistä virhettä sulkee kerroksen 5 sekunniksi. Kun se on suljettu ja kun luku on juuri epäonnistunut, mitään ei kirjoiteta. Epäonnistunut kirjoitus ei sulje mitään, joten vain luku -replika jatkaa lukujen tarjoilua. Tallennustila, jonka vastaukset kestävät näitä rajoja kauemmin, lasketaan pettäväksi: ohi, ja sanakirja tulee lähteestään. ioredisillä tämä alkaa noin 400 ms:n kohdalla komentoa kohden, koska sen kättely vie kolme edestakaista matkaa. Moduuli kirjaa yhden varoituksen minuutissa; ioredis tulostaa omat virheensä sen lisäksi. Arvo, joka ei ole sanakirja, lasketaan ohiksi ja kirjoitetaan yli. Tuntematon liitosnimi varoittaa kerran ensimmäisellä käytöllä; sovellus toimii sen jälkeen ilman kerrosta.
+- **Kun lähde pettää**, mikään ei säilytä virhettä. Epäonnistunut haku tai lukukelvoton tiedosto ei päädy mihinkään välimuistiin, ei tähän eikä instanssin omaan, ja seuraava pyyntö lukee uudelleen. Katso [Julkaisu](/fi/guide/deployment#when-a-dictionary-cannot-be-read).
+- **Pois päältä kehitystilassa ja esirenderöinnissä**, jotka lukevat tiedostonsa eivätkä saa tarvita tuotannon Redisiäsi.
+- **Mitätöinti.** Tyhjennyskutsua ei ole: uusi build käyttää uusia avaimia. Jos haluat päivittää käynnissä olevan buildin heti, poista `i18n-micro:`-avaimet tallennustilasta ja käynnistä instanssit uudelleen. `clearCache` ja HMR koskevat vain prosessin tilaa.
+- Ajonaikaiset muutokset (`$mergeTranslations`, `$defineI18nRoute`) pysyvät renderöinnissä tai selaimessa, joka ne teki, eikä niitä koskaan kirjoiteta tallennustilaan.
+
+## Kuorman koko {#payload-size}
+
+Build varoittaa, kun kuormatuloste ylittää `translationPayloads.warnFileCount`-arvon (500 tiedostoa) tai `warnSizeBytes`-arvon (10 Mt). Kun näin käy:
+
+- siirrä vain sivulla käytetyt avaimet pois juuritiedostoista;
+- linkitä reitit, jotka näyttävät samat avaimet (`routesLocaleLinks`);
+- käytä serverlessissä tai Edgessä asetusta `translationPayloads.mode: 'source'`, jotta palvelinpaketti upottaa kompaktit lähteet jokaisen sivu × lokaali -yhdistelmän sijaan ([Julkaisu](/fi/guide/deployment#serverless-and-edge)). Edge-build varoittaa itsestään, kun alustan raja ylittyy ([Pakettirajat](/fi/guide/deployment#bundle-limits-on-edge));
+- ota käyttöön `nitro.compressPublicAssets` staattisten kuormien `.gz`- / `.br`-kopioita varten.
+
+## Mittaaminen {#measuring}
+
+Repositorio seuraa, mitä playground toimittaa, komennolla `pnpm run budget:payload`; nykyiset luvut:
+
+Mitattu `playground`-projektissa poluilla `/`, `/de`:
+
+| Mittaus | Koko |
+| --- | --- |
+| Käännöslähteet levyllä | 7,8 Mt |
+| Tarjoiltu erillisinä kuormatiedostoina | 23,9 Mt |
+| Suurin inline-`__NUXT_DATA__` | 0,4 kt |
+| Asiakaspuolen resurssit | 624,4 kt |
+
+Playground on testipenkki, jossa on generoituja sanakirjoja jopa 100k avaimella, joten nämä eivät ole lukuja, joita oikealta
+sovellukselta voi odottaa — ne ovat kiintopiste, johon mittauksia verrataan. Budjetti epäonnistuu, kun ne kasvavat odottamatta,
+ja näin huomataan vahingossa tehty muutos siihen, mitä kuorma sisältää.
+
+Aja vertailutestit itse komennolla `pnpm test:performance`; niiden toiminta on kuvattu [vertailumenetelmässä](https://s00d.github.io/nuxt-i18n-micro/contributing/performance-methodology).
+
+## Aiheeseen liittyvää {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Vertailuarvot" icon="book-open" href="/fi/guide/performance-results">
+
+</Card>
+
+<Card title="Julkaisu" icon="book-open" href="/fi/guide/deployment">
+
+</Card>
+
+<Card title="Käännöstiedostot" icon="book-open" href="/fi/guide/translations">
+
+</Card>
+
+</CardGroup>

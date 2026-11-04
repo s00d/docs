@@ -1,0 +1,131 @@
+---
+title: "Node.js"
+description: "@i18n-micro/node के साथ डिस्क से अनुवाद फ़ाइलें लोड करें और Node.js सर्वर, स्क्रिप्ट और CLI में अनुवाद करें।"
+---
+
+`@i18n-micro/node` [रनटाइम](/hi/integrations/runtime-package) इंस्टेंस के साथ एक लोडर है जो डिस्क से अनुवाद फ़ोल्डर पढ़ता है। इसका उपयोग Express या Fastify सर्वर, CLI, ईमेल या PDF जनरेटर, या किसी भी ऐसी स्क्रिप्ट में करें जिसे आपके Nuxt ऐप वाली ही JSON फ़ाइलें चाहिए। आप फ़ाइलें एक बार लोड करते हैं और अनुरोधों के बीच परिवर्तनशील स्टेट साझा किए बिना हर अनुरोध के लिए अनुवाद करते हैं।
+
+## इंस्टॉल करें {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add @i18n-micro/node @i18n-micro/utils
+```
+
+```bash npm
+npm install @i18n-micro/node @i18n-micro/utils
+```
+
+```bash yarn
+yarn add @i18n-micro/node @i18n-micro/utils
+```
+
+</CodeGroup>
+
+कोई peer dependency नहीं; Node.js `>=20`। `@i18n-micro/utils` केवल नीचे दिए गए `Accept-Language` हेल्पर के लिए आवश्यक है।
+
+## सेटअप {#setup}
+
+लोडर [Nuxt फ़ोल्डर लेआउट](/hi/guide/translations) पढ़ता है: `locales/en.json` एक रूट शब्दकोश है, `locales/pages/blog/post/en.json` रूट `blog-post` का है।
+
+```ts
+import { createI18n } from '@i18n-micro/node'
+
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', translationDir: './locales' })
+await i18n.loadTranslations()
+
+i18n.t('greeting', { name: 'Ada' }) // 'Hello, Ada!'
+i18n.t('title', undefined, undefined, 'blog-post') // from locales/pages/blog/post/en.json
+```
+
+विकल्प रनटाइम वाले ही हैं (देखें [इंस्टेंस](/hi/integrations/overview#the-instance)) साथ में `translationDir` और `disablePageLocales` (`pages/**` फ़ाइलों को रूट शब्दकोश मानें)। `i18n.reload()` हर शब्दकोश साफ़ करता है और फ़ोल्डर फिर से पढ़ता है, डेवलपमेंट में फ़ाइल वॉचर के लिए।
+
+`loadTranslations(dir, disablePageLocales?)` अलग से भी एक्सपोर्ट होता है और `{ root, routes }` लौटाता है:
+
+```ts
+import { loadTranslations } from '@i18n-micro/node'
+
+const { root, routes } = await loadTranslations('./locales')
+// root:   { en: {...}, de: {...} }
+// routes: { 'blog-post': { en: {...}, de: {...} } }
+```
+
+## हर अनुरोध के लिए {#per-request}
+
+एक इंस्टेंस एक लोकेल और एक रूट रखता है। किसी रिक्वेस्ट हैंडलर के अंदर साझा इंस्टेंस पर `i18n.locale` बदलना समवर्ती अनुरोधों के साथ race पैदा करता है। `run` हर अनुरोध को उसका अपना इंस्टेंस देता है:
+
+```ts
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', translationDir: './locales' })
+await i18n.loadTranslations()
+
+// `() => next()`: `run` hands its callback the fork, and Express reads an argument of `next` as an error
+app.use((req, res, next) => i18n.run(pickLocale(req), () => next()))
+
+app.get('/', (req, res) => {
+  res.send(i18n.t('greeting')) // the request's locale, in everything it awaits
+})
+```
+
+`run` के अंदर साझा इंस्टेंस अनुरोध का लोकेल और रूट पढ़ता और सेट करता है (`AsyncLocalStorage`); fork वर्तमान रूट पर शुरू होता है, और कॉलबैक के अंदर `i18n.setRoute(...)` उस अनुरोध का रूट बदलता है। कॉलबैक को अनुरोध का fork भी मिलता है: उसमें लिखे गए शब्दकोश अनुरोध में ही रहते हैं, साझा इंस्टेंस में लिखे गए शब्दकोश सभी तक पहुँचते हैं।
+
+`AsyncLocalStorage` के बिना, `i18n.fork(locale)` उसी तरह का इंस्टेंस लौटाता है जिसे आगे पास किया जा सके।
+
+`reload()` डायरेक्टरी फिर से पढ़ता है; जब तक नए शब्दकोश नहीं आ जाते, पुराने उत्तर देते रहते हैं।
+
+## लोकेल चुनें {#pick-the-locale}
+
+`detectLocaleFromAcceptLanguage(header, locales)` `q` वज़न का सम्मान करता है और `de-DE` को `de` लोकेल से (और `de` को `de-DE` से) मिलाता है। कुछ भी मेल न खाने पर यह `null` लौटाता है।
+
+```ts
+import express from 'express'
+import { detectLocaleFromAcceptLanguage } from '@i18n-micro/utils/accept-language'
+
+const app = express()
+
+app.get('/hello', (req, res) => {
+  const locale = detectLocaleFromAcceptLanguage(req.headers['accept-language'], locales) ?? 'en'
+  const i18n = byLocale.get(locale)!
+  res.json({ message: i18n.t('greeting', { name: 'Ada' }) })
+})
+```
+
+URL प्रीफ़िक्स, कुकी और हेडर को एक साथ देखने के लिए, `@i18n-micro/utils/resolve-locale` से `resolveLocale({ defaultLocale, validLocales, url, cookie, acceptLanguage, autoDetectLanguage: true })` मॉड्यूल की प्राथमिकता लागू करता है: URL, फिर कुकी, फिर `Accept-Language`, फिर डिफ़ॉल्ट। अमान्य मान छोड़ दिए जाते हैं।
+
+Nuxt ऐप के अंदर आपको सर्वर पर इस पैकेज की ज़रूरत नहीं है: मॉड्यूल के [सर्वर-साइड अनुवाद](/hi/guide/server-side-translations) का उपयोग करें।
+
+## API {#api}
+
+| एक्सपोर्ट | टिप्पणियाँ |
+| --- | --- |
+| `createI18n(options)`, `I18n` | रनटाइम इंस्टेंस + `translationDir`, `loadTranslations(dir?)`, `reload()` |
+| `loadTranslations(dir, disablePageLocales?)` | `{ root, routes }` |
+| `loadRootTranslations(dir, disablePageLocales?)` | केवल `root` |
+| `FormatService`, `interpolate` | core से |
+| टाइप: `I18nOptions`, `LoadedTranslations`, `Translations`, `Locale`, `PluralFunc`, `Params` | |
+
+इंस्टेंस मेथड [रनटाइम](/hi/integrations/runtime-package#api) पर सूचीबद्ध हैं। पूरे सिग्नेचर: [पैकेज संदर्भ](/hi/api/packages/node)।
+
+## संबंधित {#related}
+
+<CardGroup cols={2}>
+
+<Card title="रनटाइम" icon="book-open" href="/hi/integrations/runtime-package">
+
+`fs` के बिना इंस्टेंस
+
+</Card>
+
+<Card title="अनुवाद" icon="book-open" href="/hi/guide/translations">
+
+फ़ोल्डर लेआउट
+
+</Card>
+
+<Card title="लोकेल पहचान" icon="book-open" href="/hi/guide/locale-detection">
+
+Nuxt मॉड्यूल में प्राथमिकता
+
+</Card>
+
+</CardGroup>

@@ -1,0 +1,111 @@
+---
+title: "اكتشاف اللغة المخصص"
+description: "اختر اللغة بنفسك — حسب النطاق أو الترويسة أو ملف المستخدم — باستخدام إضافة خادم و useI18nLocale().setLocale()."
+---
+
+يقرأ الاكتشاف المدمج عنوان URL وملف تعريف ارتباط (cookie) و`Accept-Language`. عندما تعتمد اللغة على شيء آخر — النطاق، أو ترويسة جغرافية تضبطها شبكة CDN لديك، أو ملف المستخدم — اضبطها بنفسك في إضافة تعمل قبل إضافة i18n. تُحمِّل الوحدة بعد ذلك ترجمات تلك اللغة وتستخدمها لإعادة التوجيه تمامًا كما لو كانت قد اكتشفتها بنفسها. القواعد التي تحدد متى تتغلب اللغة المختارة على عنوان URL موجودة في [اكتشاف اللغة](/ar/guide/locale-detection)؛ وتوضح هذه الصفحة كيفية ربط مصدرك الخاص.
+
+## ضبط اللغة في إضافة خادم {#set-the-locale-in-a-server-plugin}
+
+```ts
+// plugins/i18n-locale.server.ts
+export default defineNuxtPlugin({
+  name: 'i18n-custom-locale',
+  enforce: 'pre',
+  order: -10, // before the i18n plugin (order -5)
+  setup() {
+    const { setLocale } = useI18nLocale()
+    const host = (useRequestHeaders(['host']).host ?? '').split(':')[0]! // without the port
+
+    if (host.endsWith('.de')) setLocale('de')
+    else if (host.endsWith('.fr')) setLocale('fr')
+  },
+})
+```
+
+يكتب `setLocale(code)` حالة اللغة (`useState('i18n-locale')`)، وكذلك ملف تعريف الارتباط عند إعداد ملف تعريف ارتباط للغة. استخدمه بدلًا من كتابة `useState` أو `useCookie` بنفسك. مرّر رموز اللغات المفعّلة فقط.
+
+أبقِ الإضافة بامتداد `.server.ts` عندما تقرأ ترويسات الطلب: فهي غير موجودة في المتصفح. إضافة `.client.ts` هي المكان المناسب للمصادر الخاصة بالمتصفح فقط مثل `localStorage`.
+
+## إيقاف خطوة Accept-Language المدمجة {#turn-off-the-built-in-accept-language-step}
+
+قد تختلف إضافتك و`Accept-Language`. لترك القرار لشيفرتك فقط (إضافة إلى عنوان URL وملف تعريف الارتباط)، أوقف الترويسة:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    autoDetectLanguage: false,
+  },
+})
+```
+
+يتحكم [`autoDetectLanguage`](/ar/api/module-options#autodetectlanguage) في خطوة الترويسة فقط. ولا يزال عنوان URL وملف تعريف الارتباط الصالح محتسبَين.
+
+## ما يحدث بعد ذلك {#what-happens-next}
+
+يعتمد تأثير `setLocale` على [الاستراتيجية](/ar/guide/strategy):
+
+| الاستراتيجية | تأثير `setLocale('de')` في الإضافة |
+| --- | --- |
+| `no_prefix` | تُعرض الصفحة بالألمانية؛ ولا يتغير عنوان URL. |
+| `prefix`, `prefix_except_default` | في مسار بلا بادئة يسمح فيه [`autoDetectPath`](/ar/api/module-options#autodetectpath) بإعادة التوجيه (افتراضيًا `/` فقط)، يرد الخادم بـ `302` إلى عنوان URL الألماني. ويحتفظ عنوان URL ذو بادئة اللغة ببادئته. |
+| `prefix_and_default` | لا إعادة توجيه: عنوان URL بلا بادئة هو صفحة صالحة للغة الافتراضية. |
+
+في استراتيجيات البادئة، تكون اللغة في عنوان URL اختيار المستخدم ولا تتجاوزها إضافتك. الاستثناء هو `autoDetectPath: '*'`: إذ ينقل الخادم حينها عناوين URL ذات البادئة حسب ملف تعريف الارتباط و`Accept-Language` ويتجاهل الحالة، لكن `setLocale()` يكتب أيضًا ملف تعريف الارتباط عند إعداده، لذا فبدءًا من الطلب التالي قد يعيد اختيار إضافتك توجيه عنوان URL ذي بادئة. أبقِ `'/'` أو استخدم `'no_prefix'` عندما يجب أن تتغلب عناوين URL الصريحة للغة. استخدم إضافتك لاختيار المكان الذي يصل إليه الزائر، لا لإعادة كتابة الروابط التي اتبعها.
+
+## احترام اللغة التي اختارها المستخدم {#respect-a-locale-the-user-picked}
+
+بمجرد أن يبدّل المستخدم اللغة، يكتب التبديل ملف تعريف الارتباط. تخطَّ اكتشافك الخاص عند وجود تفضيل صالح بالفعل:
+
+```ts
+// plugins/i18n-locale.server.ts
+import { detectLocaleFromAcceptLanguage } from '@i18n-micro/utils/accept-language'
+
+export default defineNuxtPlugin({
+  name: 'i18n-custom-locale',
+  enforce: 'pre',
+  order: -10,
+  setup() {
+    const { getPreferredLocale, setLocale, validLocales } = useI18nLocale()
+    if (getPreferredLocale()) return // valid state or cookie: keep it
+
+    const country = useRequestHeaders(['x-country'])['x-country']
+    if (country === 'JP') return setLocale('ja')
+
+    const header = useRequestHeaders(['accept-language'])['accept-language']
+    setLocale(detectLocaleFromAcceptLanguage(header, validLocales))
+  },
+})
+```
+
+يُرجع `getPreferredLocale()` الحالة أو ملف تعريف الارتباط فقط عندما تكون لغة مفعّلة، لذا لا يوقف ملف تعريف ارتباط قديم عملية الاكتشاف. `detectLocaleFromAcceptLanguage` هي دالة المطابقة المراعية لقيم q التي تستخدمها الوحدة نفسها (ثبّت `@i18n-micro/utils` لاستيرادها)؛ و`setLocale(null)` لا يفعل شيئًا.
+
+## نطاق واحد لكل لغة {#one-domain-per-locale}
+
+إذا كان على كل نطاق أن يخدم لغاته الخاصة، فلا تحتاج إلى إضافة: امنح كل لغة `baseUrl`، واضبط `baseDefault: true` على اللغة الافتراضية لكل نطاق، وابنِ مرة واحدة (لا يزال الموقع الثابت يشغّل `nuxi generate` لكل نطاق). راجع [الطبقات والنطاقات](/ar/guide/layers#multiple-domains).
+
+## ذات صلة {#related}
+
+<CardGroup cols={2}>
+
+<Card title="اكتشاف اللغة" icon="book-open" href="/ar/guide/locale-detection">
+
+قواعد الأولوية وإعادة التوجيه الكاملة
+
+</Card>
+
+<Card title="useI18nLocale" icon="brackets-curly" href="/ar/composables/useI18nLocale">
+
+</Card>
+
+<Card title="استراتيجيات التوجيه" icon="book-open" href="/ar/guide/strategy">
+
+</Card>
+
+<Card title="الطبقات والنطاقات" icon="book-open" href="/ar/guide/layers">
+
+</Card>
+
+</CardGroup>

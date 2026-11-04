@@ -1,0 +1,115 @@
+---
+title: "v3.0.0 — Performans Optimizasyonu, Route ve Path Strategy Paketleri"
+description: "Sürüm notları: v3.0.0 — Performans Optimizasyonu, Route ve Path Strategy Paketleri"
+---
+
+**Tarih**: 2026-02-04
+
+**Sürüm**: `v3.0.0`
+
+![v3.0.0 sürümü](/images/3.0.0.png)
+
+**Büyük bir mimari yenilenme** içeren **v3.0.0** sürümünü duyuruyoruz: çeviri depolama sistemi maksimum performans için baştan yazıldı, route üretimi ve çalışma zamanı path mantığı artık ayrı paketlere bölündü ve yönlendirme akışı daha iyi güvenilirlik ve Serverless uyumluluğu için yeniden tasarlandı.
+
+## Yenilikler neler? {#what’s-new}
+
+### Performans Optimizasyonu — Yeni Çeviri Depolama Mimarisi {#performance-optimization-—-new-translation-storage-architecture}
+
+Çeviri yükleme ve önbellekleme sistemi maksimum performans için tamamen yeniden yazıldı:
+
+- **Merkezi TranslationStorage sınıfı** — Yeni bir `TranslationStorage` sınıfı (`src/runtime/utils/storage.ts`) hem istemci hem sunucu için birleşik bir depolama sağlar. Tüm Node.js süreci boyunca gerçek bir singleton garanti etmek için `Symbol.for` ile `globalThis` kullanır ve paketlenmiş modüller arasında önbellek kopyalanmasını önler.
+
+- **Optimize edilmiş `$t()` fonksiyonu (tFast)** — Çeviri fonksiyonu tek bir etkin sözlük üzerinde doğrudan arama yapar:
+  1. Tüm çeviriler (kök + sayfaya özgü + fallback) derleme zamanında sayfa başına tek bir dosyada önceden birleştirilir
+  2. Aynı locale içindeki gezinmede yeni sayfa çevirileri etkin sözlüğe kümülatif olarak birleştirilir (geçiş animasyonları sırasında anahtarların titremesini önler)
+  3. Optimize edilmiş yol çözümlemesiyle iç içe anahtarları (`key.subkey.subsubkey`) destekler
+  4. Her çağrıda Map araması veya locale/route hesaplaması yapılmaz — önceden hesaplanmış bağlam kullanılır
+
+- **`window.__I18N__` ile sunucu tarafı enjeksiyon** — SSR sırasında yüklenen çeviriler HTML'e bir script etiketi olarak enjekte edilir. İstemci ilk yüklemede doğrudan `window.__I18N__` üzerinden okur ve yinelenen istekleri önler.
+
+- **Eklentide yerel parça önbelleği** — Eklenti, yüklenen tüm çeviri parçalarını saklayan yerel bir `loadedChunks` Map'i tutar. Bir kez yüklendikten sonra çeviriler sayfa yaşam döngüsü boyunca asla yeniden istenmez.
+
+- **Derleme zamanında önceden birleştirme** — `module.ts` içindeki bir `preMergeLocales` adımı, tüm katmanları, fallback locale zincirlerini ve kök düzeydeki çevirileri derleme zamanında her sayfa dosyasına birleştirir. server-loader yalnızca önceden oluşturulmuş tek bir dosyayı okur — çalışma zamanında birleştirme gerekmez.
+
+**Performans iyileştirmeleri:**
+
+- İstek başına daha az bellek ayırma (her `$t()` çağrısında nesne yeniden oluşturulmaz)
+- Daha düşük çöp toplama baskısı
+- Yük altında daha hızlı yanıt süreleri
+- Kararlı bellek kullanım deseni ("zıplayan" grafikler yok)
+
+### Route ve Path Strategy Paketleri {#route-&-path-strategy-packages}
+
+- **@i18n-micro/route-strategy** — Derleme zamanında route üretimi: Nuxt sayfalarını yerelleştirilmiş route'larla genişletir, her strateji için takma adları, iç içe route'ları ve özel path'leri işler. Tek giriş noktası: `new RouteGenerator(options)` ve `extendPages(pages)`. Stratejiler (`no_prefix`, `prefix`, `prefix_except_default`, `prefix_and_default`) ayrı sınıflar olarak uygulanır ve bir factory aracılığıyla seçilir.
+- **@i18n-micro/path-strategy** — Çalışma zamanında path ve locale işleme: yerelleştirilmiş path'ler oluşturmak, yönlendirmeleri çözümlemek ve locale değiştirmek için `PathStrategy` sağlar. Tree-shake edilebilir alt yol dışa aktarımları (`/prefix`, `/no-prefix` vb.) sayesinde yalnızca seçilen strateji pakete dahil edilir. Route çözümlemesi için saf fonksiyonlar ve minimum bellek ayırma için önceden hesaplanmış bağlam bayrakları kullanır.
+- **Yapılandırılmış paket düzeni** — Route mantığı `core/` ve `strategies/` ile `@i18n-micro/route-strategy` içinde. Path strategy, düz bir `src/` yapısıyla `@i18n-micro/path-strategy` içinde: `types.ts`, `path.ts`, `resolver.ts`, `helpers.ts` ve `strategies/`.
+- **Tutarlı davranış** — Takma ad işleme, üst–alt path birleştirme, özel `globalLocaleRoutes` / `filesLocaleRoutes` / `routeLocales` ve değişmezlik garantileri özel bir test paketiyle kapsanır.
+
+### Yönlendirme Mimarisinin Yenilenmesi {#redirect-architecture-overhaul}
+
+- **Sunucu middleware'i** — Yönlendirmeler ve 404 işleme Nitro middleware'inde (`i18n.global.ts`) çalışır. Bu, Nuxt render'ından önce çalışır; böylece bir locale çerezi mevcut olduğunda `/` adresinden `/<locale>/` adresine yönlendirmeler hata yanıp sönmesi olmadan gerçekleşir.
+- **İstemci eklentisi (istemci tarafı)** — Yalnızca istemcide çalışan bir eklenti (`06.client-redirect.client.ts`) hydration'dan sonra çalışır ve `useI18nLocale()` veya çerez varsayılan olmayan bir locale ayarladığında yönlendirmeleri işler. Nitro, Nuxt'tan önce çalıştığı için sunucu kullanıcı eklentilerinden gelen çerez/state değişikliklerini göremez; istemci eklentisi bu durumu karşılar.
+- **Fallback bileşeni yok** — `locale-redirect.vue` fallback bileşeni ve `fallbackRedirectComponentPath` seçeneği kaldırıldı. Yönlendirme mantığı tamamen sunucu middleware'i ve istemci eklentisi tarafından yürütülür.
+- **Özel path desteği** — Almanca için `/kontakt` gibi path'ler (`globalLocaleRoutes` aracılığıyla) locale öneki olmadan da geçerli olarak doğru şekilde tanınır ve prerender sırasında hatalı 404'ler önlenir.
+- **customRegexMatcher düzeltmesi** — `customRegexMatcher` kullanıldığında desen artık ilk path segmentinin **tamamıyla** (`^` ve `$` çapalarıyla) eşleşir. Bu, `[a-z]{2}-[a-z]{2}` deseninin daha önce alt dizelerle eşleştiği `/locale-test` gibi route'lar için hatalı 404'leri önler.
+- **autoDetectPath düzeltmesi** — `autoDetectPath` seçeneği artık özgün URL path'iyle doğru şekilde karşılaştırma yapar ve locale önekli URL'lere açıkça gidildiğinde istenmeyen yönlendirmeleri önler.
+
+### useI18nLocale Composable'ı {#usei18nlocale-composable}
+
+- **Merkezi locale yönetimi** — Yeni `useI18nLocale()` composable'ı `useLocaleCookies` yerine geçer ve locale state'i, çerezler ve senkronizasyon yardımcıları için tek bir giriş noktası sağlar.
+- **API** — `locale`, `localeCookie`, `hashCookie`, `getLocale()`, `getPreferredLocale()`, `setLocale()`, `syncLocale()`, `isValidLocale()`, `getEffectiveLocale()`, `resolveInitialLocale()`.
+- **Programatik locale** — Daha temiz ve merkezi locale yönetimi için sunucu eklentilerinde `useState('i18n-locale')` yerine `useI18nLocale().setLocale(locale)` kullanın.
+
+### Özel Otomatik Algılama ve Yapılandırma {#custom-auto-detection-&-configuration}
+
+- **`getI18nConfig()`** — Özel eklentiler (örn. locale algılama için) `useRuntimeConfig().public.i18nConfig` yerine `#build/i18n.strategy.mjs` içindeki `getI18nConfig()` fonksiyonunu kullanmalıdır. Bu, runtime config'e bağlı kalmadan çözümlenmiş i18n yapılandırmasına (örn. `localeCookie`) doğrudan erişim sağlar.
+- **Çerez adı** — Özel algılama mantığı uygularken `getI18nConfig().localeCookie ?? 'user-locale'` kullanın.
+
+### Sadeleştirilmiş Entegrasyon Paketleri {#simplified-integration-packages}
+
+Tüm entegrasyon paketleri (`@i18n-micro/vue`, `@i18n-micro/astro`, `@i18n-micro/node`, `@i18n-micro/react`, `@i18n-micro/preact`, `@i18n-micro/solid`) aynı çekirdek çeviri mantığını paylaşacak şekilde sadeleştirildi ve optimize edildi.
+
+### Yapılandırma Değişiklikleri {#configuration-changes}
+
+- **`previousPageFallback` kaldırıldı** — Bu seçeneğe artık gerek yok. Yeni kümülatif birleştirme stratejisi, geçiş animasyonları sırasında önceki sayfa çevirilerini otomatik olarak kullanılabilir tutar, ardından `page:transition:finish` hook'u ile temizler.
+- **`hmr`** — `experimental.hmr` yerine üst düzey bir seçenek oldu. Çeviri dosyaları için sunucu tarafı HMR'ı kontrol eder (geliştirme ortamında varsayılan olarak etkindir).
+
+```typescript
+// Before (v2.x)
+export default defineNuxtConfig({
+  i18n: {
+    experimental: {
+      hmr: true,
+    },
+  },
+})
+
+// After (v3.0.0)
+export default defineNuxtConfig({
+  i18n: {
+    hmr: true,
+  },
+})
+```
+
+## Geriye Dönük Uyumsuz Değişiklikler {#breaking-changes}
+
+- **`fallbackRedirectComponentPath`** — Kaldırıldı. Modül artık yönlendirmeler için bir fallback route bileşeni kullanmıyor. Özel bir bileşen path'i yapılandırdıysanız bunu yapılandırmanızdan kaldırın.
+- **`useLocaleCookies`** — Kaldırıldı. Bunun yerine `useI18nLocale()` kullanın. Yeni composable `locale`, `localeCookie`, `hashCookie`, `setLocale()`, `syncLocale()` ve daha fazlasını sağlar.
+- **`experimental.i18nPreviousPageFallback` / `previousPageFallback`** — Tamamen kaldırıldı. Kümülatif birleştirme stratejisi geçişlerdeki titremeyi otomatik olarak ele alır. Bu seçeneği yapılandırmanızdan kaldırın.
+- **`experimental.hmr`** — `hmr` olarak taşındı. Bu seçeneği kullanıyorsanız yapılandırmanızı güncelleyin.
+- **Özel eklentiler** — Özel locale algılama eklentiniz `useRuntimeConfig().public.i18nConfig` kullanıyorsa `#build/i18n.strategy.mjs` içindeki `getI18nConfig()` fonksiyonuna geçin. `useState('i18n-locale')` yerine `useI18nLocale().setLocale()` tercih edin. Güncellenmiş örnekler için [Özel Dil Algılama](/tr/guide/custom-auto-detect) sayfasına bakın.
+- **Dahili dosya değişiklikleri** — `load-from-storage.ts` ve `translation-loader.ts` kaldırıldı ve yerlerini `storage.ts` ve `server-loader.ts` aldı. Bu dosyalardan doğrudan import yapıyorsanız (önerilmez), import'larınızı güncelleyin.
+
+## Neden Önemli {#why-it-matters}
+
+- **Performans**: Merkezi singleton önbellek, istek başına nesne oluşturmayı ortadan kaldırır ve GC baskısını azaltır.
+- **Bakım kolaylığı**: Route ve path mantığı, net sınırları ve tipleri olan ayrı paketlerde bulunur.
+- **Test**: Strateji davranışı ve uç durumlar izole şekilde test edilir.
+- **Güvenilirlik**: Sunucu (Nitro) ve istemci yönlendirme mantığının ayrılması, çerez/useState kullanıcı eklentileri tarafından ayarlandığında zamanlama sorunlarını önler.
+- **Serverless'a hazır**: Nitro eklentisi, Nitro handler'larıyla aynı bağlamda çalışır ve Edge/Workers ile uyumludur.
+- **Dokümantasyon**: Yönlendirme davranışı [Strateji kılavuzunda](/tr/guide/strategy) ve [path-strategy](https://github.com/s00d/nuxt-i18n-micro/tree/main/packages/path-strategy) ile [route-strategy](https://github.com/s00d/nuxt-i18n-micro/tree/main/packages/route-strategy) paketlerinde belgelenmiştir.
+
+Yükseltme notları ve değişikliklerin tam listesi için [değişiklik günlüğüne](https://github.com/s00d/nuxt-i18n-micro/blob/main/CHANGELOG.md) bakın.
+
+---

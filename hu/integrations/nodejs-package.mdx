@@ -1,0 +1,131 @@
+---
+title: "Node.js"
+description: "Fordítási fájlok betöltése lemezről és fordítás Node.js szervereken, szkriptekben és CLI-kben az @i18n-micro/node segítségével."
+---
+
+Az `@i18n-micro/node` a [runtime](/hu/integrations/runtime-package) példány, kiegészítve egy betöltővel, amely egy fordítási mappát olvas be a lemezről. Használd Express vagy Fastify szerverben, CLI-ben, e-mail- vagy PDF-generátorban, vagy bármely szkriptben, amelynek ugyanazokra a JSON-fájlokra van szüksége, mint a Nuxt-alkalmazásodnak. A fájlokat egyszer töltöd be, és kérésenként fordítasz, anélkül hogy a kérések között módosítható állapot oszlana meg.
+
+## Telepítés {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add @i18n-micro/node @i18n-micro/utils
+```
+
+```bash npm
+npm install @i18n-micro/node @i18n-micro/utils
+```
+
+```bash yarn
+yarn add @i18n-micro/node @i18n-micro/utils
+```
+
+</CodeGroup>
+
+Nincsenek peer-függőségek; Node.js `>=20`. Az `@i18n-micro/utils` csak az alábbi `Accept-Language` segédfüggvényhez szükséges.
+
+## Beállítás {#setup}
+
+A betöltő a [Nuxt mappaszerkezetét](/hu/guide/translations) olvassa: a `locales/en.json` egy gyökérszótár, a `locales/pages/blog/post/en.json` pedig a `blog-post` útvonalhoz tartozik.
+
+```ts
+import { createI18n } from '@i18n-micro/node'
+
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', translationDir: './locales' })
+await i18n.loadTranslations()
+
+i18n.t('greeting', { name: 'Ada' }) // 'Hello, Ada!'
+i18n.t('title', undefined, undefined, 'blog-post') // from locales/pages/blog/post/en.json
+```
+
+Az opciók a runtime opciói (lásd: [a példány](/hu/integrations/overview#the-instance)), kiegészítve a `translationDir` és a `disablePageLocales` opcióval (a `pages/**` fájlokat gyökérszótárként kezeli). Az `i18n.reload()` minden szótárat kiürít, és újra beolvassa a mappát, fejlesztés közbeni fájlfigyelőhöz.
+
+A `loadTranslations(dir, disablePageLocales?)` önállóan is exportálva van, és `{ root, routes }` értéket ad vissza:
+
+```ts
+import { loadTranslations } from '@i18n-micro/node'
+
+const { root, routes } = await loadTranslations('./locales')
+// root:   { en: {...}, de: {...} }
+// routes: { 'blog-post': { en: {...}, de: {...} } }
+```
+
+## Kérésenként {#per-request}
+
+Egy példány egy locale-t és egy útvonalat tárol. Ha egy kéréskezelőn belül egy megosztott példány `i18n.locale` értékét váltod, az versenyhelyzetbe kerül a párhuzamos kérésekkel. A `run` saját példányt ad a kérésnek:
+
+```ts
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', translationDir: './locales' })
+await i18n.loadTranslations()
+
+// `() => next()`: `run` hands its callback the fork, and Express reads an argument of `next` as an error
+app.use((req, res, next) => i18n.run(pickLocale(req), () => next()))
+
+app.get('/', (req, res) => {
+  res.send(i18n.t('greeting')) // the request's locale, in everything it awaits
+})
+```
+
+A `run` belsejében a megosztott példány a kérés locale-ját és útvonalát olvassa és állítja (`AsyncLocalStorage`); a fork az aktuális útvonalon indul, a callbacken belüli `i18n.setRoute(...)` pedig az adott kérés útvonalát módosítja. A callback a kérés forkját is megkapja: az abba írt szótárak a kérésen belül maradnak, a megosztott példányba írt szótárak mindenkihez eljutnak.
+
+`AsyncLocalStorage` nélkül az `i18n.fork(locale)` ugyanilyen típusú példányt ad vissza, amelyet továbbadhatsz.
+
+A `reload()` újra beolvassa a könyvtárat; a régi szótárak válaszolnak, amíg az újak be nem töltődnek.
+
+## A locale kiválasztása {#pick-the-locale}
+
+A `detectLocaleFromAcceptLanguage(header, locales)` figyelembe veszi a `q` súlyokat, és a `de-DE` értéket egy `de` locale-hoz illeszti (a `de` értéket pedig a `de-DE` locale-hoz). Ha semmi sem illeszkedik, `null` értéket ad vissza.
+
+```ts
+import express from 'express'
+import { detectLocaleFromAcceptLanguage } from '@i18n-micro/utils/accept-language'
+
+const app = express()
+
+app.get('/hello', (req, res) => {
+  const locale = detectLocaleFromAcceptLanguage(req.headers['accept-language'], locales) ?? 'en'
+  const i18n = byLocale.get(locale)!
+  res.json({ message: i18n.t('greeting', { name: 'Ada' }) })
+})
+```
+
+Az URL-prefix, a cookie és a fejléc együttes kezeléséhez az `@i18n-micro/utils/resolve-locale` modulból származó `resolveLocale({ defaultLocale, validLocales, url, cookie, acceptLanguage, autoDetectLanguage: true })` a modul elsőbbségi sorrendjét alkalmazza: URL, majd cookie, majd `Accept-Language`, végül az alapértelmezett. Az érvénytelen értékek kimaradnak.
+
+Nuxt-alkalmazáson belül nincs szükséged erre a csomagra a szerveren: használd a modul [szerveroldali fordításait](/hu/guide/server-side-translations).
+
+## API {#api}
+
+| Export | Megjegyzések |
+| --- | --- |
+| `createI18n(options)`, `I18n` | runtime példány + `translationDir`, `loadTranslations(dir?)`, `reload()` |
+| `loadTranslations(dir, disablePageLocales?)` | `{ root, routes }` |
+| `loadRootTranslations(dir, disablePageLocales?)` | csak `root` |
+| `FormatService`, `interpolate` | a core csomagból |
+| Típusok: `I18nOptions`, `LoadedTranslations`, `Translations`, `Locale`, `PluralFunc`, `Params` | |
+
+A példány metódusai a [Runtime](/hu/integrations/runtime-package#api) oldalon vannak felsorolva. Teljes szignatúrák: [csomagreferencia](/hu/api/packages/node).
+
+## Kapcsolódó {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Runtime" icon="book-open" href="/hu/integrations/runtime-package">
+
+A példány `fs` nélkül
+
+</Card>
+
+<Card title="Fordítások" icon="book-open" href="/hu/guide/translations">
+
+Mappaszerkezet
+
+</Card>
+
+<Card title="Locale-felismerés" icon="book-open" href="/hu/guide/locale-detection">
+
+Az elsőbbségi sorrend a Nuxt-modulban
+
+</Card>
+
+</CardGroup>

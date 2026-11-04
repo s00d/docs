@@ -1,0 +1,139 @@
+---
+title: "Locale-észlelés"
+description: "Hogyan választódik ki a locale egy oldalhoz vagy API-kéréshez: URL, query, állapot, süti, Accept-Language és alapértelmezés, valamint mikor irányítódik át a látogató."
+---
+
+Minden kérés egyetlen locale-t kap, amelyet a szerveren és a böngészőben is ugyanabból a forráslistából, ugyanabban a sorrendben választ ki a modul. Olvasd el ezt, amikor eldöntöd, hogy az első alkalommal érkező látogatók milyen nyelvre érkezzenek, megjegyződjön-e a választásuk, és mit lát a szerveroldali API-d. Megtudhatod a sorrendet, az egyes stratégiák átirányításait, és azokat a beállításokat, amelyekkel az egyes források be- vagy kikapcsolhatók.
+
+<Tip>
+
+**Előfeltételek** — [Útválasztási stratégiák](/hu/guide/strategy)
+
+</Tip>
+
+## A sorrend {#the-precedence}
+
+Az első forrás nyer, amely egy **engedélyezett** locale-t nevez meg. Az érvénytelen vagy hibás formátumú értéket (ismeretlen kód, sérült süti) a modul kihagyja, és a következő forrás számít.
+
+| # | Forrás | Mikor számít |
+| --- | --- | --- |
+| 1 | URL-előtag (`/de/about`) | előtagos stratégiáknál. `prefix_except_default` és `prefix_and_default` esetén az előtag nélküli URL az alapértelmezett locale |
+| 2 | `?locale=de` | oldalak: csak `no_prefix` esetén. Szerveroldali API-segédek: mindig, és az URL előtt |
+| 3 | Az alkalmazás által beállított locale-állapot (`useI18nLocale().setLocale()`) | az URL nem tartalmaz locale-t |
+| 4 | Süti | a [`localeCookie`](/hu/api/module-options#localecookie) be van állítva (`no_prefix` esetén automatikusan `'user-locale'`) |
+| 5 | `Accept-Language` fejléc | az [`autoDetectLanguage`](/hu/api/module-options#autodetectlanguage) értéke `true` (alapértelmezés) |
+| 6 | [`defaultLocale`](/hu/api/module-options#defaultlocale) | mindig |
+
+Előtagos stratégia esetén tehát az URL dönti el, mit mutat az oldal; a preferenciaforrások (3–5) csak azt döntik el, hová **irányítódik át** a látogató, és csak azokon az útvonalakon, amelyeket az `autoDetectPath` engedélyez. `no_prefix` esetén nincs mit átirányítani, és a preferenciaforrások döntik el, mit mutat az oldal.
+
+![Decision flow: a locale prefix in the URL renders that locale. Without one, no_prefix renders from the preference sources, prefix_and_default renders the default locale, and prefix or prefix_except_default redirect by preference when autoDetectPath allows the path](/images/diagrams/locale-detection.svg)
+
+## Átirányítások stratégiánként {#redirects-per-strategy}
+
+Az átirányítások `302`-es válaszok, amelyeket a szerver az oldal renderelése előtt végez, kliensoldali navigációnál pedig egy útvonal-middleware. A query és a hash megmarad. [`redirects: false`](/hu/api/module-options#redirects) esetén egyik sem történik meg; a hibás előtagok továbbra is 404-et adnak.
+
+A látogató a `de` locale-t preferálja (süti vagy fejléc), `defaultLocale: 'en'`, alapértelmezett `autoDetectPath: '/'`:
+
+| Kérés | `prefix_except_default` | `prefix` | `prefix_and_default` | `no_prefix` |
+| --- | --- | --- | --- | --- |
+| `/` | → `/de` | → `/de` | `/` `en` nyelven | `/` `de` nyelven |
+| `/about` | `/about` `en` nyelven | → `/de/about` | `/about` `en` nyelven | `/about` `de` nyelven |
+| `/fr/about` | `/fr/about` | `/fr/about` | `/fr/about` | — |
+| `/en/about` | 404 | `/en/about` | `/en/about` | — |
+
+A `prefix_and_default` soha nem irányít át: az előtag nélküli URL az alapértelmezett locale-hoz tartozik, a többi locale pedig a saját előtagja alatt él. Az `en` locale-t preferáló látogatót `prefix_except_default` esetén a modul nem irányítja át a `/` útvonalról. A célútvonalak nem végződnek perjelre (`/de`, nem `/de/`), és követik az egyéni útvonalakat (`/about` → `/de/ueber-uns`).
+
+Ahol a süti vagy a fejléc dönt (a `/` útvonalról történő átirányítás, `no_prefix` esetén minden oldal), a válasz tartalmazza a `Vary: Cookie, Accept-Language` fejlécet, így a CDN külön tárolja a válaszokat.
+
+### `autoDetectPath` {#autodetectpath}
+
+Hol mozdíthatják el a látogatót a preferenciaforrások:
+
+| Érték | A preferencia számít |
+| --- | --- |
+| `'/'` (alapértelmezés) | csak a `/` útvonalon. A mélylinkek az URL nyelvén maradnak |
+| `'no_prefix'` | minden locale-előtag nélküli útvonalon (`/about` → `/de/about`) |
+| `'/welcome'` | pontosan azon az útvonalon (a záró perjel figyelmen kívül marad) |
+| `'*'` | minden útvonalon, az előtagosakon is: `/about` és `/fr/about` → `/de/about`, ha a látogató a `de` locale-t preferálja |
+
+- Azokon az útvonalakon, amelyeket nem engedélyez, az előtag nélküli URL az alapértelmezett locale-nak számít.
+- A `prefix` a kivétel: nincsenek előtag nélküli oldalai, így a `/about` mindig a látogató locale-jára visz (`de` süti esetén `/de/about`, preferencia nélkül `/en/about`).
+- `'*'` esetén a szerver figyelmen kívül hagyja az alkalmazás állapotát, és az előtagos URL már nem rögzíti a saját locale-ját a sütiben; a süti akkor változik, amikor a látogató a `$switchLocale` segítségével vált.
+
+<Warning>
+
+`'*'` esetén a megosztott linkek az olvasó nyelvén nyílnak meg, ami meglepő lehet. Inkább a `'/'` vagy a `'no_prefix'` értéket válaszd, hacsak nem pontosan ez a célod.
+
+</Warning>
+
+## Accept-Language {#accept-language}
+
+A modul a fejlécet az RFC 9110 szerint olvassa be, és a konfigurációd locale-**kódjaival** veti össze:
+
+- A bejegyzéseket `q` érték szerint próbálja, a legmagasabbal kezdve (`fr;q=0.1, de;q=0.9` → `de`). A `q=0` jelentése: „ezt a nyelvet ne”; a hibás `q` értékű bejegyzés figyelmen kívül marad. A `*` semmire sem illeszkedik.
+- A `_` jelet `-` jelként olvassa (`en_US` = `en-US`).
+- Bejegyzésenként: a pontos kód, majd a rövidebb alakok (`de-AT` → `de`), majd ugyanannak a nyelvnek egy regionális locale-ja (`en` → `en-US`). A pontos és a rövidebb alakok nem függnek a `locales` sorrendjétől; több regionális egyezés közül a `locales` listában elsőként szereplő nyer.
+- Az írásrendszerek soha nem keverednek: a `zh-TW` és a `zh-HK` hagyományos, a `zh-CN` egyszerűsített írást jelent, így a `zh-CN` soha nem illeszkedik egy `zh-Hant` locale-ra.
+- A letiltott locale-ok soha nem illeszkednek.
+
+```ts
+// locales: [{ code: 'en' }, { code: 'de' }, { code: 'zh-Hant' }]
+// 'de-CH,de;q=0.9,en;q=0.8'  → 'de'
+// 'en-GB'                    → 'en'
+// 'zh-TW'                    → 'zh-Hant'
+// 'zh-CN'                    → no match, next source
+```
+
+A fejlécalapú észlelést az `autoDetectLanguage: false` kapcsolja ki; a süti és az állapot továbbra is számít.
+
+## A süti {#the-cookie}
+
+- Az előtagos stratégiáknál **alapértelmezés szerint ki van kapcsolva** (`localeCookie: null`). Ilyenkor az átirányítások csak a fejléc alapján működnek, és a választás nem marad meg a látogatások között. A megjegyzéséhez állítsd be a `localeCookie: 'user-locale'` értéket.
+- `no_prefix` esetén `'user-locale'` az értéke, hacsak nem adsz meg más nevet. A `localeCookie: null` ott is kikapcsolja.
+- Akkor íródik, amikor a látogató vált (`$switchLocale`, `<i18n-switcher>`, `useI18nLocale().setLocale()`), valamint egy előtag alatti oldal szerveroldali renderelésekor (a `/fr/about` az `fr` értéket tárolja; kivéve `autoDetectPath: '*'` és bekapcsolt átirányítások esetén, ahol az URL még elmozdulhat). Egy oldalra történő kliensoldali navigáció is eltárolja az oldal locale-ját, az alapértelmezett locale előtag nélküli oldalán is; az adott URL első betöltése nem. `no_prefix` esetén és hash módban a navigáció csak a változást tárolja. A 404 semmit sem tárol, hacsak a `$switchLocale` nem arra érkezik.
+- Egy évig érvényes (`path=/`, `SameSite=Lax`).
+- `hashMode` esetén a preferencia ehelyett a `hash-locale` sütiben él; a szerver és a kliens ugyanazt olvassa. A szerver azt a locale-t rendereli, és a `prefix` kivételével soha nem irányít át; a hash-ben lévő locale (`/#/de`) elsőbbséget élvez, és közvetlenül a hidratálás után érvényesül. `prefix` esetén nincs oldal a `/` útvonalon, ezért a `/` a böngészőben renderelődik, amely a süti, majd a böngésző nyelve (`autoDetectLanguage`) alapján a `/#/de` útvonalra lép; minden más dokumentum (`/about`, `/de`) a hash-be irányít át.
+
+A preferenciát a [`useI18nLocale`](/hu/composables/useI18nLocale) segítségével olvasd és állítsd be, ne közvetlenül a `useCookie` vagy a `useState` használatával.
+
+## Saját észlelés {#your-own-detection}
+
+Ha magad szeretnéd kiválasztani a locale-t (felhasználói beállítás, aldomain), hívd meg a `useI18nLocale().setLocale(code)` függvényt egy olyan pluginban, amely a modul pluginja előtt fut. Ez lesz a 3. forrás, az alkalmazás állapota. Az [Egyéni locale-észlelés](/hu/guide/custom-auto-detect) oldalon megtalálod a teljes receptet, a beépített észlelés kikapcsolásával együtt.
+
+## Szerveroldali API-útvonalak {#server-api-routes}
+
+A [`useLocaleServerMiddleware`](/hu/guide/server-side-translations) és a `useTranslationServerMiddleware` saját sorrendet használ, mert egy API URL-je ritkán lokalizált:
+
+1. `?locale=`
+2. egy `[locale]` útvonalparaméter vagy egy locale-előtag az útvonalban
+3. süti (ha a `localeCookie` be van állítva)
+4. `Accept-Language` (ha az `autoDetectLanguage` be van kapcsolva)
+5. `defaultLocale`
+
+A `localeCookie: null` és az `autoDetectLanguage: false` itt is kikapcsolja a 3. és 4. forrást.
+
+## Futásidejű felülírások {#runtime-overrides}
+
+A [futásidejű felülírások](/hu/guide/runtime-overrides) azt a listát módosítják, amelyhez a források illesztődnek:
+
+- A futásidőben letiltott `disabledLocales` minden lépésből kikerülnek: az ilyet megnevező süti vagy fejléc kimarad.
+- Egy futásidejű `defaultLocale` a 6. lépés `prefix` és `no_prefix` esetén.
+- `prefix_except_default` és `prefix_and_default` esetén az alapértelmezett locale build időben rögzül (az oldalai az előtag nélküli útvonalak). A futásidejű `defaultLocale`, illetve a build alapértelmezésének letiltása figyelmeztetéssel figyelmen kívül marad.
+
+## Kapcsolódó {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Egyéni locale-észlelés" icon="book-open" href="/hu/guide/custom-auto-detect">
+
+</Card>
+
+<Card title="Szerveroldali útvonalak és API" icon="book-open" href="/hu/guide/server-side-translations">
+
+</Card>
+
+<Card title="useI18nLocale" icon="brackets-curly" href="/hu/composables/useI18nLocale">
+
+</Card>
+
+</CardGroup>

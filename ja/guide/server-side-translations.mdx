@@ -1,0 +1,120 @@
+---
+title: "サーバールートと API"
+description: "Nitro のサーバールートや API ハンドラー内で文字列を翻訳し、リクエストのロケールを読み取ります。"
+---
+
+`server/api/` および `server/routes/` 内のサーバーハンドラーは、自動インポートされる 2 つのヘルパーを使って、文字列を翻訳したりリクエストのロケールを読み取ったりできます。API レスポンス、メール、フィード、その他 Vue ページの外でレンダリングされるものに使用してください。これらはページと同じ翻訳ファイルを読み込み、リクエストからロケールを検出します。
+
+## ハンドラー内で翻訳する {#translate-in-a-handler}
+
+```ts
+// server/api/greeting.get.ts
+export default defineEventHandler(async (event) => {
+  const t = await useTranslationServerMiddleware(event)
+  return { message: t('greeting', { name: 'Ada' }) }
+})
+```
+
+```bash
+curl 'http://localhost:3000/api/greeting?locale=de'
+# {"message":"Hallo, Ada!"}
+```
+
+`useTranslationServerMiddleware(event, defaultLocale?, locale?)` は非同期で、`t(key, params?, defaultValue?)` を返します。`t` は文字列を返し、`{name}` パラメーターを補間します。キーが存在しない場合は、空でない `defaultValue` を、なければキーを返します。
+
+`t` が参照するのは `index` チャンクのみです：ルートファイル（`locales/<locale>.json`）と、存在する場合は `locales/pages/index/`（`disablePageLocales` の場合はルートファイルのみ）です。他のページのキーは読み込まれません。それらが必要な場合は、チャンクを自分で読み込んでください：
+
+```ts
+const { data } = await loadTranslationsFromServer('de', 'about') // Translations object of the about page
+```
+
+## リクエストのロケールを読み取る {#read-the-request-locale}
+
+```ts
+// server/api/locale.get.ts
+export default defineEventHandler((event) => {
+  const { current, isDefault, locale } = useLocaleServerMiddleware(event)
+  return { current, isDefault, dir: locale?.dir ?? 'ltr' }
+})
+```
+
+`useLocaleServerMiddleware(event, defaultLocale?, locale?)` は同期関数で、次を返します：
+
+```ts
+interface LocaleInfo {
+  current: string // detected locale code
+  default: string // defaultLocale, runtime overrides included (fixed at build under prefix_except_default / prefix_and_default)
+  fallback: string // fallbackLocale, else the default
+  available: string[] // enabled locale codes
+  locale: Locale | null // the config entry of `current`
+  isDefault: boolean
+  isFallback: boolean
+}
+```
+
+## ロケールの決定方法 {#how-the-locale-is-chosen}
+
+どちらのヘルパーも、`/api` かどうかにかかわらず、すべてのサーバールートで同じ順序を使用します：
+
+1. `?locale=` クエリ（繰り返されている場合は最初の値）
+2. `[locale]` ルートパラメーター、またはパス内のロケールプレフィックス（`/de/...`）
+3. [`localeCookie`](/ja/api/module-options#localecookie) が設定されている場合はロケール Cookie（`hashMode` では `hash-locale`）
+4. `autoDetectLanguage` が有効な場合は `Accept-Language`（q 値を考慮）
+5. `defaultLocale`
+
+無効なコードや無効化されたコードは、すべてのステップでスキップされます。これは API での順序です。ページのレンダリングでは、プレフィックス系ストラテジーの場合 `?locale=` は無視されます。両方の順序の比較は[ロケール検出](/ja/guide/locale-detection)にあります。
+
+## ロケールを強制する {#force-a-locale}
+
+検出をスキップするには 3 番目の引数を渡します。たとえば、ユーザーの言語でメールを送信するジョブなどです：
+
+```ts
+export default defineEventHandler(async (event) => {
+  const user = await getUser(event) // your code
+  const t = await useTranslationServerMiddleware(event, undefined, user.locale)
+  return sendMail(user.email, t('mail.welcome.subject'))
+})
+```
+
+2 番目の引数はこの呼び出しの検出における `defaultLocale` を置き換えるため、ロケールが強制されている場合は効果がありません。辞書はリクエストごと・ロケールごとにキャッシュされ、リクエストをまたいでサーバーの翻訳キャッシュにも保持されるため、ヘルパーを何度呼び出しても負荷はわずかです。
+
+## サーバーコンポーネント {#server-components}
+
+サーバーコンポーネント（`.server.vue`、`<NuxtIsland>`）は独自の URL `/__nuxt_island/...` からレンダリングされるため、ページの URL を参照できず、Nuxt はプロパティのみを渡します。ロケールは `locale` プロパティとして渡してください。そうすればそのロケールでレンダリングされ、プロパティはアイランドの URL とキャッシュキーの一部であるため、切り替え時には再取得されます。この名前は予約されています：`locale` という名前のプロパティに有効なロケールコードが入っていると、それがレンダリングのロケールになります。そのため、数値形式など別の意味を持つプロパティには別の名前を付けてください：
+
+```vue
+<!-- components/Greeting.server.vue -->
+<template><p>{{ $t('greeting') }}</p></template>
+<script setup lang="ts">
+defineProps<{ locale?: string }>()
+</script>
+```
+
+```vue
+<template>
+  <Greeting :locale="$getLocale()" />
+  <NuxtIsland name="Greeting" :props="{ locale: $getLocale() }" />
+</template>
+```
+
+プロパティがない場合は、URL にかかわらず Cookie のロケール、なければデフォルトロケールでレンダリングされ、切り替えにも追従しません。その `$t` が参照するのは `index` チャンク、つまりルートファイルと `locales/pages/index/` です。
+
+## 関連 {#related}
+
+<CardGroup cols={2}>
+
+<Card title="ロケール検出" icon="book-open" href="/ja/guide/locale-detection">
+
+</Card>
+
+<Card title="翻訳ファイル" icon="book-open" href="/ja/guide/translations">
+
+</Card>
+
+<Card title="デプロイ" icon="book-open" href="/ja/guide/deployment">
+
+サーバーが翻訳を読み込む場所
+
+</Card>
+
+</CardGroup>

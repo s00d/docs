@@ -1,0 +1,139 @@
+---
+title: "Identifiering av locale"
+description: "Hur locale väljs för en sida eller en API-förfrågan: URL, query, state, cookie, Accept-Language och standard, och när en besökare omdirigeras."
+---
+
+Varje förfrågan får en locale, vald från samma lista med källor i samma ordning på servern och i webbläsaren. Läs detta när du bestämmer hur förstagångsbesökare hamnar på ett språk, om deras val ska kommas ihåg och vad ditt server-API ser. Du får prioritetsordningen, den omdirigering varje strategi gör och de alternativ som slår på eller av varje källa.
+
+<Tip>
+
+**Förkunskaper** — [Routingstrategier](/sv/guide/strategy)
+
+</Tip>
+
+## Prioritetsordningen {#the-precedence}
+
+Den första källan som anger en **aktiverad** locale vinner. Ett ogiltigt eller felformaterat värde (en okänd kod, en trasig cookie) hoppas över och nästa källa gäller.
+
+| # | Källa | Gäller när |
+| --- | --- | --- |
+| 1 | URL-prefix (`/de/about`) | prefixstrategier. Under `prefix_except_default` och `prefix_and_default` är en URL utan prefix standard-locale |
+| 2 | `?locale=de` | sidor: endast `no_prefix`. Server-API-hjälpfunktioner: alltid, och före URL:en |
+| 3 | Locale-state satt av appen (`useI18nLocale().setLocale()`) | URL:en har ingen locale |
+| 4 | Cookie | [`localeCookie`](/sv/api/module-options#localecookie) är satt (`'user-locale'` automatiskt under `no_prefix`) |
+| 5 | `Accept-Language`-header | [`autoDetectLanguage`](/sv/api/module-options#autodetectlanguage) är `true` (standard) |
+| 6 | [`defaultLocale`](/sv/api/module-options#defaultlocale) | alltid |
+
+Under en prefixstrategi avgör alltså URL:en vad en sida visar; preferenskällorna (3–5) avgör bara vart en besökare **omdirigeras**, och bara på de sökvägar som `autoDetectPath` tillåter. Under `no_prefix` finns det inget att omdirigera, och preferenskällorna avgör vad sidan visar.
+
+![Beslutsflöde: ett locale-prefix i URL:en renderar den locale. Utan prefix renderar no_prefix utifrån preferenskällorna, prefix_and_default renderar standard-locale, och prefix eller prefix_except_default omdirigerar efter preferens när autoDetectPath tillåter sökvägen](/images/diagrams/locale-detection.svg)
+
+## Omdirigeringar per strategi {#redirects-per-strategy}
+
+Omdirigeringar är en `302`, görs på servern innan sidan renderas och av en route-middleware vid navigering på klienten. Query och hash behålls. Med [`redirects: false`](/sv/api/module-options#redirects) sker inga; felaktiga prefix ger fortfarande 404.
+
+Besökaren föredrar `de` (cookie eller header), `defaultLocale: 'en'`, standardvärdet `autoDetectPath: '/'`:
+
+| Förfrågan | `prefix_except_default` | `prefix` | `prefix_and_default` | `no_prefix` |
+| --- | --- | --- | --- | --- |
+| `/` | → `/de` | → `/de` | `/` på `en` | `/` på `de` |
+| `/about` | `/about` på `en` | → `/de/about` | `/about` på `en` | `/about` på `de` |
+| `/fr/about` | `/fr/about` | `/fr/about` | `/fr/about` | — |
+| `/en/about` | 404 | `/en/about` | `/en/about` | — |
+
+`prefix_and_default` omdirigerar aldrig: en URL utan prefix tillhör standard-locale, och andra locales finns under sitt prefix. En besökare som föredrar `en` omdirigeras inte från `/` under `prefix_except_default`. Målen har inget avslutande snedstreck (`/de`, inte `/de/`) och följer anpassade sökvägar (`/about` → `/de/ueber-uns`).
+
+Överallt där cookien eller headern avgör (omdirigeringen från `/`, varje sida under `no_prefix`) innehåller svaret `Vary: Cookie, Accept-Language`, så att ett CDN håller isär svaren.
+
+### `autoDetectPath` {#autodetectpath}
+
+Var preferenskällorna får flytta en besökare:
+
+| Värde | Preferensen gäller på |
+| --- | --- |
+| `'/'` (standard) | endast `/`. Djuplänkar stannar på URL:ens språk |
+| `'no_prefix'` | varje sökväg utan locale-prefix (`/about` → `/de/about`) |
+| `'/welcome'` | exakt den sökvägen (ett avslutande snedstreck ignoreras) |
+| `'*'` | varje sökväg, även de med prefix: `/about` och `/fr/about` → `/de/about` när besökaren föredrar `de` |
+
+- På sökvägar som den inte tillåter behandlas en URL utan prefix som standard-locale.
+- `prefix` är undantaget: den har inga sidor utan prefix, så `/about` går alltid till besökarens locale (`/de/about` med cookien `de`, `/en/about` utan preferens).
+- Med `'*'` ignorerar servern appens state, och en URL med prefix sparar inte längre sin egen locale i cookien; cookien ändras när besökaren byter med `$switchLocale`.
+
+<Warning>
+
+Med `'*'` öppnas delade länkar på läsarens språk, vilket kan överraska. Välj hellre `'/'` eller `'no_prefix'` om det inte är just det du vill.
+
+</Warning>
+
+## Accept-Language {#accept-language}
+
+Headern läses så som RFC 9110 definierar den och matchas mot locale-**koderna** i din konfiguration:
+
+- Poster prövas efter `q`-värde, högst först (`fr;q=0.1, de;q=0.9` → `de`). `q=0` betyder "inte detta språk"; en post med felformaterat `q` ignoreras. `*` matchar ingenting.
+- `_` läses som `-` (`en_US` = `en-US`).
+- Per post: den exakta koden, sedan kortare former (`de-AT` → `de`), sedan en regional locale för samma språk (`en` → `en-US`). Exakta och kortare former beror inte på ordningen i `locales`; bland flera regionala träffar vinner den första i `locales`.
+- Skriftsystem korsas aldrig: `zh-TW` och `zh-HK` innebär traditionell kinesiska, `zh-CN` förenklad, så `zh-CN` matchar aldrig en `zh-Hant`-locale.
+- Inaktiverade locales matchar aldrig.
+
+```ts
+// locales: [{ code: 'en' }, { code: 'de' }, { code: 'zh-Hant' }]
+// 'de-CH,de;q=0.9,en;q=0.8'  → 'de'
+// 'en-GB'                    → 'en'
+// 'zh-TW'                    → 'zh-Hant'
+// 'zh-CN'                    → no match, next source
+```
+
+Stäng av identifiering via header med `autoDetectLanguage: false`; cookien och state gäller fortfarande.
+
+## Cookien {#the-cookie}
+
+- **Avstängd som standard** för prefixstrategierna (`localeCookie: null`). Omdirigeringar fungerar då enbart utifrån headern, och valet kommas inte ihåg mellan besök. Sätt `localeCookie: 'user-locale'` för att komma ihåg det.
+- Under `no_prefix` är den `'user-locale'` om du inte anger ett annat namn. `localeCookie: null` stänger av den även där.
+- Den skrivs när besökaren byter (`$switchLocale`, `<i18n-switcher>`, `useI18nLocale().setLocale()`), och vid serverrendering av en sida under ett prefix (`/fr/about` sparar `fr`; inte under `autoDetectPath: '*'` med omdirigeringar påslagna, där URL:en fortfarande kan flyttas). En navigering på klienten till en sida sparar också den sidans locale, även på en sida utan prefix för standard-locale; en första inläsning av den URL:en gör det inte. Under `no_prefix` och i hash-läge sparar en navigering bara en ändring. En 404 sparar ingenting, såvida inte `$switchLocale` hamnar på den.
+- Den gäller i ett år (`path=/`, `SameSite=Lax`).
+- Under `hashMode` lagras preferensen i stället i cookien `hash-locale`; server och klient läser samma cookie. Servern renderar den locale och omdirigerar, utanför `prefix`, aldrig; en locale i hashen (`/#/de`) vinner över den och tillämpas direkt efter hydrering. Under `prefix` finns ingen sida på `/`, så `/` renderas i webbläsaren, som går till `/#/de` utifrån cookien och sedan webbläsarens språk (`autoDetectLanguage`); alla andra dokument (`/about`, `/de`) omdirigerar in i hashen.
+
+Läs och sätt preferensen med [`useI18nLocale`](/sv/composables/useI18nLocale), inte direkt med `useCookie` eller `useState`.
+
+## Din egen identifiering {#your-own-detection}
+
+För att själv välja locale (en användarinställning, en subdomän) anropar du `useI18nLocale().setLocale(code)` i ett plugin som körs före modulens plugin. Det blir källa 3, appens state. [Anpassad identifiering av locale](/sv/guide/custom-auto-detect) har det fullständiga receptet, inklusive hur du stänger av den inbyggda identifieringen.
+
+## Server-API-routes {#server-api-routes}
+
+[`useLocaleServerMiddleware`](/sv/guide/server-side-translations) och `useTranslationServerMiddleware` använder sin egen ordning, eftersom en API-URL sällan är lokaliserad:
+
+1. `?locale=`
+2. en `[locale]`-routeparameter, eller ett locale-prefix i sökvägen
+3. cookie (när `localeCookie` är satt)
+4. `Accept-Language` (när `autoDetectLanguage` är påslagen)
+5. `defaultLocale`
+
+`localeCookie: null` och `autoDetectLanguage: false` stänger av källa 3 och 4 även här.
+
+## Runtime-åsidosättningar {#runtime-overrides}
+
+[Runtime-åsidosättningar](/sv/guide/runtime-overrides) ändrar listan som källorna matchas mot:
+
+- Runtime-`disabledLocales` tas bort från varje steg: en cookie eller header som anger en av dem hoppas över.
+- En runtime-`defaultLocale` är steg 6 under `prefix` och `no_prefix`.
+- Under `prefix_except_default` och `prefix_and_default` är standard-locale fastställd vid bygget (dess sidor är routes utan prefix). En runtime-`defaultLocale`, eller inaktivering av byggets standard, ignoreras med en varning.
+
+## Relaterat {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Anpassad identifiering av locale" icon="book-open" href="/sv/guide/custom-auto-detect">
+
+</Card>
+
+<Card title="Serverroutes och API" icon="book-open" href="/sv/guide/server-side-translations">
+
+</Card>
+
+<Card title="useI18nLocale" icon="brackets-curly" href="/sv/composables/useI18nLocale">
+
+</Card>
+
+</CardGroup>

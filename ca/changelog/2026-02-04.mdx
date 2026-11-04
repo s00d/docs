@@ -1,0 +1,115 @@
+---
+title: "v3.0.0 — Optimització del rendiment, paquets d'estratègia de rutes i camins"
+description: "Notes de la versió: v3.0.0 — Optimització del rendiment, paquets d'estratègia de rutes i camins"
+---
+
+**Data**: 2026-02-04
+
+**Versió**: `v3.0.0`
+
+![v3.0.0 release](/images/3.0.0.png)
+
+Anunciem la **v3.0.0** amb una **revisió arquitectònica important**: reescriptura completa del sistema d'emmagatzematge de traduccions per obtenir el màxim rendiment, la generació de rutes i la lògica de camins en temps d'execució ara es divideixen en paquets dedicats, i el flux de redireccions s'ha redissenyat per millorar-ne la fiabilitat i la compatibilitat amb entorns serverless.
+
+## Què hi ha de nou? {#what’s-new}
+
+### Optimització del rendiment — Nova arquitectura d'emmagatzematge de traduccions {#performance-optimization-—-new-translation-storage-architecture}
+
+El sistema de càrrega i memòria cau de traduccions s'ha reescrit completament per obtenir el màxim rendiment:
+
+- **Classe TranslationStorage centralitzada** — Una nova classe `TranslationStorage` (`src/runtime/utils/storage.ts`) proporciona un emmagatzematge unificat per al client i el servidor. Utilitza `globalThis` amb `Symbol.for` per garantir un singleton real a tot el procés de Node.js, i evita la duplicació de la memòria cau entre mòduls empaquetats.
+
+- **Funció `$t()` optimitzada (tFast)** — La funció de traducció fa una cerca directa en un únic diccionari actiu:
+  1. Totes les traduccions (arrel + específiques de pàgina + alternatives) es fusionen prèviament en temps de compilació en un únic fitxer per pàgina
+  2. En navegar dins del mateix idioma, les traduccions de la pàgina nova es fusionen de manera acumulativa al diccionari actiu (evita el parpelleig de claus durant les animacions de transició)
+  3. Admet claus imbricades (`key.subkey.subsubkey`) amb una resolució de camins optimitzada
+  4. Cap cerca en Map ni càlcul d'idioma/ruta a cada crida — utilitza un context precalculat
+
+- **Injecció des del servidor via `window.__I18N__`** — Les traduccions carregades durant l'SSR s'injecten a l'HTML com a etiqueta script. El client llegeix directament de `window.__I18N__` en la càrrega inicial, i així evita peticions duplicades.
+
+- **Memòria cau local de fragments al plugin** — El plugin manté un Map local `loadedChunks` que emmagatzema tots els fragments de traducció carregats. Un cop carregades, les traduccions no es tornen a demanar mai durant el cicle de vida de la pàgina.
+
+- **Fusió prèvia en temps de compilació** — Un pas `preMergeLocales` a `module.ts` fusiona totes les capes, les cadenes d'idiomes alternatius i les traduccions d'arrel a cada fitxer de pàgina en temps de compilació. El server-loader simplement llegeix un únic fitxer precompilat — no cal cap fusió en temps d'execució.
+
+**Millores de rendiment:**
+
+- Menys assignació de memòria per petició (no es tornen a crear objectes a cada crida a `$t()`)
+- Menys pressió sobre el recol·lector d'escombraries
+- Temps de resposta més ràpids sota càrrega
+- Patró d'ús de memòria estable (sense gràfics "a salts")
+
+### Paquets d'estratègia de rutes i camins {#route-&-path-strategy-packages}
+
+- **@i18n-micro/route-strategy** — Generació de rutes en temps de compilació: amplia les pàgines de Nuxt amb rutes localitzades, gestiona àlies, rutes imbricades i camins personalitzats per estratègia. Punt d'entrada únic: `new RouteGenerator(options)` i `extendPages(pages)`. Les estratègies (`no_prefix`, `prefix`, `prefix_except_default`, `prefix_and_default`) s'implementen com a classes separades i se seleccionen mitjançant una factoria.
+- **@i18n-micro/path-strategy** — Gestió de camins i idiomes en temps d'execució: proporciona `PathStrategy` per construir camins localitzats, resoldre redireccions i canviar d'idioma. Exportacions de subcamins compatibles amb tree-shaking (`/prefix`, `/no-prefix`, etc.), de manera que només s'empaqueta l'estratègia seleccionada. Utilitza funcions pures per a la resolució de rutes i indicadors de context precalculats per minimitzar les assignacions.
+- **Estructura de paquets organitzada** — La lògica de rutes és a `@i18n-micro/route-strategy` amb `core/` i `strategies/`. L'estratègia de camins és a `@i18n-micro/path-strategy` amb una estructura `src/` plana: `types.ts`, `path.ts`, `resolver.ts`, `helpers.ts` i `strategies/`.
+- **Comportament coherent** — La gestió d'àlies, la unió de camins pare–fill, els `globalLocaleRoutes` / `filesLocaleRoutes` / `routeLocales` personalitzats i les garanties d'immutabilitat estan coberts per un conjunt de proves dedicat.
+
+### Revisió de l'arquitectura de redireccions {#redirect-architecture-overhaul}
+
+- **Middleware de servidor** — Les redireccions i la gestió de 404 s'executen en un middleware de Nitro (`i18n.global.ts`). S'executa abans del renderitzat de Nuxt, de manera que les redireccions de `/` a `/<locale>/` es produeixen sense un parpelleig d'error quan hi ha una galeta d'idioma.
+- **Plugin de client (costat del client)** — Un plugin només de client (`06.client-redirect.client.ts`) s'executa després de la hidratació i gestiona les redireccions quan `useI18nLocale()` o una galeta estableixen un idioma que no és el per defecte. Nitro s'executa abans que Nuxt, de manera que el servidor no pot veure els canvis de galeta/estat fets per plugins d'usuari; el plugin de client cobreix aquest cas.
+- **Sense component alternatiu** — S'han eliminat el component alternatiu `locale-redirect.vue` i l'opció `fallbackRedirectComponentPath`. La lògica de redirecció la gestionen completament el middleware de servidor i el plugin de client.
+- **Compatibilitat amb camins personalitzats** — Camins com `/kontakt` per a l'alemany (via `globalLocaleRoutes`) es reconeixen correctament com a vàlids sense prefix d'idioma, i s'eviten 404 incorrectes durant el prerenderitzat.
+- **Correcció de customRegexMatcher** — Quan s'utilitza `customRegexMatcher`, el patró ara coincideix amb el primer segment **sencer** del camí (amb els ancoratges `^` i `$`). Això evita falsos 404 per a rutes com `/locale-test`, on abans el patró `[a-z]{2}-[a-z]{2}` coincidia amb subcadenes.
+- **Correcció d'autoDetectPath** — L'opció `autoDetectPath` ara compara correctament amb el camí d'URL original, i evita redireccions no desitjades quan es navega explícitament a URL amb prefix d'idioma.
+
+### Composable useI18nLocale {#usei18nlocale-composable}
+
+- **Gestió centralitzada de l'idioma** — El nou composable `useI18nLocale()` substitueix `useLocaleCookies` i proporciona un únic punt d'entrada per a l'estat de l'idioma, les galetes i les utilitats de sincronització.
+- **API** — `locale`, `localeCookie`, `hashCookie`, `getLocale()`, `getPreferredLocale()`, `setLocale()`, `syncLocale()`, `isValidLocale()`, `getEffectiveLocale()`, `resolveInitialLocale()`.
+- **Idioma programàtic** — Utilitzeu `useI18nLocale().setLocale(locale)` als plugins de servidor en lloc de `useState('i18n-locale')` per a una gestió de l'idioma més neta i centralitzada.
+
+### Detecció automàtica personalitzada i configuració {#custom-auto-detection-&-configuration}
+
+- **`getI18nConfig()`** — Els plugins personalitzats (p. ex. per a la detecció de l'idioma) haurien d'utilitzar `getI18nConfig()` de `#build/i18n.strategy.mjs` en lloc de `useRuntimeConfig().public.i18nConfig`. Això dona accés directe a la configuració i18n resolta (p. ex. `localeCookie`) sense dependre de la configuració en temps d'execució.
+- **Nom de la galeta** — Utilitzeu `getI18nConfig().localeCookie ?? 'user-locale'` quan implementeu una lògica de detecció personalitzada.
+
+### Paquets d'integració simplificats {#simplified-integration-packages}
+
+Tots els paquets d'integració (`@i18n-micro/vue`, `@i18n-micro/astro`, `@i18n-micro/node`, `@i18n-micro/react`, `@i18n-micro/preact`, `@i18n-micro/solid`) s'han simplificat i optimitzat, i comparteixen la mateixa lògica central de traducció.
+
+### Canvis de configuració {#configuration-changes}
+
+- **`previousPageFallback` eliminat** — Aquesta opció ja no és necessària. La nova estratègia de fusió acumulativa manté automàticament disponibles les traduccions de la pàgina anterior durant les animacions de transició, i després les neteja mitjançant el hook `page:transition:finish`.
+- **`hmr`** — S'ha mogut d'`experimental.hmr` a una opció de primer nivell. Controla l'HMR del costat del servidor per als fitxers de traducció (activat per defecte en desenvolupament).
+
+```typescript
+// Before (v2.x)
+export default defineNuxtConfig({
+  i18n: {
+    experimental: {
+      hmr: true,
+    },
+  },
+})
+
+// After (v3.0.0)
+export default defineNuxtConfig({
+  i18n: {
+    hmr: true,
+  },
+})
+```
+
+## Canvis incompatibles {#breaking-changes}
+
+- **`fallbackRedirectComponentPath`** — Eliminat. El mòdul ja no utilitza un component de ruta alternatiu per a les redireccions. Si teníeu configurat un camí de component personalitzat, traieu-lo de la configuració.
+- **`useLocaleCookies`** — Eliminat. Utilitzeu `useI18nLocale()` en el seu lloc. El nou composable proporciona `locale`, `localeCookie`, `hashCookie`, `setLocale()`, `syncLocale()` i més.
+- **`experimental.i18nPreviousPageFallback` / `previousPageFallback`** — Eliminat completament. L'estratègia de fusió acumulativa gestiona automàticament el parpelleig de les transicions. Traieu aquesta opció de la configuració.
+- **`experimental.hmr`** — Mogut a `hmr`. Actualitzeu la configuració si utilitzàveu aquesta opció.
+- **Plugins personalitzats** — Si el vostre plugin personalitzat de detecció de l'idioma utilitzava `useRuntimeConfig().public.i18nConfig`, passeu a `getI18nConfig()` de `#build/i18n.strategy.mjs`. Preferiu `useI18nLocale().setLocale()` en lloc de `useState('i18n-locale')`. Vegeu [Detecció d'idioma personalitzada](/ca/guide/custom-auto-detect) per a exemples actualitzats.
+- **Canvis en fitxers interns** — S'han eliminat `load-from-storage.ts` i `translation-loader.ts`, i s'han substituït per `storage.ts` i `server-loader.ts`. Si importàveu directament d'aquests fitxers (no recomanat), actualitzeu les importacions.
+
+## Per què és important {#why-it-matters}
+
+- **Rendiment**: La memòria cau singleton centralitzada elimina la creació d'objectes per petició i redueix la pressió sobre el GC.
+- **Mantenibilitat**: La lògica de rutes i camins viu en paquets dedicats amb límits i tipus clars.
+- **Proves**: El comportament de les estratègies i els casos límit es proven de manera aïllada.
+- **Fiabilitat**: Separar la lògica de redirecció del servidor (Nitro) i del client evita problemes de sincronització quan els plugins d'usuari estableixen la galeta o useState.
+- **Preparat per a serverless**: El plugin de Nitro s'executa en el mateix context que els handlers de Nitro, compatible amb Edge/Workers.
+- **Documentació**: El comportament de l'encaminament està documentat a la [guia d'estratègies](/ca/guide/strategy) i als paquets [path-strategy](https://github.com/s00d/nuxt-i18n-micro/tree/main/packages/path-strategy) i [route-strategy](https://github.com/s00d/nuxt-i18n-micro/tree/main/packages/route-strategy).
+
+Per a les notes d'actualització i la llista completa de canvis, vegeu el [registre de canvis](https://github.com/s00d/nuxt-i18n-micro/blob/main/CHANGELOG.md).
+
+---

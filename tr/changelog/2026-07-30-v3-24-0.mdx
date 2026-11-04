@@ -1,0 +1,66 @@
+---
+title: "v3.24.0 — `public/` üzerinden Node SSR, Rollup `raw:` yok"
+description: "Sürüm notları: v3.24.0 — public/ üzerinden Node SSR, Rollup raw: yok"
+---
+
+**Tarih**: 2026-07-30
+
+**Sürüm**: `v3.24.0`
+
+![v3.24.0 sürümü](/images/3.24.0.png)
+
+Node üretim derlemeleri artık çeviri yüklerini Nitro `serverAssets` / Rollup `raw:` olarak gömmüyor (büyük kataloglarda çok GB'lık derleme RSS'i). SSR, istemcinin getirdiği aynı `/{apiBaseUrl}/{page}/{locale}/data.json` ağacını okur — `public/` üzerinden `readFile` ile. Edge bir Nitro gömmesini korur ve `mode: 'source'` tercih etmelidir.
+
+## Neler Yeni? {#what’s-new}
+
+### Node: `public/<apiBaseUrl>` üzerinden SSR {#node-ssr-from-public/&lt;apibaseurl&gt;}
+
+- `public/` dizinini diskten sunan Node ön ayarları Nitro `serverAssets` kaydı **yapmaz**.
+- Yükler `public/<apiBaseUrl>` (varsayılan `_locales`) altına `{page}/{locale}/data.json` olarak kopyalanır.
+- SSR bunları `#i18n-internal/payload-source` → `readFile` üzerinden yükler (üretim yolu `.output/server` yanındadır).
+- `translationPayloads.serverAssets: true` hâlâ "yerel SSR" anlamına gelir ve `publicAssets` false olsa bile bu public kopyayı **zorlar**.
+
+Playground (önceki `serverAssets` gömmesine karşı): ~**1.25 GB** / ~6–7 sn / `raw`=0 vs ~**3 GB** / ~13 sn / ~170 raw parça.
+
+### Edge: `serverAssets` yalnızca gerektiğinde {#edge-serverassets-only-when-needed}
+
+- Edge (`nitro.node === false`) hâlâ `mode` ile aynı düzende Nitro `serverAssets` (`assets:i18n`) aracılığıyla gömer.
+- Edge bir public kopyayı **zorlamaz** — CDN/statik için `publicAssets: true` ayarlayın.
+- Edge + `mode: 'premerged'` durumunda uyarı verir (büyük kataloglar için `mode: 'source'` tercih edin).
+
+### `publicDir` istemci URL'leriyle hizalanır {#publicdir-aligns-with-client-urls}
+
+- `translationPayloads.publicDir` varsayılan olarak **`apiBaseUrl`** değerini alır (`translationDir` değil).
+- Önceden birleştirilmiş public/Edge ağacı, `$fetch('/_locales/...')` ile eşleşen `{page}/{locale}/data.json` biçimindedir.
+- Modül varsayılanları artık iç içe `publicAssets: true` ayarlamaz (Nuxt derin birleştirmesi, `mode: 'source'` için bile public kopyayı zorluyordu).
+
+Bkz. [Modül seçenekleri — `translationPayloads`](/tr/api/module-options#translationpayloads), [Dağıtım — serverless ve Edge](/tr/guide/deployment#serverless-and-edge) ve [Önbellek ve Depolama Mimarisi](https://s00d.github.io/nuxt-i18n-micro/v3/api/i18n-cache-api).
+
+## Geriye Dönük Uyumsuz Değişiklikler {#breaking-changes}
+
+- **Nuxt SSR HTML yükünde sözlük yok.** `payload.data['i18n-ssr-chunks']`, `setSsrChunk` ve `seedFromSsrChunks` **kaldırıldı**. Varsayılan yaklaşım `@nuxtjs/i18n` (`experimental.preload: false`) ile aynıdır: sunucu çevirileri SSR için bellekte tutar; istemci, eklenti kurulumu sırasında (`await switchContext`) `/{apiBaseUrl}/.../data.json` dosyasını yükler.
+- **`prerenderRoutes` varsayılan olarak `false` değerindedir.** Yalnızca `publicAssets` ağacı zaten yazmadığında Nitro'nun işleyici rotalarını oluşturmasına ihtiyacınız varsa etkinleştirin (önceden birleştirilmiş `publicAssets` zaten `{page}/{locale}/data.json` üretir).
+- **`publicDir` varsayılanı `translationDir` değil, `apiBaseUrl`'dir.** `publicDir` değerini açıkça ayarlamadığınız sürece statik çıktı ör. `public/locales/...` konumundan `public/_locales/{page}/{locale}/data.json` konumuna taşınır.
+- **Önceden birleştirilmiş depolama düzeni** artık `{page}/{locale}/data.json` biçimindedir (eskiden `pages/{page}/{locale}.json`). Nitro/depolama anahtarlarını okuyan veya ağaçları eski yapıya göre kopyalayan her şeyin güncellenmesi gerekir.
+- **Node üzerinde `serverAssets: true` artık Nitro gömmesi anlamına gelmez** — public kopya aracılığıyla yerel SSR anlamına gelir. Gerçek Rollup `raw:` gömmesi yalnızca Edge için geçerlidir.
+
+## Geçiş {#migration}
+
+1. `payload.data['i18n-ssr-chunks']` okuyan veya `seedFromSsrChunks` / `setSsrChunk` çağıran tüm kodları kaldırın.
+2. Saf statik barındırıcılar için: varsayılan premerged + `publicAssets` ayarını koruyun (dosyalar `/_locales/.../data.json` konumuna yerleşir) veya `prerenderRoutes: true` ayarlayın / yükleri bir CDN üzerinde barındırın.
+3. Cloudflare / diğer Edge ortamları için: büyük kataloglarda `translationPayloads: { mode: 'source' }` ayarlayın; `publicAssets: true` seçeneğini yalnızca statik/CDN kopyasına ihtiyacınız varsa ekleyin.
+4. `public/<translationDir>` altındaki yüklere bağımlıysanız, `translationPayloads.publicDir` ayarlayın veya araçlarınızı `public/<apiBaseUrl>` konumuna yönlendirin.
+
+## Düzeltme: önceden birleştirilmiş public yüklerde devre dışı locale'leri atla {#fix-skip-disabled-locales-in-premerged-public-payloads}
+
+`preMergeLocales` artık `{page}/{locale}/data.json` dosyalarını yalnızca birleştirmeye aktarılan locale'ler için yazar (derleme zamanında `locale.disabled: true` olanlar atlanır). Daha önce diskteki her JSON locale'i `public/` dizinine kopyalanıyordu; bu yüzden Nitro statik sunucusu devre dışı locale'leri 200 ile sunuyor ve işleyiciyi atlıyordu. Çalışma zamanı `disabledLocales` hâlâ önceden derlenmiş dosyaların yayınını geri alamaz — `publicAssets` / Node public SSR kopyası açıkken derleme sırasında `locale.disabled` kullanın.
+
+## Neden Önemli? {#why-it-matters}
+
+- Node derlemeleri hafif kalır: çeviri kataloglarından kaynaklanan çok GB'lık Rollup `raw:` sıçraması yok.
+- Public dosyalar ve istemci `$fetch` URL'leri tek bir yol düzenini paylaşır — statik barındırma özel bir yeniden eşleme olmadan çalışır.
+- Edge, yinelenen bir public ağacı zorlamadan kompakt `source` yüklerini hâlâ gömebilir.
+
+Tam değişiklik günlüğü, sürümle birlikte [GitHub](https://github.com/s00d/nuxt-i18n-micro/blob/main/CHANGELOG.md) üzerinde yayımlanacaktır.
+
+---

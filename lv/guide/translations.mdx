@@ -1,0 +1,132 @@
+---
+title: "Tulkojumu faili"
+description: "Kur atrodas tulkojumu atslēgas, kā saknes un lapu faili apvienojas ar rezerves lokālēm un kā lapa ielādē savu vārdnīcu."
+---
+
+Tulkojumi ir vienkārši JSON faili: viens saknes fails katrai lokālei koplietotajām atslēgām un viens fails katrai lapai un lokālei šīs lapas atslēgām. Izlasiet šo, kad pievienojat lapas, koplietojat atslēgas starp tām vai iestatāt rezerves lokāles. Jūs uzzināsiet, kurā failā jāievieto atslēga, ko lapa redz un kad katrs fails tiek ielādēts.
+
+## Struktūra {#layout}
+
+```text
+locales/
+├── en.json                 # root: menus, footer, buttons
+├── de.json
+└── pages/
+    ├── index/              # pages/index.vue
+    │   ├── en.json
+    │   └── de.json
+    ├── about/              # pages/about.vue
+    │   ├── en.json
+    │   └── de.json
+    └── products-id/        # pages/products/[id].vue
+        ├── en.json
+        └── de.json
+```
+
+- Mape zem `locales/pages/` ir lapas Nuxt **maršruta nosaukums**: `pages/products/[id].vue` ir `products-id`, `pages/blog/[slug]/comments.vue` ir `blog-slug-comments`.
+- Atslēgas var būt ligzdotas jebkurā dziļumā; `$t('auth.form.login')` nolasa `{ "auth": { "form": { "login": … } } }`.
+- `translationDir` pārvieto mapi (pēc noklusējuma `'locales'`, relatīvi pret projekta sakni, arī Nuxt 4 `app/` struktūrā).
+- Trūkstošie faili tiek izveidoti kā `{}`, kad Nuxt atrisina lapas, ja vien nav iestatīts [`disableWatcher`](/lv/api/module-options#disablewatcher).
+
+## Ko lapa redz {#what-a-page-sees}
+
+![Atslēgas meklēšanas secība lapai /about lokālē de: pages/about/de.json, de.json, pages/about/en.json, en.json. Tie apvienojas vienā about/de/data.json, ko nolasa $t](/images/diagrams/page-dictionary.svg)
+
+Lapas vārdnīca ir tās saknes fails, dziļi (katrā līmenī) apvienots ar tās lapas failu. Konflikta gadījumā uzvar lapas fails:
+
+```json
+// locales/en.json
+{ "title": "My shop", "nav": { "home": "Home", "cart": "Cart" } }
+```
+
+```json
+// locales/pages/about/en.json
+{ "title": "About us", "nav": { "cart": "Basket" } }
+```
+
+```ts
+// on /about
+t('title') // 'About us'
+t('nav.home') // 'Home'   (root)
+t('nav.cart') // 'Basket' (page wins)
+// on any other page
+t('title') // 'My shop'
+```
+
+Lapa bez savas mapes saņem tikai saknes vārdnīcu. Citu lapu atslēgas nav redzamas.
+
+### Rezerves lokāles {#fallback-locales}
+
+Atslēga, kas trūkst aktīvajā lokālē, tiek ņemta no tās rezerves lokāles, pirms tiek parādīta pati atslēga:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    locales: [
+      { code: 'en', iso: 'en-US' },
+      { code: 'de', iso: 'de-DE' },
+      { code: 'de-at', iso: 'de-AT', fallbackLocale: 'de' },
+    ],
+    defaultLocale: 'en',
+    fallbackLocale: 'en', // global, for every locale
+  },
+})
+```
+
+- Lokāles paša `fallbackLocale` tiek izsekots līdz galam: `de-at` → `de` → `en`.
+- Globālais `fallbackLocale` ir vājākais slānis, zem katras ķēdes.
+- Katra lokāle ķēdē pievieno savu saknes failu, tad savu lapas failu, no vājākās rezerves lokāles līdz aktīvajai lokālei. Tādējādi aktīvās lokāles saknes fails pārspēj rezerves lokāles lapas failu.
+
+Bez rezerves lokāles trūkstoša atslēga tiek renderēta kā pati atslēga (`'nav.home'`) un izstrādes režīmā pārlūka konsolē tiek reģistrēts brīdinājums ([`missingWarn`](/lv/api/module-options#missingwarn)).
+
+## Koplietošana un citi avoti {#sharing-and-other-sources}
+
+| Vajadzība | Opcija |
+| --- | --- |
+| Tikai saknes faili, bez `pages/` mapēm | [`disablePageLocales: true`](/lv/api/module-options#disablepagelocales) |
+| Divas lapas lasa vienu lapas mapi | [`routesLocaleLinks`](/lv/api/module-options#routeslocalelinks): `{ 'about-us': 'about' }` |
+| Koplietoti saknes faili citā mapē | [`additionalTranslationDirs`](/lv/api/module-options#additionaltranslationdirs): `['common']` (galvenā `translationDir` uzvar) |
+| Atslēgas no Nuxt slāņa | Slāņu faili apvienojas, projekta paša faili uzvar. Skatiet [Slāņi](/lv/guide/layers) |
+| Izpildlaikā pievienotas atslēgas | āķis [`i18n:register`](/lv/api/events), `$mergeTranslations`, `$setTranslation` |
+| Atslēgas tieši lapas komponentē | `$defineI18nRoute({ locales: { en: { … } } })`, skatiet [Lapas konfigurācija](/lv/guide/per-component-translations) |
+
+## Kā lapa ielādē savu vārdnīcu {#how-a-page-loads-its-dictionary}
+
+![Lokāļu JSON faili tiek būvēti payload kokā, glabāti public/ uz Node vai servera resursos uz Edge, nolasīti ar servera ielādētāju, pēc tam izmantoti $t serverī un ielādēti $t pārlūkā](/images/diagrams/translation-pipeline.svg)
+
+Modulis būvē vienu payload katrai lapai un lokālei: `/{apiBaseUrl}/{page}/{locale}/data.json` (pēc noklusējuma `/_locales/about/de/data.json`).
+
+1. **Servera renderēšana.** Nitro nosaka lokāli, un lapa ielādē savu payload tieši no servera ielādētāja, bez HTTP pieprasījuma. Vārdnīca netiek ierakstīta HTML payload, tāpēc lapas paliek mazas.
+2. **Hidratācija.** Pārlūks ielādē to pašu payload. Serveris jau ir izvadījis tam `<link rel="preload">`, tāpēc ielāde sākas kopā ar HTML.
+3. **Navigācija.** Nākamās lapas payload aizstāj vārdnīcu. Aizejošās lapas atslēgas joprojām tiek atrisinātas, līdz tā pazūd (lapas pārejas beigās vai `page:finish`), tāpēc izgaistoša lapa neuzzibsnī neapstrādātas atslēgas. Daļa, kuru neizdodas ielādēt (tīkla kļūda, 4xx vai 5xx, saturs, kas nav objekts), atstāj pašreizējo vārdnīcu vietā, un nākamā navigācija to ielādē atkārtoti. Neizdevusies lokāles pārslēgšana ir tāda pati: `$switchLocale` atrisinās ar `false`, un atkārtots izsaukums vai atkārtots klikšķis uz pārslēdzēja mēģina vēlreiz. Ar prefiksu stratēģijām URL līdz tam jau ir mainījies, tāpēc `lang` un `$getLocale()` norāda URL lokāli, kamēr vecie teksti paliek ekrānā.
+4. **Kešatmiņa.** Ielādētie payload tiek kešoti serverī un pārlūkā; lapā [Veiktspēja](/lv/guide/performance) ir izmēra un TTL iestatījumi.
+
+`translationPayloads.mode` nosaka, kā payload tiek būvēti. `'premerged'` (noklusējums) būvēšanas laikā ieraksta katru lapa × lokāle failu. `'source'` saglabā avota failus un apvieno tos katrā pieprasījumā, kas ir mazāk lieliem katalogiem Edge mērķos. Abi dod vienādas vārdnīcas. Kur faili nonāk katram izvietošanas mērķim, aprakstīts lapā [Izvietošana](/lv/guide/deployment).
+
+## Rediģēšana izstrādes laikā {#editing-in-development}
+
+`nuxt dev` lasa failus tiešsaistē. Tulkojuma faila saglabāšana atsvaidzina atvērtās lapas vārdnīcu uz vietas: bez pārlādes, noņemtās atslēgas pazūd, un izmaiņa saknes failā sasniedz katru lapu. Bojāts JSON fails reģistrē brīdinājumu ar savu ceļu un tiek uzskatīts par tukšu. Iestatiet [`hmr: false`](/lv/api/module-options#hmr), lai atsvaidzinātu manuāli.
+
+## Saistītie materiāli {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Lapas konfigurācija" icon="book-open" href="/lv/guide/per-component-translations">
+
+Lapas lokāles un iekļautie tulkojumi
+
+</Card>
+
+<Card title="Metodes" icon="brackets-curly" href="/lv/api/methods">
+
+`$t`, `$tc`, `$tn`, `$td`
+
+</Card>
+
+<Card title="Izvietošana" icon="book-open" href="/lv/guide/deployment">
+
+</Card>
+
+</CardGroup>

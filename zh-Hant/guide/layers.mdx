@@ -1,0 +1,128 @@
+---
+title: "Layer 與網域"
+description: "透過 Nuxt layer 共用 i18n 設定與翻譯檔案，並讓各語系在自己的網域上提供服務。"
+---
+
+一個 Nuxt layer 可以為多個應用程式提供 i18n 設定與 `locales/` 資料夾，而每個應用程式再加入或覆寫自己需要的部分。本頁說明這種做法，以及如何以一次建置服務多個網域。
+
+## 共用設定與翻譯 {#share-config-and-translations}
+
+```ts
+// base/nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    locales: [
+      { code: 'en', iso: 'en-US' },
+      { code: 'de', iso: 'de-DE' },
+      { code: 'fr', iso: 'fr-FR' },
+    ],
+    defaultLocale: 'en',
+  },
+})
+```
+
+```ts
+// shop/nuxt.config.ts
+export default defineNuxtConfig({
+  extends: ['../base'], // a layer directory or package, not a nuxt.config file
+  i18n: {
+    locales: [
+      { code: 'es', iso: 'es-ES' }, // added
+      { code: 'fr', disabled: true }, // the base layer's fr, switched off here
+    ],
+  },
+})
+```
+
+- **設定：** 應用程式中的純量選項會取代 layer 的選項。所有 layer 的 `locales` 陣列會合併，`code` 相同的項目會合併為一個，且以應用程式的欄位為優先，因此應用程式可以新增語系，或在繼承的語系上設定 `disabled: true` 等欄位。
+- **翻譯：** 每個 layer 的 `locales/` 會逐鍵合併，先套用 layer、最後套用應用程式，因此 `shop/locales/en.json` 中的鍵會覆寫 `base/locales/en.json` 中的同一個鍵。頁面檔案（`locales/pages/<page>/`）也以相同方式合併。
+- **頁面：** 會從每個 layer 的頁面中讀取 `$defineI18nRoute`。
+
+若要合併不屬於 layer 的資料夾，請將它們列在 [`additionalTranslationDirs`](/zh-Hant/api/module-options#additionaltranslationdirs) 中。
+
+## 多個網域 {#multiple-domains}
+
+一次建置即可服務所有網域。列出每個語系及其網域；`baseDefault` 會讓該語系成為該主機的預設語系：
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    strategy: 'prefix_except_default',
+    defaultLocale: 'en',
+    locales: [
+      { code: 'en', iso: 'en-US', baseUrl: 'https://example.com', baseDefault: true },
+      { code: 'de', iso: 'de-DE', baseUrl: 'https://example.de', baseDefault: true },
+      { code: 'nl', iso: 'nl-NL', baseUrl: 'https://example.de' },
+      { code: 'fr', iso: 'fr-FR' },
+    ],
+  },
+})
+```
+
+將兩個網域都指向同一台伺服器。其餘由請求的主機決定：
+
+- **預設語系：** 該主機的 `baseDefault` 語系。若沒有，則在主機提供建置預設語系時使用它，否則使用該主機的第一個語系。
+- **提供的語系：** 該主機的語系，加上所有沒有 `baseUrl` 的語系。在 `example.de` 上即為 `de`、`nl` 與 `fr`。
+- **其他網域的語系**是連結目標。`$localePath`、`$localeRoute`、`$switchLocalePath`、`<i18n-switcher>` 與 `hreflang` 會產生位於其 `baseUrl` 上的絕對 URL，而 `$switchLocale` 會導覽到該處。在此主機上，它們的 URL 會回傳 404，cookie 或 `Accept-Language` 也無法選擇它們。
+- **指向其他網域的連結**需透過 `$localePath` 或 `<i18n-link>`：`<NuxtLink :to="$localePath('/contact', 'de')">`、`<i18n-link :to="$localeRoute('/contact', 'de')">`。路由器不接受絕對路徑物件，因此 `<NuxtLink :to="$localeRoute(...)">` 與 `router.push($localeRoute(...))` 會停留在目前的 origin。在 `localhost` 或預覽主機上，每個帶有 `baseUrl` 的語系（包括目前的語系）都是這類連結。在程式碼中請使用 `navigateTo($localePath('/contact', 'de'), { external: true })` 或 `$switchRoute`。
+- **其他任何主機**會取得建置設定，並將每個帶有 `baseUrl` 的語系視為連結目標。請求中的任何內容都不會被回顯：canonical 與 `hreflang` 會使用 `metaBaseUrl`，否則使用建置預設語系的 `baseUrl`（沒有 `baseUrl` 的預設語系需要 `metaBaseUrl` 或 `site.url`，請參閱 [SEO](/zh-Hant/guide/seo#set-the-public-origin)）。
+- `public/` 中的 **Payload 檔案**是靜態的：任何主機都會回傳任何語系的檔案。依網域[產生](/zh-Hant/guide/deployment#static-site-(nuxi-generate))時只會發佈該網域的檔案。
+
+各策略下的 `example.de`，其中 `de: '/kontakt'` 為 `contact` 的自訂路徑：
+
+| 策略 | `/` | 預設語系的頁面 | 其他 URL |
+| --- | --- | --- | --- |
+| `prefix_except_default` | `de` | `/kontakt` | `/de/kontakt` 與 `/en/contact` 回傳 404，`/contact` 重新導向至 `/kontakt` |
+| `prefix_and_default` | `de` | `/kontakt` 與 `/de/kontakt`，連結使用 `/kontakt` | `/en/contact` 與 `/contact` 回傳 404 |
+| `prefix` | 重新導向至 `/de` | `/de/kontakt` | `/kontakt` 重新導向至 `/de/kontakt`，`/en/contact` 回傳 404 |
+| `no_prefix` | `de` | `/kontakt` | 其他網域語系的自訂路徑回傳 404 |
+
+在 `prefix` 下，來自其他網域的連結會保留前綴，因為無前綴的 URL 只會被重新導向。在 `no_prefix` 下，指向其他網域的連結會落在該主機的預設語系：URL 無法指定第二個語系。
+
+注意事項：
+
+- **在代理伺服器之後**，主機取自 `Host`。如果代理伺服器改將公開主機放在 `X-Forwarded-Host` 中，請設定 [`trustForwardedHost`](/zh-Hant/api/module-options#trustforwardedhost)，且僅在代理伺服器會覆寫該標頭時才這麼做。兩者都不傳送的代理伺服器無法服務網域建置。請參閱[在代理伺服器或 CDN 之後](/zh-Hant/guide/deployment#behind-a-proxy-or-cdn)。
+- **`app.baseURL`** 也要放進 `baseUrl`：`baseUrl: 'https://example.de/shop'` 搭配 `app.baseURL: '/shop'`。
+- **主機必須完全相符。** `www.example.de` 是另一個主機：請在邊緣將它重新導向，或在語系上設定該 `baseUrl`。每個語系只能有一個主機。
+- **快取必須以主機作為鍵。** CDN 通常會這麼做。Nitro 的路由快取以路徑為鍵，因此在網域建置中，模組會在每個 `swr` 與 `cache` 規則的 `cache.varies` 中加入 `host`，啟用 `trustForwardedHost` 時還會加入 `x-forwarded-host`。設定 `cache: false` 的規則會保持原樣。`isr` 是平台的快取：請確認它以主機為鍵。
+- **兩個主機預設語系的自訂路徑不得衝突。** 無前綴的記錄共用同一個路由器，因此 `/x` 不能在 `example.de` 上是一個頁面、在 `example.com` 上又是另一個頁面。
+- **預先渲染的頁面：** 在 `nuxt build` 中，`prerender: true` 路由規則只會在沒有主機的情況下渲染一次，而產生的檔案會回應所有網域。依網域而不同的頁面請交給伺服器處理，或[依網域產生](/zh-Hant/guide/deployment#static-site-(nuxi-generate))。
+- **`noPrefixRedirect`** 在每個主機上都依據該主機與訪客的語系運作。
+- **`hashMode`：** 主機依上述方式決定渲染內容，指向其他網域的連結會將路由放在 hash 中（`https://example.com/#/contact`）。
+- **`ssr: false`：** 瀏覽器會從 `location.host` 讀取網域，因此沒有伺服器的主機仍能解析。
+- **[執行期覆寫](/zh-Hant/guide/runtime-overrides)**會最先套用。執行期的 `disabledLocales` 在每個主機上都有效，但有一個例外：在 `prefix_except_default` 與 `prefix_and_default` 下，主機的預設語系在其主機上仍保持啟用，因為它的頁面就是無前綴的記錄。在 `prefix` 與 `no_prefix` 下，主機會改用它提供的下一個語系。執行期的 `defaultLocale` 只套用於未知的主機。
+
+對於[靜態網站](/zh-Hant/guide/deployment#static-site-(nuxi-generate))，請為每個網域各產生一次。
+
+### 每個網域一個應用程式 {#one-app-per-domain}
+
+當各網域需要不同的頁面或模組時，使用共用 layer 搭配每個網域一個小型應用程式的做法依然可行。每個應用程式在相同的 `locales` 清單之上設定自己的 `defaultLocale`。如上所述，其他網域的語系在該應用程式中會回傳 404。
+
+### 在程式碼中選擇語系 {#choosing-the-locale-in-code}
+
+若要以單一執行個體回應所有網域，並在 SEO 標籤中使用請求本身的 origin，請參閱 [SEO](/zh-Hant/guide/seo#set-the-public-origin)；若要在程式碼中依主機選擇語系，請參閱[自訂語系偵測](/zh-Hant/guide/custom-auto-detect)。
+
+## 相關內容 {#related}
+
+<CardGroup cols={2}>
+
+<Card title="翻譯檔案" icon="book-open" href="/zh-Hant/guide/translations">
+
+</Card>
+
+<Card title="執行期覆寫" icon="book-open" href="/zh-Hant/guide/runtime-overrides">
+
+</Card>
+
+<Card title="SEO" icon="book-open" href="/zh-Hant/guide/seo">
+
+</Card>
+
+<Card title="Nuxt layers" icon="arrow-up-right-from-square" href="https://nuxt.com/docs/getting-started/layers">
+
+</Card>
+
+</CardGroup>

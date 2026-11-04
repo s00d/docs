@@ -1,0 +1,139 @@
+---
+title: "Lokalizācijas noteikšana"
+description: "Kā tiek izvēlēta lapas vai API pieprasījuma lokalizācija: URL, vaicājums, stāvoklis, sīkdatne, Accept-Language un noklusējums, un kad apmeklētājs tiek pāradresēts."
+---
+
+Katrs pieprasījums saņem vienu lokalizāciju, kas tiek izvēlēta no tā paša avotu saraksta tādā pašā secībā gan serverī, gan pārlūkprogrammā. Izlasiet šo, kad lemjat, kādā valodā nonāk pirmreizējie apmeklētāji, vai viņu izvēle tiek atcerēta un ko redz jūsu servera API. Uzzināsiet prioritāšu secību, katras stratēģijas veikto pāradresāciju un opcijas, kas ieslēdz vai izslēdz katru avotu.
+
+<Tip>
+
+**Priekšnosacījumi** — [Maršrutēšanas stratēģijas](/lv/guide/strategy)
+
+</Tip>
+
+## Prioritāšu secība {#the-precedence}
+
+Uzvar pirmais avots, kas nosauc **iespējotu** lokalizāciju. Nederīga vai nepareizi formatēta vērtība (nezināms kods, bojāta sīkdatne) tiek izlaista, un tiek ņemts vērā nākamais avots.
+
+| # | Avots | Tiek ņemts vērā, ja |
+| --- | --- | --- |
+| 1 | URL prefikss (`/de/about`) | prefiksa stratēģijas. Ar `prefix_except_default` un `prefix_and_default` URL bez prefiksa ir noklusējuma lokalizācija |
+| 2 | `?locale=de` | lapas: tikai `no_prefix`. Servera API palīgfunkcijas: vienmēr un pirms URL |
+| 3 | Lietotnes iestatītais lokalizācijas stāvoklis (`useI18nLocale().setLocale()`) | URL nav lokalizācijas |
+| 4 | Sīkdatne | ir iestatīts [`localeCookie`](/lv/api/module-options#localecookie) (ar `no_prefix` automātiski `'user-locale'`) |
+| 5 | Galvene `Accept-Language` | [`autoDetectLanguage`](/lv/api/module-options#autodetectlanguage) ir `true` (noklusējums) |
+| 6 | [`defaultLocale`](/lv/api/module-options#defaultlocale) | vienmēr |
+
+Tātad ar prefiksa stratēģiju URL nosaka, ko lapa rāda; preferenču avoti (3–5) nosaka tikai to, uz kurieni apmeklētājs tiek **pāradresēts**, un tikai ceļos, kurus atļauj `autoDetectPath`. Ar `no_prefix` nav uz kurieni pāradresēt, un preferenču avoti nosaka, ko lapa rāda.
+
+![Lēmumu plūsma: lokalizācijas prefikss URL renderē šo lokalizāciju. Bez tā no_prefix renderē no preferenču avotiem, prefix_and_default renderē noklusējuma lokalizāciju, bet prefix vai prefix_except_default pāradresē pēc preferences, ja autoDetectPath atļauj šo ceļu](/images/diagrams/locale-detection.svg)
+
+## Pāradresācijas katrai stratēģijai {#redirects-per-strategy}
+
+Pāradresācijas ir `302`, kas tiek veiktas serverī pirms lapas renderēšanas, bet klienta navigācijām — ar maršruta starpprogrammatūru. Vaicājums un jaucējfragments tiek saglabāti. Ar [`redirects: false`](/lv/api/module-options#redirects) neviena nenotiek; nepareizi prefiksi joprojām ir 404.
+
+Apmeklētājs dod priekšroku `de` (sīkdatne vai galvene), `defaultLocale: 'en'`, noklusējuma `autoDetectPath: '/'`:
+
+| Pieprasījums | `prefix_except_default` | `prefix` | `prefix_and_default` | `no_prefix` |
+| --- | --- | --- | --- | --- |
+| `/` | → `/de` | → `/de` | `/` valodā `en` | `/` valodā `de` |
+| `/about` | `/about` valodā `en` | → `/de/about` | `/about` valodā `en` | `/about` valodā `de` |
+| `/fr/about` | `/fr/about` | `/fr/about` | `/fr/about` | — |
+| `/en/about` | 404 | `/en/about` | `/en/about` | — |
+
+`prefix_and_default` nekad nepāradresē: URL bez prefiksa pieder noklusējuma lokalizācijai, bet citas lokalizācijas atrodas zem sava prefiksa. Apmeklētājs, kurš dod priekšroku `en`, ar `prefix_except_default` netiek pāradresēts no `/`. Mērķiem nav noslēdzošās slīpsvītras (`/de`, nevis `/de/`), un tie ievēro pielāgotos ceļus (`/about` → `/de/ueber-uns`).
+
+Visur, kur izšķir sīkdatne vai galvene (pāradresācija no `/`, katra lapa ar `no_prefix`), atbildē ir `Vary: Cookie, Accept-Language`, tāpēc CDN atbildes glabā atsevišķi.
+
+### `autoDetectPath` {#autodetectpath}
+
+Kur preferenču avoti drīkst pārvietot apmeklētāju:
+
+| Vērtība | Preference tiek ņemta vērā |
+| --- | --- |
+| `'/'` (noklusējums) | tikai `/`. Dziļās saites paliek URL valodā |
+| `'no_prefix'` | katrā ceļā bez lokalizācijas prefiksa (`/about` → `/de/about`) |
+| `'/welcome'` | tieši šajā ceļā (noslēdzošā slīpsvītra tiek ignorēta) |
+| `'*'` | katrā ceļā, arī ar prefiksu: `/about` un `/fr/about` → `/de/about`, ja apmeklētājs dod priekšroku `de` |
+
+- Ceļos, kurus tas neatļauj, URL bez prefiksa tiek uzskatīts par noklusējuma lokalizāciju.
+- `prefix` ir izņēmums: tam nav lapu bez prefiksa, tāpēc `/about` vienmēr ved uz apmeklētāja lokalizāciju (`/de/about` ar sīkdatni `de`, `/en/about` bez preferences).
+- Ar `'*'` serveris ignorē lietotnes stāvokli, un URL ar prefiksu vairs nesaglabā savu lokalizāciju sīkdatnē; sīkdatne mainās, kad apmeklētājs pārslēdzas ar `$switchLocale`.
+
+<Warning>
+
+Ar `'*'` kopīgotās saites atveras lasītāja valodā, kas var pārsteigt. Dodiet priekšroku `'/'` vai `'no_prefix'`, ja vien tieši to nevēlaties.
+
+</Warning>
+
+## Accept-Language {#accept-language}
+
+Galvene tiek lasīta tā, kā to definē RFC 9110, un salīdzināta ar lokalizāciju **kodiem** jūsu konfigurācijā:
+
+- Ieraksti tiek mēģināti pēc `q` vērtības, sākot ar augstāko (`fr;q=0.1, de;q=0.9` → `de`). `q=0` nozīmē "ne šī valoda"; ieraksts ar nepareizi formatētu `q` tiek ignorēts. `*` neatbilst nekam.
+- `_` tiek lasīts kā `-` (`en_US` = `en-US`).
+- Katram ierakstam: precīzs kods, tad īsākas formas (`de-AT` → `de`), tad tās pašas valodas reģionālā lokalizācija (`en` → `en-US`). Precīzās un īsākās formas nav atkarīgas no `locales` secības; starp vairākām reģionālām atbilstībām uzvar pirmā sarakstā `locales`.
+- Rakstības sistēmas nekad netiek jauktas: `zh-TW` un `zh-HK` nozīmē tradicionālo, `zh-CN` — vienkāršoto, tāpēc `zh-CN` nekad neatbilst lokalizācijai `zh-Hant`.
+- Atspējotas lokalizācijas nekad neatbilst.
+
+```ts
+// locales: [{ code: 'en' }, { code: 'de' }, { code: 'zh-Hant' }]
+// 'de-CH,de;q=0.9,en;q=0.8'  → 'de'
+// 'en-GB'                    → 'en'
+// 'zh-TW'                    → 'zh-Hant'
+// 'zh-CN'                    → no match, next source
+```
+
+Izslēdziet noteikšanu pēc galvenes ar `autoDetectLanguage: false`; sīkdatne un stāvoklis joprojām tiek ņemti vērā.
+
+## Sīkdatne {#the-cookie}
+
+- **Pēc noklusējuma izslēgta** prefiksa stratēģijām (`localeCookie: null`). Tad pāradresācijas darbojas tikai pēc galvenes, un izvēle starp apmeklējumiem netiek atcerēta. Iestatiet `localeCookie: 'user-locale'`, lai to atcerētos.
+- Ar `no_prefix` tā ir `'user-locale'`, ja vien neiestatāt citu nosaukumu. `localeCookie: null` to izslēdz arī tur.
+- Tā tiek ierakstīta, kad apmeklētājs pārslēdzas (`$switchLocale`, `<i18n-switcher>`, `useI18nLocale().setLocale()`), un lapas ar prefiksu servera renderēšanas laikā (`/fr/about` saglabā `fr`; ne ar `autoDetectPath: '*'` un ieslēgtām pāradresācijām, kur URL joprojām var mainīties). Klienta navigācija uz lapu arī saglabā šīs lapas lokalizāciju, arī noklusējuma lokalizācijas lapā bez prefiksa; šī URL pirmā ielāde to nedara. Ar `no_prefix` un jaucējfragmenta režīmā navigācija saglabā tikai izmaiņu. 404 neko nesaglabā, ja vien uz tās nenonāk `$switchLocale`.
+- Tā ir derīga vienu gadu (`path=/`, `SameSite=Lax`).
+- Ar `hashMode` preference tā vietā glabājas sīkdatnē `hash-locale`; serveris un klients lasa vienu un to pašu. Serveris renderē šo lokalizāciju un ārpus `prefix` nekad nepāradresē; lokalizācija jaucējfragmentā (`/#/de`) uzvar pār to un tiek piemērota uzreiz pēc hidratācijas. Ar `prefix` uz `/` nav lapas, tāpēc `/` tiek renderēts pārlūkprogrammā, kas pāriet uz `/#/de` pēc sīkdatnes, tad pēc pārlūkprogrammas valodas (`autoDetectLanguage`); jebkurš cits dokuments (`/about`, `/de`) pāradresē uz jaucējfragmentu.
+
+Lasiet un iestatiet preferenci ar [`useI18nLocale`](/lv/composables/useI18nLocale), nevis tieši ar `useCookie` vai `useState`.
+
+## Jūsu pašu noteikšana {#your-own-detection}
+
+Lai lokalizāciju izvēlētos pats (lietotāja iestatījums, apakšdomēns), izsauciet `useI18nLocale().setLocale(code)` spraudnī, kas izpildās pirms moduļa spraudņa. Tas kļūst par 3. avotu — lietotnes stāvokli. Sadaļā [Pielāgota lokalizācijas noteikšana](/lv/guide/custom-auto-detect) ir pilna recepte, tostarp iebūvētās noteikšanas izslēgšana.
+
+## Servera API maršruti {#server-api-routes}
+
+[`useLocaleServerMiddleware`](/lv/guide/server-side-translations) un `useTranslationServerMiddleware` izmanto savu secību, jo API URL reti ir lokalizēts:
+
+1. `?locale=`
+2. maršruta parametrs `[locale]` vai lokalizācijas prefikss ceļā
+3. sīkdatne (ja ir iestatīts `localeCookie`)
+4. `Accept-Language` (ja ir ieslēgts `autoDetectLanguage`)
+5. `defaultLocale`
+
+`localeCookie: null` un `autoDetectLanguage: false` arī šeit izslēdz 3. un 4. avotu.
+
+## Izpildlaika pārrakstīšana {#runtime-overrides}
+
+[Izpildlaika pārrakstīšana](/lv/guide/runtime-overrides) maina sarakstu, ar kuru tiek salīdzināti avoti:
+
+- Izpildlaika `disabledLocales` tiek noņemtas no katra soļa: sīkdatne vai galvene, kas nosauc kādu no tām, tiek izlaista.
+- Izpildlaika `defaultLocale` ir 6. solis ar `prefix` un `no_prefix`.
+- Ar `prefix_except_default` un `prefix_and_default` noklusējuma lokalizācija tiek fiksēta būvēšanas laikā (tās lapas ir maršruti bez prefiksa). Izpildlaika `defaultLocale` vai būvēšanas noklusējuma atspējošana tiek ignorēta ar brīdinājumu.
+
+## Saistītie materiāli {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Pielāgota lokalizācijas noteikšana" icon="book-open" href="/lv/guide/custom-auto-detect">
+
+</Card>
+
+<Card title="Servera maršruti un API" icon="book-open" href="/lv/guide/server-side-translations">
+
+</Card>
+
+<Card title="useI18nLocale" icon="brackets-curly" href="/lv/composables/useI18nLocale">
+
+</Card>
+
+</CardGroup>

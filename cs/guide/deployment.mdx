@@ -1,0 +1,440 @@
+---
+title: "Nasazení"
+description: "Nasazení na Node server, serverless nebo Edge, případně jako statický web — kam putují payloady s překlady, co každá platforma potřebuje, proxy a cachování."
+---
+
+Modul funguje s jakýmkoli presetem Nitro bez další konfigurace: podle presetu, pro který sestavujete, zvolí, kde budou soubory s překlady uloženy. Výchozí hodnoty jsou pro většinu aplikací správné; přečtěte si sekci pro svou platformu. Tato stránka vysvětluje:
+
+- co skončí v `.output/` a jaké hlavičky payloady dostanou;
+- co změnit pro statický hosting, velké katalogy, podcestu, proxy nebo CDN.
+
+<Note>
+
+Nasazeno a ověřeno na skutečných hostinzích: Cloudflare Workers a Pages, Vercel a Vercel Edge, Netlify a Netlify Edge, Cloud Run a Deno Deploy, každý s tím, co uvádí sekce [Platformy](#platforms). Ostatní presety byly sestaveny a spuštěny lokálně.
+
+</Note>
+
+## Jak se doručují překlady {#how-translations-are-delivered}
+
+V době buildu modul převede `locales/` (všechny vrstvy sloučené) na **payloady**: jeden JSON soubor pro každou stránku a lokalizaci. Čtou je dva konzumenti:
+
+- **SSR** načte payload vykreslované stránky v rámci procesu — bez HTTP požadavku a slovník není vložen do HTML.
+- **Prohlížeč** stahuje `/_locales/<page>/<locale>/data.json?v=<dateBuild>` při hydrataci a při navigaci.
+
+`_locales` je [`apiBaseUrl`](/cs/api/module-options#apibaseurl). Na tuto URL odpovídá vestavěná serverová routa; statická kopie v `public/` na ni odpovídá bez serveru.
+
+## Node server {#node-server}
+
+```bash
+npx nuxi build
+node .output/server/index.mjs
+```
+
+S `node-server` (výchozí preset), `node-cluster`, `bun`, `deno-server` nebo jakýmkoli jiným presetem, který servíruje `public/` z disku, s `public/` vedle složky `server/`:
+
+- payloady se zkopírují do `.output/public/_locales/<page>/<locale>/data.json`;
+- SSR je čte z této složky pomocí `fs` (do serveru se nic nebalí);
+- prohlížeč je dostává jako statické soubory, nebo ze serverové routy.
+
+Nasaďte celý adresář `.output/`. Modul vyžaduje Node 20 nebo novější a Nuxt má vlastní minimum: Nuxt 4.5 deklaruje `^22.19.0 || ^24.11.0 || >=26.0.0`.
+
+Proces pod trvalou zátěží může držet mnohem více paměti, než je jeho živá halda. Než nastavíte limit kontejneru, přečtěte si [Paměť na Node serveru](/cs/guide/performance#memory-on-a-node-server).
+
+Při jiném uspořádání modul vloží payloady tak, jak je popsáno v další sekci. To zahrnuje:
+
+- vlastní `nitro.output.publicDir`, který build čte jednou;
+- `serveStatic: true` na presetu, který uchovává statické soubory jinde.
+
+<Warning>
+
+Pokud build čte `public/` a složka se na server nedostane, jako u `aws-lambda` a `serveStatic: true`, server zaloguje jednu chybu a stránky zobrazují surové klíče. Nastavte `nitro.serveStatic: false`, aby se payloady vložily.
+
+</Warning>
+
+## Serverless a Edge {#serverless-and-edge}
+
+Tyto presety nemohou za běhu číst `public/`:
+
+- presety funkcí, které posílají `public/` na CDN nebo ho neservírují: `vercel`, `netlify`, `aws-lambda`, `aws-amplify`, `azure-swa`, `firebase`, `stormkit`, `zeabur`, `node-listener`;
+- Edge presety bez souborového systému: `cloudflare-module`, `cloudflare-pages`, `vercel-edge`, `netlify-edge`, `deno_deploy`;
+- `serveStatic: 'inline'`, například `winterjs`.
+
+Tam modul vloží payloady do serverového bundlu jako serverové assety Nitro (`assets:i18n`) a přesto zapíše veřejnou kopii pro prohlížeč.
+
+Vložení celé matice stránka × lokalizace dělá bundle velkým. Po překročení limitu Edge platformy build varuje a limit pojmenuje, viz [Limity bundlu](#bundle-limits-on-edge). Pro velké katalogy přepněte na režim `source`, který vkládá kompaktní zdrojové soubory a za běhu slučuje kořenové, stránkové a záložní překlady:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    translationPayloads: {
+      mode: 'source',
+    },
+  },
+})
+```
+
+V režimu `source` prohlížeč vždy stahuje payloady ze serverové routy, která je slučuje při požadavku (případná veřejná kopie obsahuje kompaktní zdrojový strom, který čte pouze server). To vyžaduje běžící server, takže `source` nepoužívejte pro čistě statický web.
+
+### Limity bundlu na Edge {#bundle-limits-on-edge}
+
+| Platforma          | Limit                                                                                  |
+| ------------------ | -------------------------------------------------------------------------------------- |
+| Cloudflare Workers | 64 MiB nekomprimovaně, na Free i Paid. Žádný limit pro komprimovanou velikost. Start 1 s, paměť 128 MB |
+| Vercel Edge        | 1 MB gzip na Hobby, 2 MB na Pro, 4 MB na Enterprise                                    |
+| Netlify Edge       | 20 MB komprimovaně                                                                     |
+
+Build sečte slovníky, které vkládá, a varuje pouze po překročení nejnižšího limitu platformy. Počítá jen slovníky, takže aplikace se přičítá navíc. Například 120 stránek × 4 lokalizace s kořenovým souborem o velikosti 60 KB vloží:
+
+| Režim | Vloženo | Vejde se |
+| --- | --- | --- |
+| `premerged` | 34.9 MiB | Cloudflare; ne Vercel Edge ani Netlify Edge |
+| `source` | 5.7 MiB | Stále 3 MB gzip na Vercel Edge |
+
+Katalog této velikosti na Vercel Edge potřebuje [hostitele payloadů](#app-baseurl-and-payload-hosts).
+
+`source` platí za sloučení pro každou stránku a lokalizaci v každém isolate, v tomto příkladu asi 1 ms a 7 ms CPU ve studeném. Roste s velikostí řetězce záložních lokalizací: asi 43 ms pro 4 MB souborů řetězce. Netlify Edge povoluje 50 ms CPU na požadavek a plán Free na Cloudflare 10 ms.
+
+### Data na Edge runtimech {#dates-on-edge-runtimes}
+
+`$td` používá `Intl` runtimu a jeho data ICU se mohou lišit od prohlížeče. Na Netlify Edge může formátované datum obsahovat U+202F (úzká nezlomitelná mezera) tam, kde má Chrome běžnou mezeru, takže Vue zaloguje jeden hydration mismatch a text se při hydrataci sám opraví. Čistý Nuxt s čistým `Intl` se tam chová stejně; Deno Deploy ne.
+
+<Tip>
+
+`<i18n-t>` s `date` nebo `relativeDate` už mismatch povoluje. Pro `$td` v šabloně dejte na element `data-allow-mismatch="text"`.
+
+</Tip>
+
+## Statický web (nuxi generate) {#static-site-(nuxi-generate)}
+
+```bash
+npx nuxi generate
+```
+
+`nuxi build --preset <static preset>` dělá totéž.
+
+- Výchozí režim `premerged` zapíše každý payload do `.output/public/_locales/`, takže je může servírovat jakýkoli statický hosting.
+- Stránky se předrenderují pro každou lokalizaci: při `prefix` modul nasadí každý lokalizovaný kořen (`/en`, `/de`) a `/` se ponechá jako stub přesměrování.
+- Nechte [`prerenderRoutes`](/cs/api/module-options#translationpayloads) vypnuté: veřejná kopie už soubory payloadů obsahuje.
+- S režimem `source` nebo `publicAssets: false` není pro prohlížeč co číst a build varuje.
+
+<Note>
+
+Neexistuje server, který by četl cookie nebo `Accept-Language`, takže uložená lokalizace nepřesměruje `/` při prvním načtení. Při `no_prefix` obsahuje HTML výchozí lokalizaci a uložená cookie se při načtení nepoužije: `$switchLocale` na otevřené stránce stále funguje.
+
+</Note>
+
+Pro Cloudflare Pages viz [Cloudflare Pages](#cloudflare-pages).
+
+Pro build s [doménami lokalizací](/cs/guide/layers#multiple-domains) spusťte generate jednou pro každou doménu, s `NUXT_I18N_DOMAIN` jako hostem daného běhu. Každý strom pak obsahuje stránky a payloady dané domény. Nitro nemá proměnnou pro výstupní složku, takže si vlastní načtěte z konfigurace:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: { output: { publicDir: process.env.PUBLIC_DIR } },
+})
+```
+
+```bash
+NUXT_I18N_DOMAIN=example.de PUBLIC_DIR=sites/example.de npx nuxi generate
+NUXT_I18N_DOMAIN=example.com PUBLIC_DIR=sites/example.com npx nuxi generate
+```
+
+- Ponechte složky mimo `.output`: každý běh ho vyprázdní.
+- Absolutní odkazy na ostatní domény se neprocházejí.
+- Bez proměnné build s lokalizací s `baseUrl` varuje a vygeneruje konfiguraci buildu, kde jsou tyto lokalizace odkazy a nedostanou žádné stránky.
+- Na Node serveru stejná proměnná připne proces k jedné doméně, ať říká `Host` cokoli.
+
+Statický hosting na tyto soubory aplikuje vlastní hlavičky; cachování nastavte v konfiguraci hostingu. Pravidlo modulu `/_locales/*` se do Cloudflare Pages dostane přes `_headers` a do Vercelu přes `config.json` jako `public, max-age=60`. Chcete-li dodávat sourozence `.gz` / `.br`, zapněte `nitro.compressPublicAssets`: modul zkomprimuje kopii payloadů se stejným nastavením.
+
+## Hlavičky cache a dateBuild {#cache-headers-and-datebuild}
+
+| Požadavek                                                                                | `Cache-Control`                                                                                                 |
+| ---------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Node server nebo routa, `?v=` rovno aktuálnímu `dateBuild`, neprázdný slovník             | `private, max-age=<httpCacheDuration>, immutable`                                                               |
+| Node server nebo routa, bez `?v=`, se starým, nebo prázdný slovník                       | `public, max-age=0, must-revalidate`                                                                            |
+| Kopie `public/` na hostingu, jakékoli `?v=`                                              | `public, max-age=60` ([`httpCacheControl`](/cs/api/module-options#other)) |
+| Režim `source`, `cacheTtl` nebo `apiBaseServerHost`: slovník se může změnit bez buildu    | hlavička `httpCacheControl`, vždy                                                                               |
+| Serverová routa, slovník se nepodařilo přečíst                                           | `503`, `no-store`                                                                                               |
+| vývojový server                                                                          | žádná                                                                                                           |
+
+Proč tabulka vypadá takto:
+
+- URL s aktuálním `v` je připnutá jako hashovaný asset, a říct to může jen to, co vidí query: serverová routa a Node server, který hlavičku nastavuje na svých statických souborech.
+- Je `private`, takže CDN, která query ignoruje, nemůže z této odpovědi odpovědět na další `v`.
+- Statické soubory hostingu přebírají hlavičku pro celou cestu z route rule `/_locales/**`, které query nevidí, takže zůstává krátká; opakované načtení stejně na ničem neblokuje.
+- Staré `v` zůstává servírovatelné, protože ho uvádí cachované HTML.
+
+`httpCacheControl: false` ponechá každý statický soubor na `max-age=0, must-revalidate`. [`httpCacheDuration`](/cs/api/module-options#httpcacheduration) je ve výchozím stavu jeden rok; `0` neposílá žádnou hlavičku. `$clearCache()` revaliduje vše, co načte příště.
+
+Safari znovu požaduje předem načtený payload, když nesmí odpověď znovu použít: s `no-cache` a `ETag` je druhý požadavek `304`, bez hlavičky cache i validátoru jde o druhé úplné stažení. `max-age` nad `0` dává jeden požadavek. Platí to jen `httpCacheDuration: 0` na hostingu, který nepřidává validátor.
+
+[`dateBuild`](/cs/api/module-options#datebuild) je hodnota `?v=`. Ve výchozím stavu je to hash vašich souborů s překlady, takže se mění jen při změně překladů a prohlížeče si ponechají své cachované payloady napříč nasazeními, která se jich nedotkla. Mění se také s řetězcem záložních lokalizací.
+
+- Nastavte ji sami, chcete-li hodnotu připnout.
+- Nastavte `0` nebo `''`, chcete-li `?v=` úplně vynechat; payloady pak nikdy nejsou `immutable`.
+
+<Tip>
+
+Po nahrazení slovníku na místě na Node serveru restartujte s `NUXT_I18N_DATE_BUILD=<new value>`: nic jiného bez rebuildu `v` nezmění.
+
+</Tip>
+
+### Kořenové a delta soubory {#root-and-delta-files}
+
+`premerged` zapisuje jeden kořen pro každou lokalizaci, `__root/<locale>/data.json`, a do souboru každé stránky jen to, čím se od něj liší.
+
+- Soubor stránky označuje kořen, vůči kterému byl vytvořen, klíčem `__i18n_root`.
+- Prohlížeč stáhne oba, stránka nic nezobrazí, dokud nejsou oba načtené, a SSR je sloučí jednou pro každou část.
+- Soubor bez značky je celý slovník a stojí samostatně: vývojový režim, režim `source`, serverová routa i hosting, který stále drží starší soubory, odpovídají takovým souborem, bez jakéhokoli nastavení.
+
+Kdo tedy čte `_locales/*/data.json` přímo, čte deltu. Nastavte `translationPayloads.rootDelta: false`, chcete-li zachovat celé soubory.
+
+Karta otevřená během nasazení, která požádá o novou deltu, zjistí, že byla vytvořena vůči jinému kořeni, a před zobrazením tento kořen stáhne.
+
+### Když slovník nelze přečíst {#when-a-dictionary-cannot-be-read}
+
+Neúspěšné stažení z hostingu (cokoli kromě 404), nečitelný nebo poškozený soubor nebo odpověď 200, která není JSON objektem, se nedostane do žádné cache a další požadavek čte znovu:
+
+- vykreslení stránky zaloguje varování, zobrazí pro daný slovník surové klíče a odpoví `503` s `Cache-Control: no-store`, totéž v každé CDN hlavičce (`CDN-Cache-Control`, `Cloudflare-CDN-Cache-Control`, `Netlify-CDN-Cache-Control`, `Vercel-CDN-Cache-Control`, `Surrogate-Control`, přednostně před hlavičkami z route rule) a `Retry-After: 60`;
+- `/_locales/...` odpoví `503` s `no-store`;
+- `useTranslationServerMiddleware` vrátí `t`, které odpovídá klíčem nebo výchozí hodnotou.
+
+Co se děje během výpadku:
+
+- **Návštěvníci:** tělem této odpovědi 503 je samotná stránka. Při hydrataci prohlížeč přečte slovník znovu a text se objeví, jakmile je hosting zpět, s jednou chybou Vue v konzoli o hydration mismatch, protože HTML ze serveru obsahovalo klíče.
+- **Crawlerům** je řečeno, ať se vrátí později.
+- **Cache:** route rule `swr` nebo `cache` neukládá nic se stavem 400 nebo vyšším a CDN dostane `no-store`, takže žádná cache surové klíče neuchová a první požadavek po obnovení vykreslí skutečný text.
+- **Stránky již cachované** pravidlem zůstanou, jak jsou: revalidace selže a nic neuloží. Na Vercelu neúspěšná revalidace `isr` stejně ponechá poslední stránku.
+
+To pokrývá každou část, kterou vykreslení načítá, včetně neúspěšné části stránky s dostupným kořenem a části sloučené později během vykreslování. Stránka se zdravým slovníkem, přesměrování a chybová stránka si ponechají svůj stav. Výjimkou je [ostrov komponenty](/cs/guide/server-side-translations): zůstane 200, protože 503 by ho ze stránky odstranil, takže stránka, jejíž vlastní slovník se načte, může zůstat se surovými klíči ostrova. Požadavky během výpadku se každý dostanou na hosting, bez vlastního timeoutu modulu kromě 60 sekund na hlavičky odpovědi.
+
+404 od hostingu znamená, že takový soubor nemá, což není selhání. Vykreslení stránky zobrazí kořenový slovník, stejně jako prohlížeč, a `/_locales/...` odpoví stejnou 404. Žádná cache neuchová ani jedno, takže soubor, který se objeví, se přečte při dalším požadavku, za cenu jednoho požadavku na hosting při každém vykreslení takové stránky. Pokud chybí i kořenový soubor, je slovník prázdný a [prerender](/cs/guide/upgrade#server,-build-and-deployment) selže.
+
+Server uchovává načtené payloady v LRU cache v rámci procesu s až `cacheMaxSize` záznamy (ve výchozím stavu 1000), která záznam znovu načte po `cacheTtl`, je-li nastaveno; obojí popisuje [Ladění výkonu](/cs/guide/performance) a [`cacheStorage`](/cs/guide/performance#shared-cache-for-several-instances) přidává cache sdílenou instancemi. Nepřidávejte navíc route rule Nitro `cache` na `/_locales/**`: klíčuje podle celé URL včetně query a ukládá třetí kopii.
+
+## App baseURL a hostitelé payloadů {#app-baseurl-and-payload-hosts}
+
+**`app.baseURL`** nic dalšího nepotřebuje. S `app.baseURL: '/shop/'` prohlížeč stahuje `/shop/_locales/...`; kopie zůstává v `.output/public/_locales/`, kterou Nitro servíruje pod základem (statický hosting musí výstup připojit na `/shop/`). Prefixy lokalizací a [vyloučené cesty](/cs/guide/excluding-static-files) se porovnávají bez základu.
+
+**`app.cdnURL`** přesune i payloady, pokud jsou to soubory v `public/`: prohlížeč stahuje a přednačítá `<cdnURL>/_locales/...`.
+
+- CDN musí mít `_locales/` vedle `_nuxt/`, na této cestě.
+- Musí povolit původ vašeho webu (CORS), protože soubor přichází přes `fetch`.
+- Slovník, na který odpovídá pouze serverová routa (režim `source`, bez veřejné kopie), zůstává na původu aplikace.
+
+Runtime `NUXT_APP_BASE_URL` na `cloudflare-module` vyžaduje kompatibilitu s Node (`nodejs_compat`). S vypnutým `nitro.cloudflare.nodeCompat`, na který Nitro přejde i při starém datu bez příznaku, proměnnou nevidí a servíruje `/`, včetně čistého Nuxtu, zatímco přesměrování lokalizace stále vede na základ. Nastavte tam `app.baseURL` při buildu.
+
+Chcete-li servírovat payloady z jiného původu, nasměrujte na něj klienta i server a vypněte lokální výstupy:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    apiBaseClientHost: 'https://cdn.example.com',
+    apiBaseServerHost: 'https://cdn.example.com',
+    translationPayloads: {
+      serverHandler: false,
+      publicAssets: false,
+      serverAssets: false,
+    },
+  },
+})
+```
+
+- Na Node zapisuje `serverAssets` stejnou kopii pro vlastní čtení serveru a tento soubor odpovídá na `/_locales`: musí být také vypnutý, i když serverovou routu ponecháte pro prohlížeč, který by se k ní nikdy nedostal.
+- Hosting musí servírovat stejné uspořádání `<apiBaseUrl>/<page>/<locale>/data.json`.
+- Build varuje, když jsou všechny lokální výstupy vypnuté a hostitel chybí.
+
+Stejné hodnoty mohou v době buildu pocházet z `NUXT_I18N_APP_BASE_URL`, `NUXT_I18N_APP_BASE_CLIENT_HOST` a `NUXT_I18N_APP_BASE_SERVER_HOST`. `NUXT_I18N_APP_BASE_SERVER_HOST` funguje také za běhu a má přednost před hodnotou z buildu. Podrobnosti viz [`apiBaseServerHost`](/cs/api/module-options#apibaseserverhost).
+
+## Platformy {#platforms}
+
+Pouze to, co potřebuje modul nebo jeho výstup. Účty, regiony a přihlášení do CLI najdete v dokumentaci platformy.
+
+### Cloudflare Workers {#cloudflare-workers}
+
+Preset `cloudflare_module`. `wrangler deploy` zabalí výstup Nitro podruhé pomocí esbuild a poté se surové `defineAsyncComponent(() => import('./X.vue'))` na serveru vykreslí prázdné. Výchozí chybová stránka Nuxtu je jednou z nich, takže 404 má prázdné tělo a prohlížeč zaloguje hydration mismatch. Klient pak stránku vykreslí a stav zůstane 404, ale bez JavaScriptu je stránka prázdná. Jde o [nuxt#33270](https://github.com/nuxt/nuxt/issues/33270): čistý Nuxt bez modulu se chová stejně. Routy stránek ovlivněny nejsou.
+
+Vypněte druhé balení:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: {
+    preset: 'cloudflare_module',
+    cloudflare: {
+      deployConfig: true, // `wrangler` below applies only with it
+      wrangler: {
+        no_bundle: true,
+        find_additional_modules: true,
+        rules: [{ type: 'ESModule', globs: ['**/*.mjs'] }],
+      },
+    },
+  },
+})
+```
+
+```bash
+npx nuxi build
+cd .output/server && npx wrangler deploy -c wrangler.json
+```
+
+Nastavte `compatibilityDate` na `2024-09-19` nebo pozdější: starší datum zvolí legacy preset, který nezapíše žádný `wrangler.json` a nevyhodí žádnou chybu. 404 se pak vykreslí a upload se zmenší: 190 KiB gzip oproti 246 KiB na testovací aplikaci. Druhou cestou je vlastní `error.vue`, ten však pokrývá pouze chybovou stránku.
+
+Samotný modul `nodejs_compat` nepotřebuje. Limity viz [Limity bundlu](#bundle-limits-on-edge).
+
+### Cloudflare Pages {#cloudflare-pages}
+
+Použijte preset `cloudflare-pages-static`. `nuxi generate --preset cloudflare-pages` je serverový build bez `index.html`.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: {
+    preset: 'cloudflare-pages-static',
+    prerender: { autoSubfolderIndex: false },
+  },
+})
+```
+
+```bash
+npx nuxi generate
+npx wrangler pages project create my-site --production-branch main --force
+npx wrangler pages deploy dist --project-name my-site --branch main
+```
+
+- **Výstup.** Preset zapisuje do `dist/`, nikoli do `.output/public`.
+- **`--force`.** Bez něj nový wrangler (zde 4.156) předá `pages project create` do Workers. S ním získáte klasický projekt Pages. Je potřeba jednou, při vytvoření.
+- **`autoSubfolderIndex: false`.** Pages odpovídá na `/de` přesměrováním 308 na `/de/`, zatímco canonical a `hreflang` uvádějí `/de`, takže ukazují na přesměrování. S touto možností je souborem `de.html` a přesměrování zmizí.
+- **`NUXT_E1005` v konzoli u 404** je normální 404. Nuxt ji tak hlásí, protože `404.html` startuje na klientu, než je aplikace připojena. Stránka funguje a čistý Nuxt vypisuje stejný řádek.
+
+### Vercel a Vercel Edge {#vercel-and-vercel-edge}
+
+Presety `vercel` a `vercel_edge`, bez změny aplikace. Tagy fungují bez `metaBaseUrl`, z přeposílaných hlaviček platformy. Vercel Edge má malý limit bundlu: viz [Limity bundlu](#bundle-limits-on-edge). Pro sdílenou cache použijte [ovladač `upstash`](/cs/guide/performance#upstash-on-vercel-and-vercel-edge).
+
+### Netlify {#netlify}
+
+Presety `netlify` a `netlify_edge`.
+
+```bash
+npx nuxi build --preset netlify
+npx netlify deploy --prod --no-build --dir dist --functions .netlify/functions-internal
+```
+
+- **Ponechte `nitro.output` nenastavené.** Preset zapisuje `.netlify/` a `dist/` sám.
+- **Mějte `package.json` ve složce, ze které nasazujete.** Bez něj se CLI podívá do nadřazené složky a nenasadí žádnou funkci, bez chyby.
+- **Netlify Edge** se nasazuje pouze s `--dir dist`. Viz [Data na Edge runtimech](#dates-on-edge-runtimes).
+
+### Cloud Run {#cloud-run}
+
+Použijte výchozí build `node-server`. `gcloud run deploy --source` potřebuje `Dockerfile` ve výstupní složce, pokud lokálně neběží docker:
+
+```dockerfile
+# .output/Dockerfile
+FROM node:22-slim
+WORKDIR /app
+COPY . .
+ENV NODE_ENV=production
+CMD ["node", "server/index.mjs"]
+```
+
+```bash
+cd .output && gcloud run deploy my-app --source .
+```
+
+Tagy fungují bez `metaBaseUrl`, z přeposílaných hlaviček platformy.
+
+### Deno Deploy {#deno-deploy}
+
+Preset `deno_deploy`. `deno deploy` nahrazuje `deployctl`. Vytvořte dynamickou aplikaci se vstupním bodem `server/index.ts` a nasazujte z výstupní složky.
+
+### Firebase {#firebase}
+
+| Produkt | Nastavení |
+| --- | --- |
+| App Hosting | Spouští Node build: použijte výchozí preset nebo `firebase-app-hosting` a Node 20+ |
+| Cloud Functions | Preset `firebase` vkládá payloady a vyžaduje `firebase-functions` |
+| Hosting (statický) | Servíruje `.output/public` jako soubory, takže `/_locales/**` dostává hlavičky Hostingu |
+
+Pokud na statickém Hostingu JSON přichází se špatným `Content-Type` nebo cachováním, přidejte do `firebase.json` záznam `headers` pro `/_locales/**`. Hlavičky z Nuxt `routeRules` se nevztahují na soubory, které Hosting servíruje sám; routa payloadů nastavuje vlastní `Content-Type` a `Cache-Control` u odpovědí, které se na server dostanou.
+
+### AWS Amplify {#aws-amplify}
+
+`aws-amplify` uchovává statické soubory vedle své výpočetní složky, nikoli vedle serveru, takže se payloady vkládají jako na platformě funkcí.
+
+### Více instancí jednoho buildu {#several-instances-of-one-build}
+
+Jeden artefakt může běžet s jinou výchozí nebo vypnutou lokalizací pro každou instanci prostřednictvím proměnných prostředí: viz [Runtime přepsání](/cs/guide/runtime-overrides). Lokalizace vypnutá pouze za běhu má stále své statické soubory v `public/`; vypněte ji v době buildu, pokud nesmí být dostupné.
+
+Instance, které načítají slovníky ze vzdáleného hostitele, je mohou sdílet v Redis, Upstash, Cloudflare KV nebo D1, Deno KV nebo jiném úložišti Nitro, takže backend dostane jeden požadavek místo jednoho na instanci. Jde o cache, nikoli o zdroj překladů: viz [Sdílená cache pro více instancí](/cs/guide/performance#shared-cache-for-several-instances).
+
+## Za proxy nebo CDN {#behind-a-proxy-or-cdn}
+
+Aplikace musí z požadavku zjistit veřejného hostitele a schéma.
+
+| Proxy posílá                                 | Běžný build                                      | Build s `baseUrl` u lokalizací                                                    |
+| -------------------------------------------- | ------------------------------------------------ | --------------------------------------------------------------------------------- |
+| Skutečný `Host`                              | Není co nastavovat                               | Není co nastavovat                                                                |
+| `Host` původu plus `X-Forwarded-Host`        | Není co nastavovat                               | [`trustForwardedHost: true`](/cs/api/module-options#trustforwardedhost)           |
+| Ani jedno                                    | [`metaBaseUrl`](/cs/api/module-options#metabaseurl) | Žádné nastavení nepomůže: každý požadavek vypadá jako host původu, takže změňte proxy |
+
+- **Routy pod `swr` nebo `cache`.** Tam tabulka neplatí: viz [Cachování HTML](#caching-html). Nastavte `metaBaseUrl` nebo `site.url`.
+- **`X-Forwarded-Proto`.** Posílejte ho, jinak canonical URL za HTTPS proxy uvádějí `http://`. `metaBaseUrl` to také opraví.
+- **V doménovém buildu** vybírá základní URL tagů doména. `metaTrustForwardedHost` tam doménu nevybírá, to dělá pouze `trustForwardedHost`.
+- **Přesměrování jsou relativní a cookie lokalizace nemá `Domain`,** takže obojí zůstává na veřejném hostiteli.
+
+<Warning>
+
+**Připněte `metaBaseUrl`, když původ zůstává dostupný** — U běžného buildu bez `metaBaseUrl` nebo `site.url` přebírají canonical, `hreflang` a `og:url` hostitele z požadavku. [`metaTrustForwardedHost`](/cs/api/module-options#metatrustforwardedhost) je ve výchozím stavu zapnuté, takže přímý požadavek s `X-Forwarded-Host: evil.example` dostane v těchto tazích `https://evil.example` a cache před ním takovou stránku rozšíří. Hostitel platformy jako `*.workers.dev` je přesně takovým původem. `metaBaseUrl` toto uzavírá i pro `Host`. Známý hostitel doménového buildu si ponechá vlastní `baseUrl`. S `trustForwardedHost: true` si přímý klient může vybrat stránku jiné domény, proto to zapínejte pouze za proxy, která hlavičku přepisuje.
+
+</Warning>
+
+## Cachování HTML {#caching-html}
+
+Většinu URL lze bezpečně cachovat, protože uvádějí svou lokalizaci. Tyto závisí na návštěvníkovi:
+
+| Nastavení                      | URL                                               |
+| ------------------------------ | ------------------------------------------------- |
+| Výchozí, `autoDetectPath: '/'` | `/`                                               |
+| `prefix`                       | `/` a každá URL bez prefixu, které pouze přesměrovávají |
+| `autoDetectPath: '*'`          | Každá URL                                         |
+| `no_prefix`                    | Každá stránka                                     |
+
+- **`Vary`.** Tyto odpovědi nesou `Vary` s `Cookie`, když je nastavena [`localeCookie`](/cs/api/module-options#localecookie), a s `Accept-Language`, když je zapnuté `autoDetectLanguage`. Cache, která ho respektuje, drží odpovědi oddělené.
+- **Cache, která `Vary` ignoruje,** například „cachovat vše podle URL“, musí tyto URL přeskočit. Jinak se `302 /de` jednoho návštěvníka dostane k dalšímu návštěvníkovi a uložená výchozí stránka zruší přesměrování pro všechny. Na `/` můžete také nastavit `redirects: false`. Route cache Nitro klíčuje podle cesty a svého seznamu `varies`, takže držte `/` mimo pravidla `swr` a `cache` také.
+- **`Set-Cookie`.** S nastavenou `localeCookie` nese každá serverem vykreslená stránka pod prefixem `Set-Cookie` a korektní CDN ji neuloží. Pro cachované HTML nechte `localeCookie` vypnutou, nebo hlavičku odstraňte na edge.
+- **Pravidla `swr` a `cache` potřebují `metaBaseUrl` nebo `site.url`.** Nitro vykresluje takovou routu pouze s hlavičkami v `cache.varies`, takže `Host`, `X-Forwarded-Host` a `X-Forwarded-Proto` chybí a URL požadavku zní `http://localhost`. Bez pevného původu ukazují canonical, `hreflang` a `og:url` na těchto routách na `http://localhost`, na každé platformě. `useRequestURL()` čistého Nuxtu tam čte totéž. Přebírání hostitele od návštěvníka by naopak vložilo `X-Forwarded-Host` jednoho návštěvníka do stránky, kterou dostanou všichni. Doménový build ovlivněn není: jeho tagy používají `baseUrl` lokalizací.
+
+  Pokud jeden build obsluhuje více hostitelů a žádný jediný původ nesedí, nechte pravidlo hlavičky vidět a uchovávejte jednu kopii pro každou hodnotu: `'/blog/**': { swr: 60, cache: { varies: ['host', 'x-forwarded-host', 'x-forwarded-proto'] } }`. Každá odlišná hodnota je nový záznam v cache, takže klient, který posílá vymyšlené hlavičky, cache zaplní: umístěte původ za proxy, která je nastavuje.
+- **Pravidla `swr` a `cache` v doménovém buildu.** Modul přidá `host` do `cache.varies` každého takového pravidla a s `trustForwardedHost` i `x-forwarded-host`, aby jedna doména neservírovala jiné svou stránku. Pravidlo s `cache: false` zůstane, jak je zapsáno. `isr` je cache platformy: ověřte, že klíčuje podle hostitele. S hostitelem v klíči přidává klient, který posílá vymyšlené hostitele, záznamy do cache.
+
+Pro soubory payloadů viz [Hlavičky cache a dateBuild](#cache-headers-and-datebuild).
+
+## Související {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Ladění výkonu" icon="book-open" href="/cs/guide/performance">
+
+</Card>
+
+<Card title="Runtime přepsání" icon="book-open" href="/cs/guide/runtime-overrides">
+
+</Card>
+
+<Card title="Reference translationPayloads" icon="brackets-curly" href="/cs/api/module-options#translationpayloads">
+
+</Card>
+
+<Card title="Vrstvy a domény" icon="book-open" href="/cs/guide/layers">
+
+</Card>
+
+<Card title="SEO" icon="book-open" href="/cs/guide/seo">
+
+</Card>
+
+</CardGroup>

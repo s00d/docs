@@ -1,0 +1,139 @@
+---
+title: "Deteção do locale"
+description: "Como é escolhido o locale de uma página ou de um pedido à API: URL, query, estado, cookie, Accept-Language e valor por omissão, e quando um visitante é redirecionado."
+---
+
+Cada pedido recebe um locale, escolhido a partir da mesma lista de fontes, pela mesma ordem, no servidor e no browser. Leia isto quando decidir em que idioma chegam os visitantes que entram pela primeira vez, se a escolha deles é memorizada e o que vê a sua API do servidor. Fica a conhecer a precedência, o redirecionamento que cada estratégia faz e as opções que ativam ou desativam cada fonte.
+
+<Tip>
+
+**Pré-requisitos** — [Estratégias de encaminhamento](/pt/guide/strategy)
+
+</Tip>
+
+## A precedência {#the-precedence}
+
+Ganha a primeira fonte que indique um locale **ativo**. Um valor inválido ou malformado (um código desconhecido, um cookie corrompido) é ignorado e passa a contar a fonte seguinte.
+
+| # | Fonte | Conta quando |
+| --- | --- | --- |
+| 1 | Prefixo do URL (`/de/about`) | estratégias com prefixo. Com `prefix_except_default` e `prefix_and_default` um URL sem prefixo corresponde ao locale por omissão |
+| 2 | `?locale=de` | páginas: apenas `no_prefix`. Helpers da API do servidor: sempre, e antes do URL |
+| 3 | Estado do locale definido pela app (`useI18nLocale().setLocale()`) | o URL não tem locale |
+| 4 | Cookie | [`localeCookie`](/pt/api/module-options#localecookie) está definido (`'user-locale'` automaticamente com `no_prefix`) |
+| 5 | Cabeçalho `Accept-Language` | [`autoDetectLanguage`](/pt/api/module-options#autodetectlanguage) é `true` (por omissão) |
+| 6 | [`defaultLocale`](/pt/api/module-options#defaultlocale) | sempre |
+
+Assim, com uma estratégia com prefixo, é o URL que decide o que uma página mostra; as fontes de preferência (3–5) apenas decidem para onde um visitante é **redirecionado**, e só nos caminhos que `autoDetectPath` permite. Com `no_prefix` não há nada para redirecionar, e são as fontes de preferência que decidem o que a página mostra.
+
+![Decision flow: a locale prefix in the URL renders that locale. Without one, no_prefix renders from the preference sources, prefix_and_default renders the default locale, and prefix or prefix_except_default redirect by preference when autoDetectPath allows the path](/images/diagrams/locale-detection.svg)
+
+## Redirecionamentos por estratégia {#redirects-per-strategy}
+
+Os redirecionamentos são um `302`, feito no servidor antes de a página ser renderizada, e por um middleware de rota nas navegações do lado do cliente. A query e o hash são mantidos. Com [`redirects: false`](/pt/api/module-options#redirects) nenhum acontece; os prefixos errados continuam a dar 404.
+
+O visitante prefere `de` (cookie ou cabeçalho), `defaultLocale: 'en'`, `autoDetectPath: '/'` por omissão:
+
+| Pedido | `prefix_except_default` | `prefix` | `prefix_and_default` | `no_prefix` |
+| --- | --- | --- | --- | --- |
+| `/` | → `/de` | → `/de` | `/` em `en` | `/` em `de` |
+| `/about` | `/about` em `en` | → `/de/about` | `/about` em `en` | `/about` em `de` |
+| `/fr/about` | `/fr/about` | `/fr/about` | `/fr/about` | — |
+| `/en/about` | 404 | `/en/about` | `/en/about` | — |
+
+`prefix_and_default` nunca redireciona: um URL sem prefixo pertence ao locale por omissão, e os outros locales vivem sob o respetivo prefixo. Um visitante que prefira `en` não é redirecionado a partir de `/` com `prefix_except_default`. Os destinos não têm barra final (`/de`, não `/de/`) e seguem os caminhos personalizados (`/about` → `/de/ueber-uns`).
+
+Sempre que é o cookie ou o cabeçalho a decidir (o redirecionamento a partir de `/`, todas as páginas com `no_prefix`), a resposta inclui `Vary: Cookie, Accept-Language`, para que uma CDN mantenha as respostas separadas.
+
+### `autoDetectPath` {#autodetectpath}
+
+Para onde as fontes de preferência podem levar um visitante:
+
+| Valor | A preferência conta em |
+| --- | --- |
+| `'/'` (por omissão) | apenas `/`. Os links diretos ficam no idioma do URL |
+| `'no_prefix'` | todos os caminhos sem prefixo de locale (`/about` → `/de/about`) |
+| `'/welcome'` | esse caminho exato (a barra final é ignorada) |
+| `'*'` | todos os caminhos, incluindo os que têm prefixo: `/about` e `/fr/about` → `/de/about` quando o visitante prefere `de` |
+
+- Nos caminhos que não permite, um URL sem prefixo é tratado como o locale por omissão.
+- `prefix` é a exceção: não tem páginas sem prefixo, pelo que `/about` vai sempre para o locale do visitante (`/de/about` com o cookie `de`, `/en/about` sem preferência).
+- Com `'*'` o servidor ignora o estado da app, e um URL com prefixo deixa de registar o seu próprio locale no cookie; o cookie muda quando o visitante troca de locale com `$switchLocale`.
+
+<Warning>
+
+Com `'*'`, os links partilhados abrem no idioma de quem os lê, o que pode surpreender. Prefira `'/'` ou `'no_prefix'`, a menos que seja isso que pretende.
+
+</Warning>
+
+## Accept-Language {#accept-language}
+
+O cabeçalho é lido tal como o RFC 9110 o define e comparado com os **códigos** de locale da sua configuração:
+
+- As entradas são testadas pelo valor `q`, do mais alto para o mais baixo (`fr;q=0.1, de;q=0.9` → `de`). `q=0` significa "este idioma não"; uma entrada com um `q` malformado é ignorada. `*` não corresponde a nada.
+- `_` é lido como `-` (`en_US` = `en-US`).
+- Por entrada: o código exato, depois formas mais curtas (`de-AT` → `de`), depois um locale regional do mesmo idioma (`en` → `en-US`). As formas exatas e mais curtas não dependem da ordem de `locales`; entre várias correspondências regionais, ganha a primeira em `locales`.
+- Os sistemas de escrita nunca se cruzam: `zh-TW` e `zh-HK` implicam Tradicional, `zh-CN` Simplificado, pelo que `zh-CN` nunca corresponde a um locale `zh-Hant`.
+- Os locales desativados nunca correspondem.
+
+```ts
+// locales: [{ code: 'en' }, { code: 'de' }, { code: 'zh-Hant' }]
+// 'de-CH,de;q=0.9,en;q=0.8'  → 'de'
+// 'en-GB'                    → 'en'
+// 'zh-TW'                    → 'zh-Hant'
+// 'zh-CN'                    → no match, next source
+```
+
+Desative a deteção pelo cabeçalho com `autoDetectLanguage: false`; o cookie e o estado continuam a contar.
+
+## O cookie {#the-cookie}
+
+- **Desativado por omissão** nas estratégias com prefixo (`localeCookie: null`). Os redirecionamentos funcionam então apenas a partir do cabeçalho, e a escolha não é memorizada entre visitas. Defina `localeCookie: 'user-locale'` para a memorizar.
+- Com `no_prefix` é `'user-locale'`, a menos que defina outro nome. `localeCookie: null` também o desativa aí.
+- É escrito quando o visitante troca de locale (`$switchLocale`, `<i18n-switcher>`, `useI18nLocale().setLocale()`), e numa renderização no servidor de uma página com prefixo (`/fr/about` guarda `fr`; não com `autoDetectPath: '*'` e redirecionamentos ativos, em que o URL ainda pode mudar). Uma navegação do lado do cliente para uma página também guarda o locale dessa página, inclusive numa página sem prefixo do locale por omissão; um primeiro carregamento desse URL não o faz. Com `no_prefix` e em modo hash, uma navegação só guarda uma alteração. Um 404 não guarda nada, a menos que `$switchLocale` vá parar a ele.
+- Dura um ano (`path=/`, `SameSite=Lax`).
+- Com `hashMode` a preferência fica antes no cookie `hash-locale`; o servidor e o cliente leem o mesmo. O servidor renderiza esse locale e, fora de `prefix`, nunca redireciona; um locale no hash (`/#/de`) tem prioridade sobre ele e aplica-se logo após a hidratação. Com `prefix` não há página em `/`, pelo que `/` é renderizado no browser, que vai para `/#/de` pelo cookie e depois pelo idioma do browser (`autoDetectLanguage`); qualquer outro documento (`/about`, `/de`) redireciona para o hash.
+
+Leia e defina a preferência com [`useI18nLocale`](/pt/composables/useI18nLocale), não diretamente com `useCookie` ou `useState`.
+
+## A sua própria deteção {#your-own-detection}
+
+Para escolher o locale por si (uma definição do utilizador, um subdomínio), chame `useI18nLocale().setLocale(code)` num plugin executado antes do plugin do módulo. Torna-se a fonte 3, o estado da app. [Deteção personalizada do locale](/pt/guide/custom-auto-detect) tem a receita completa, incluindo como desativar a deteção incorporada.
+
+## Rotas da API do servidor {#server-api-routes}
+
+[`useLocaleServerMiddleware`](/pt/guide/server-side-translations) e `useTranslationServerMiddleware` usam a sua própria ordem, porque um URL de API raramente é localizado:
+
+1. `?locale=`
+2. um parâmetro de rota `[locale]`, ou um prefixo de locale no caminho
+3. cookie (quando `localeCookie` está definido)
+4. `Accept-Language` (quando `autoDetectLanguage` está ativo)
+5. `defaultLocale`
+
+`localeCookie: null` e `autoDetectLanguage: false` também desativam aqui as fontes 3 e 4.
+
+## Substituições em runtime {#runtime-overrides}
+
+As [substituições em runtime](/pt/guide/runtime-overrides) alteram a lista com que as fontes são comparadas:
+
+- Os `disabledLocales` em runtime são removidos de todos os passos: um cookie ou cabeçalho que indique um deles é ignorado.
+- Um `defaultLocale` em runtime é o passo 6 com `prefix` e `no_prefix`.
+- Com `prefix_except_default` e `prefix_and_default` o locale por omissão é fixado no build (as suas páginas são as rotas sem prefixo). Um `defaultLocale` em runtime, ou desativar o locale por omissão do build, é ignorado com um aviso.
+
+## Relacionado {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Deteção personalizada do locale" icon="book-open" href="/pt/guide/custom-auto-detect">
+
+</Card>
+
+<Card title="Rotas do servidor e API" icon="book-open" href="/pt/guide/server-side-translations">
+
+</Card>
+
+<Card title="useI18nLocale" icon="brackets-curly" href="/pt/composables/useI18nLocale">
+
+</Card>
+
+</CardGroup>

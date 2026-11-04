@@ -1,0 +1,147 @@
+---
+title: "Kiểm thử ứng dụng"
+description: "Viết unit test cho các component dùng $t với @i18n-micro/test-utils và Vitest, và kiểm tra các trang đã bản địa hóa theo kiểu end-to-end."
+---
+
+Các component gọi `useI18n()` cần một instance i18n trong unit test. `@i18n-micro/test-utils` cung cấp cho bạn một `useI18n()` giả với logic dịch, số nhiều và định dạng thật, nên bạn có thể mount một component với các từ điển của riêng mình mà không cần Nuxt server. Với định tuyến và chuyển hướng, hãy chạy module thật theo kiểu end-to-end với `@nuxt/test-utils`.
+
+Trang này nói về việc kiểm thử ứng dụng của bạn. Cách repository này kiểm thử chính module được trình bày tại [Kiểm thử module](https://s00d.github.io/nuxt-i18n-micro/contributing/testing).
+
+## Cài đặt {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add -D @i18n-micro/test-utils @nuxt/test-utils vitest @vue/test-utils happy-dom
+```
+
+```bash npm
+npm install -D @i18n-micro/test-utils @nuxt/test-utils vitest @vue/test-utils happy-dom
+```
+
+</CodeGroup>
+
+## Mock useI18n {#mock-usei18n}
+
+```ts
+// tests/unit-setup.ts
+import { setupNuxtI18nMock } from '@i18n-micro/test-utils'
+import { mockNuxtImport } from '@nuxt/test-utils/runtime'
+import { beforeEach, vi } from 'vitest'
+
+export const { i18n, useI18n, setTranslationsFromJson } = setupNuxtI18nMock({
+  spy: vi.fn, // every method becomes a vi.fn, so you can assert calls
+  beforeEach, // reset state and reseed `translations` before each test
+  translations: { welcome: 'Welcome' },
+})
+
+mockNuxtImport('useI18n', () => useI18n)
+```
+
+```ts
+// vitest.config.ts
+import { defineVitestConfig } from '@nuxt/test-utils/config'
+
+export default defineVitestConfig({
+  test: {
+    environment: 'nuxt',
+    setupFiles: ['./tests/unit-setup.ts'],
+  },
+})
+```
+
+Hãy giữ `mockNuxtImport` trong file setup: `@nuxt/test-utils` cần biến đổi nó. `setupNuxtI18nMock` dùng một cache bản dịch riêng, nên các file test chạy song song không chia sẻ trạng thái.
+
+## Viết một test {#write-a-test}
+
+```vue
+<!-- components/Greeting.vue -->
+<script setup lang="ts">
+const { $t } = useI18n()
+</script>
+
+<template>
+  <p>{{ $t('welcome') }}</p>
+</template>
+```
+
+```ts
+// tests/greeting.spec.ts
+import { mountSuspended } from '@nuxt/test-utils/runtime'
+import { expect, it } from 'vitest'
+import Greeting from '~/components/Greeting.vue'
+import de from '~/locales/de.json'
+import { i18n, setTranslationsFromJson } from './unit-setup'
+
+it('renders the German greeting', async () => {
+  await setTranslationsFromJson('de', de)
+  i18n.setLocale('de')
+
+  const wrapper = await mountSuspended(Greeting)
+  expect(wrapper.text()).toBe('Willkommen') // de.json: { "welcome": "Willkommen" }
+})
+```
+
+Bản giả cung cấp cùng các phương thức như `useI18n()` thật (`$t`, `$tc`, `$tn`, `$td`, `$has`, `$localePath`, …, có và không có `$`) cùng các setter cho test: `setLocale`, `setLocales`, `setDefaultLocale`, `setRouteName`, `setTranslationsFromJson`, `loadPageTranslations`, `mergeTranslations`, `setMissingHandler`.
+
+`$localePath` và `$switchLocalePath` là các stub thêm tiền tố vào đường dẫn theo tùy chọn `strategy` (không có router thật). Hãy kiểm thử liên kết và chuyển hướng thật theo kiểu end-to-end.
+
+## Helper cấp thấp hơn {#lower-level-helpers}
+
+| Helper | Dùng để |
+| --- | --- |
+| `createIsolatedFakeI18n(options)` | Một bản giả độc lập không có phần kết nối `useI18n` của Nuxt, ví dụ cho `mount` thuần của `@vue/test-utils` với `global.mocks`. |
+| `createFakeI18n(options)` | Một bản giả trên cache dùng chung của module (gọi `resetI18n()` trong `beforeEach`), hoặc độc lập với `isolated: true`. |
+| `createI18nTestContext(options)` | Context nằm sau cả hai, khi bạn cần nhiều bản giả. |
+| `t`, `tc`, `ts`, `tn`, `td`, `tdr`, `has` | Gọi trực tiếp trên context dùng chung, để kiểm thử các hàm thuần. |
+
+Mock là một `BaseI18n`: `t`, `tc`, `tn`, `td`, `tdr` và `has` là các hàm thật, chạy trên từ điển thật, nên test thấy đúng những gì ứng dụng hiển thị.
+
+Các helper factory ở trên nhận `locale`, `defaultLocale`, `locales`, `routeName`, `strategy`, `translations` và `messages` (từ điển theo từng locale). Một dự án ví dụ hoàn chỉnh có tại [`packages/test-utils/example`](https://github.com/s00d/nuxt-i18n-micro/tree/main/packages/test-utils/example).
+
+## Test end-to-end {#end-to-end-tests}
+
+Định tuyến, chuyển hướng, thẻ SEO và việc tải payload cần module thật. Khởi động ứng dụng của bạn với `@nuxt/test-utils/e2e`:
+
+```ts
+// tests/e2e/locales.test.ts
+import { $fetch, fetch, setup } from '@nuxt/test-utils/e2e'
+import { describe, expect, it } from 'vitest'
+
+describe('locales', async () => {
+  await setup({ server: true })
+
+  it('serves the German page', async () => {
+    expect(await $fetch('/de')).toContain('lang="de-DE"')
+  })
+
+  it('redirects / for a German browser', async () => {
+    const res = await fetch('/', { headers: { 'accept-language': 'de' }, redirect: 'manual' })
+    expect(res.headers.get('location')).toBe('/de')
+  })
+})
+```
+
+Test thứ hai giả định `prefix` (hoặc `prefix_except_default` với một locale mặc định khác); xem [Phát hiện locale](/vi/guide/locale-detection) để biết khi nào `/` chuyển hướng.
+
+## Liên quan {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Kiểm thử module" icon="code-pull-request" href="https://s00d.github.io/nuxt-i18n-micro/contributing/testing">
+
+</Card>
+
+<Card title="useI18n" icon="brackets-curly" href="/vi/composables/useI18n">
+
+</Card>
+
+<Card title="Phát hiện locale" icon="book-open" href="/vi/guide/locale-detection">
+
+</Card>
+
+<Card title="Storybook" icon="book-open" href="/vi/guide/storybook">
+
+</Card>
+
+</CardGroup>

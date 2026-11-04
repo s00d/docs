@@ -1,0 +1,111 @@
+---
+title: "自定义 locale 检测"
+description: "借助服务端插件和 useI18nLocale().setLocale()，自行选择 locale —— 根据域名、请求头或用户资料。"
+---
+
+内置检测会读取 URL、cookie 和 `Accept-Language`。当 locale 取决于其他因素时 —— 域名、CDN 设置的地理位置请求头、用户资料 —— 请在一个先于 i18n 插件运行的插件中自行设置。之后模块会加载该 locale 的翻译，并像自己检测到它一样将其用于重定向。决定所选 locale 何时优先于 URL 的规则见 [Locale 检测](/zh-CN/guide/locale-detection)；本页介绍如何接入你自己的来源。
+
+## 在服务端插件中设置 locale {#set-the-locale-in-a-server-plugin}
+
+```ts
+// plugins/i18n-locale.server.ts
+export default defineNuxtPlugin({
+  name: 'i18n-custom-locale',
+  enforce: 'pre',
+  order: -10, // before the i18n plugin (order -5)
+  setup() {
+    const { setLocale } = useI18nLocale()
+    const host = (useRequestHeaders(['host']).host ?? '').split(':')[0]! // without the port
+
+    if (host.endsWith('.de')) setLocale('de')
+    else if (host.endsWith('.fr')) setLocale('fr')
+  },
+})
+```
+
+`setLocale(code)` 会写入 locale 状态（`useState('i18n-locale')`），并在配置了 locale cookie 时写入该 cookie。请使用它，而不要自己写入 `useState` 或 `useCookie`。只传入已启用的 locale 代码。
+
+当插件读取请求头时，请保持其为 `.server.ts`：浏览器中不存在请求头。`.client.ts` 插件适合处理仅限浏览器的来源，例如 `localStorage`。
+
+## 关闭内置的 Accept-Language 步骤 {#turn-off-the-built-in-accept-language-step}
+
+你的插件和 `Accept-Language` 可能得出不同结果。若只想让你的代码（加上 URL 和 cookie）来决定，请关闭请求头检测：
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    autoDetectLanguage: false,
+  },
+})
+```
+
+[`autoDetectLanguage`](/zh-CN/api/module-options#autodetectlanguage) 只控制请求头步骤。URL 和有效的 cookie 仍然有效。
+
+## 接下来会发生什么 {#what-happens-next}
+
+`setLocale` 的效果取决于[策略](/zh-CN/guide/strategy)：
+
+| 策略 | 在插件中调用 `setLocale('de')` 的效果 |
+| --- | --- |
+| `no_prefix` | 页面以德语渲染；URL 不变。 |
+| `prefix`, `prefix_except_default` | 在 [`autoDetectPath`](/zh-CN/api/module-options#autodetectpath) 允许重定向的无前缀路径上（默认仅 `/`），服务器会以 `302` 重定向到德语 URL。带有 locale 前缀的 URL 会保持不变。 |
+| `prefix_and_default` | 不会重定向：无前缀的 URL 是有效的默认 locale 页面。 |
+
+在前缀策略下，URL 中的 locale 代表用户的选择，你的插件不会覆盖它。`autoDetectPath: '*'` 是例外：此时服务器会根据 cookie 和 `Accept-Language` 移动带前缀的 URL 并忽略状态，但 `setLocale()` 在配置了 cookie 时也会写入它，因此从下一次请求开始，你的插件的选择可能会重定向带前缀的 URL。当显式的 locale URL 必须优先时，请保留 `'/'` 或使用 `'no_prefix'`。用你的插件来选择访客的落地位置，而不是改写他们点击的链接。
+
+## 尊重用户选择的 locale {#respect-a-locale-the-user-picked}
+
+用户切换语言后，切换操作会写入 cookie。当已存在有效偏好时，请跳过你自己的检测：
+
+```ts
+// plugins/i18n-locale.server.ts
+import { detectLocaleFromAcceptLanguage } from '@i18n-micro/utils/accept-language'
+
+export default defineNuxtPlugin({
+  name: 'i18n-custom-locale',
+  enforce: 'pre',
+  order: -10,
+  setup() {
+    const { getPreferredLocale, setLocale, validLocales } = useI18nLocale()
+    if (getPreferredLocale()) return // valid state or cookie: keep it
+
+    const country = useRequestHeaders(['x-country'])['x-country']
+    if (country === 'JP') return setLocale('ja')
+
+    const header = useRequestHeaders(['accept-language'])['accept-language']
+    setLocale(detectLocaleFromAcceptLanguage(header, validLocales))
+  },
+})
+```
+
+`getPreferredLocale()` 仅在状态或 cookie 是已启用的 locale 时才返回它，因此过期的 cookie 不会阻止检测。`detectLocaleFromAcceptLanguage` 是模块自身使用的、支持 q 值的匹配器（安装 `@i18n-micro/utils` 即可导入）；`setLocale(null)` 不执行任何操作。
+
+## 每个 locale 一个域名 {#one-domain-per-locale}
+
+如果每个域名都应提供各自的 locale，则无需插件：为每个 locale 设置 `baseUrl`，在每个域名的默认 locale 上设置 `baseDefault: true`，然后构建一次（静态站点仍需按域名分别运行 `nuxi generate`）。参见[层与域名](/zh-CN/guide/layers#multiple-domains)。
+
+## 相关内容 {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Locale 检测" icon="book-open" href="/zh-CN/guide/locale-detection">
+
+完整的优先级和重定向规则
+
+</Card>
+
+<Card title="useI18nLocale" icon="brackets-curly" href="/zh-CN/composables/useI18nLocale">
+
+</Card>
+
+<Card title="路由策略" icon="book-open" href="/zh-CN/guide/strategy">
+
+</Card>
+
+<Card title="层与域名" icon="book-open" href="/zh-CN/guide/layers">
+
+</Card>
+
+</CardGroup>

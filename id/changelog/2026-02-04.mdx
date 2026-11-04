@@ -1,0 +1,115 @@
+---
+title: "v3.0.0 — Optimasi Performa, Paket Route & Path Strategy"
+description: "Catatan rilis: v3.0.0 — Optimasi Performa, Paket Route & Path Strategy"
+---
+
+**Tanggal**: 2026-02-04
+
+**Versi**: `v3.0.0`
+
+![Rilis v3.0.0](/images/3.0.0.png)
+
+Kami mengumumkan **v3.0.0** dengan **perombakan arsitektur besar-besaran**: penulisan ulang total sistem penyimpanan terjemahan untuk performa maksimal, logika pembuatan rute dan path runtime kini dipisah ke paket khusus, dan alur redirect telah dirancang ulang agar lebih andal dan kompatibel dengan Serverless.
+
+## Apa yang Baru? {#what’s-new}
+
+### Optimasi Performa — Arsitektur Penyimpanan Terjemahan Baru {#performance-optimization-—-new-translation-storage-architecture}
+
+Sistem pemuatan dan caching terjemahan telah ditulis ulang sepenuhnya untuk performa maksimal:
+
+- **Kelas TranslationStorage terpusat** — Kelas `TranslationStorage` baru (`src/runtime/utils/storage.ts`) menyediakan penyimpanan terpadu untuk klien dan server. Menggunakan `globalThis` dengan `Symbol.for` untuk menjamin singleton sejati di seluruh proses Node.js, sehingga mencegah duplikasi cache di antara modul yang di-bundle.
+
+- **Fungsi `$t()` yang dioptimalkan (tFast)** — Fungsi terjemahan menggunakan lookup langsung terhadap satu kamus aktif:
+  1. Semua terjemahan (root + khusus halaman + fallback) digabungkan terlebih dahulu saat build menjadi satu file per halaman
+  2. Pada navigasi dengan locale yang sama, terjemahan halaman baru digabungkan secara kumulatif ke kamus aktif (mencegah kunci berkedip selama animasi transisi)
+  3. Mendukung kunci bersarang (`key.subkey.subsubkey`) dengan resolusi path yang dioptimalkan
+  4. Tidak ada lookup Map atau perhitungan locale/rute pada setiap pemanggilan — menggunakan konteks yang sudah dihitung sebelumnya
+
+- **Injeksi sisi server melalui `window.__I18N__`** — Terjemahan yang dimuat selama SSR disisipkan ke HTML sebagai tag script. Klien membaca langsung dari `window.__I18N__` saat pemuatan awal, sehingga menghindari fetch ganda.
+
+- **Cache chunk lokal di plugin** — Plugin memelihara Map `loadedChunks` lokal yang menyimpan semua chunk terjemahan yang telah dimuat. Setelah dimuat, terjemahan tidak pernah diambil ulang selama siklus hidup halaman.
+
+- **Pre-merge saat build** — Langkah `preMergeLocales` di `module.ts` menggabungkan semua layer, rantai locale fallback, dan terjemahan tingkat root ke setiap file halaman saat build. Server-loader cukup membaca satu file yang sudah dibuat sebelumnya — tidak perlu penggabungan saat runtime.
+
+**Peningkatan performa:**
+
+- Alokasi memori per permintaan berkurang (tidak ada pembuatan ulang objek pada setiap pemanggilan `$t()`)
+- Tekanan garbage collection lebih rendah
+- Waktu respons lebih cepat di bawah beban
+- Pola penggunaan memori yang stabil (tidak ada grafik yang "melompat")
+
+### Paket Route & Path Strategy {#route-&-path-strategy-packages}
+
+- **@i18n-micro/route-strategy** — Pembuatan rute saat build: memperluas halaman Nuxt dengan rute terlokalisasi, menangani alias, rute bersarang, dan path kustom per strategi. Satu entry point: `new RouteGenerator(options)` dan `extendPages(pages)`. Strategi (`no_prefix`, `prefix`, `prefix_except_default`, `prefix_and_default`) diimplementasikan sebagai kelas terpisah dan dipilih melalui factory.
+- **@i18n-micro/path-strategy** — Penanganan path dan locale saat runtime: menyediakan `PathStrategy` untuk membangun path terlokalisasi, me-resolve redirect, dan mengganti locale. Ekspor subpath yang tree-shakeable (`/prefix`, `/no-prefix`, dll.) sehingga hanya strategi yang dipilih yang di-bundle. Menggunakan fungsi murni untuk resolusi rute dan flag konteks yang sudah dihitung sebelumnya untuk alokasi minimal.
+- **Tata letak paket terstruktur** — Logika rute di `@i18n-micro/route-strategy` dengan `core/`, `strategies/`. Path strategy di `@i18n-micro/path-strategy` dengan struktur `src/` datar: `types.ts`, `path.ts`, `resolver.ts`, `helpers.ts`, dan `strategies/`.
+- **Perilaku konsisten** — Penanganan alias, penggabungan path induk–anak, `globalLocaleRoutes` / `filesLocaleRoutes` / `routeLocales` kustom, serta jaminan imutabilitas dicakup oleh rangkaian pengujian khusus.
+
+### Perombakan Arsitektur Redirect {#redirect-architecture-overhaul}
+
+- **Middleware server** — Redirect dan penanganan 404 berjalan di middleware Nitro (`i18n.global.ts`). Ini dieksekusi sebelum render Nuxt, sehingga redirect dari `/` ke `/<locale>/` terjadi tanpa kilatan error ketika cookie locale ada.
+- **Plugin klien (sisi klien)** — Plugin khusus klien (`06.client-redirect.client.ts`) berjalan setelah hidrasi dan menangani redirect ketika `useI18nLocale()` atau cookie mengatur locale non-default. Nitro berjalan sebelum Nuxt, sehingga server tidak dapat melihat perubahan cookie/state dari plugin pengguna; plugin klien menangani kasus ini.
+- **Tanpa komponen fallback** — Komponen fallback `locale-redirect.vue` dan opsi `fallbackRedirectComponentPath` telah dihapus. Logika redirect sepenuhnya ditangani oleh middleware server dan plugin klien.
+- **Dukungan path kustom** — Path seperti `/kontakt` untuk bahasa Jerman (melalui `globalLocaleRoutes`) dikenali dengan benar sebagai valid tanpa prefiks locale, sehingga menghindari 404 yang keliru saat prerender.
+- **Perbaikan customRegexMatcher** — Saat menggunakan `customRegexMatcher`, pola kini mencocokkan **seluruh** segmen path pertama (dengan anchor `^` dan `$`). Ini mencegah 404 palsu untuk rute seperti `/locale-test` ketika pola `[a-z]{2}-[a-z]{2}` sebelumnya mencocokkan substring.
+- **Perbaikan autoDetectPath** — Opsi `autoDetectPath` kini membandingkan dengan benar terhadap path URL asli, sehingga mencegah redirect yang tidak diinginkan saat bernavigasi secara eksplisit ke URL berprefiks locale.
+
+### Composable useI18nLocale {#usei18nlocale-composable}
+
+- **Manajemen locale terpusat** — Composable `useI18nLocale()` baru menggantikan `useLocaleCookies` dan menyediakan satu entry point untuk state locale, cookie, dan utilitas sinkronisasi.
+- **API** — `locale`, `localeCookie`, `hashCookie`, `getLocale()`, `getPreferredLocale()`, `setLocale()`, `syncLocale()`, `isValidLocale()`, `getEffectiveLocale()`, `resolveInitialLocale()`.
+- **Locale secara terprogram** — Gunakan `useI18nLocale().setLocale(locale)` di plugin server alih-alih `useState('i18n-locale')` untuk penanganan locale yang lebih rapi dan terpusat.
+
+### Auto-Detection Kustom & Konfigurasi {#custom-auto-detection-&-configuration}
+
+- **`getI18nConfig()`** — Plugin kustom (mis. untuk deteksi locale) sebaiknya menggunakan `getI18nConfig()` dari `#build/i18n.strategy.mjs` alih-alih `useRuntimeConfig().public.i18nConfig`. Ini memberikan akses langsung ke konfigurasi i18n yang sudah di-resolve (mis. `localeCookie`) tanpa bergantung pada runtime config.
+- **Nama cookie** — Gunakan `getI18nConfig().localeCookie ?? 'user-locale'` saat mengimplementasikan logika deteksi kustom.
+
+### Paket Integrasi yang Disederhanakan {#simplified-integration-packages}
+
+Semua paket integrasi (`@i18n-micro/vue`, `@i18n-micro/astro`, `@i18n-micro/node`, `@i18n-micro/react`, `@i18n-micro/preact`, `@i18n-micro/solid`) telah disederhanakan dan dioptimalkan, dengan berbagi logika terjemahan inti yang sama.
+
+### Perubahan Konfigurasi {#configuration-changes}
+
+- **`previousPageFallback` dihapus** — Opsi ini tidak lagi diperlukan. Strategi penggabungan kumulatif yang baru secara otomatis menjaga terjemahan halaman sebelumnya tetap tersedia selama animasi transisi, lalu membersihkannya melalui hook `page:transition:finish`.
+- **`hmr`** — Dipindahkan dari `experimental.hmr` menjadi opsi tingkat atas. Mengontrol HMR sisi server untuk file terjemahan (aktif secara default saat development).
+
+```typescript
+// Before (v2.x)
+export default defineNuxtConfig({
+  i18n: {
+    experimental: {
+      hmr: true,
+    },
+  },
+})
+
+// After (v3.0.0)
+export default defineNuxtConfig({
+  i18n: {
+    hmr: true,
+  },
+})
+```
+
+## Breaking Changes {#breaking-changes}
+
+- **`fallbackRedirectComponentPath`** — Dihapus. Modul tidak lagi menggunakan komponen rute fallback untuk redirect. Jika Anda mengonfigurasi path komponen kustom, hapus dari konfigurasi Anda.
+- **`useLocaleCookies`** — Dihapus. Gunakan `useI18nLocale()` sebagai gantinya. Composable baru ini menyediakan `locale`, `localeCookie`, `hashCookie`, `setLocale()`, `syncLocale()`, dan lainnya.
+- **`experimental.i18nPreviousPageFallback` / `previousPageFallback`** — Dihapus sepenuhnya. Strategi penggabungan kumulatif menangani kedipan saat transisi secara otomatis. Hapus opsi ini dari konfigurasi Anda.
+- **`experimental.hmr`** — Dipindahkan ke `hmr`. Perbarui konfigurasi Anda jika Anda menggunakan opsi ini.
+- **Plugin kustom** — Jika plugin deteksi locale kustom Anda menggunakan `useRuntimeConfig().public.i18nConfig`, beralihlah ke `getI18nConfig()` dari `#build/i18n.strategy.mjs`. Utamakan `useI18nLocale().setLocale()` daripada `useState('i18n-locale')`. Lihat [Deteksi Bahasa Kustom](/id/guide/custom-auto-detect) untuk contoh terbaru.
+- **Perubahan file internal** — `load-from-storage.ts` dan `translation-loader.ts` telah dihapus dan diganti dengan `storage.ts` dan `server-loader.ts`. Jika Anda mengimpor langsung dari file-file ini (tidak disarankan), perbarui impor Anda.
+
+## Mengapa Ini Penting {#why-it-matters}
+
+- **Performa**: Cache singleton terpusat menghilangkan pembuatan objek per permintaan dan mengurangi tekanan GC.
+- **Kemudahan pemeliharaan**: Logika rute dan path berada di paket khusus dengan batasan dan tipe yang jelas.
+- **Pengujian**: Perilaku strategi dan kasus tepi diuji secara terisolasi.
+- **Keandalan**: Logika redirect server (Nitro) dan klien yang terpisah menghindari masalah timing ketika cookie/useState diatur oleh plugin pengguna.
+- **Siap Serverless**: Plugin Nitro berjalan dalam konteks yang sama dengan handler Nitro, kompatibel dengan Edge/Workers.
+- **Dokumentasi**: Perilaku routing didokumentasikan di [panduan Strategi](/id/guide/strategy) serta di paket [path-strategy](https://github.com/s00d/nuxt-i18n-micro/tree/main/packages/path-strategy) dan [route-strategy](https://github.com/s00d/nuxt-i18n-micro/tree/main/packages/route-strategy).
+
+Untuk catatan upgrade dan daftar lengkap perubahan, lihat [changelog](https://github.com/s00d/nuxt-i18n-micro/blob/main/CHANGELOG.md).
+
+---

@@ -1,0 +1,115 @@
+---
+title: "v3.0.0 — Tối ưu hiệu năng, các gói Route & Path Strategy"
+description: "Ghi chú phát hành: v3.0.0 — Tối ưu hiệu năng, các gói Route & Path Strategy"
+---
+
+**Ngày**: 2026-02-04
+
+**Phiên bản**: `v3.0.0`
+
+![Bản phát hành v3.0.0](/images/3.0.0.png)
+
+Chúng tôi xin giới thiệu **v3.0.0** với một **cuộc đại tu kiến trúc lớn**: viết lại hoàn toàn hệ thống lưu trữ bản dịch để đạt hiệu năng tối đa, việc sinh route và logic đường dẫn lúc runtime giờ được tách thành các gói riêng, và luồng chuyển hướng đã được thiết kế lại để tin cậy hơn và tương thích với Serverless.
+
+## Có gì mới? {#what’s-new}
+
+### Tối ưu hiệu năng — Kiến trúc lưu trữ bản dịch mới {#performance-optimization-—-new-translation-storage-architecture}
+
+Hệ thống tải và lưu cache bản dịch đã được viết lại hoàn toàn để đạt hiệu năng tối đa:
+
+- **Lớp TranslationStorage tập trung** — Lớp `TranslationStorage` mới (`src/runtime/utils/storage.ts`) cung cấp một kho lưu trữ thống nhất cho cả client và server. Sử dụng `globalThis` với `Symbol.for` để đảm bảo một singleton thực sự trên toàn bộ tiến trình Node.js, ngăn việc nhân bản cache giữa các module được bundle.
+
+- **Hàm `$t()` được tối ưu (tFast)** — Hàm dịch tra cứu trực tiếp trên một từ điển đang hoạt động duy nhất:
+  1. Tất cả bản dịch (root + riêng của trang + fallback) được hợp nhất trước lúc build thành một tệp duy nhất cho mỗi trang
+  2. Khi điều hướng trong cùng locale, bản dịch của trang mới được hợp nhất cộng dồn vào từ điển đang hoạt động (ngăn key nhấp nháy trong các hiệu ứng chuyển trang)
+  3. Hỗ trợ key lồng nhau (`key.subkey.subsubkey`) với việc phân giải đường dẫn được tối ưu
+  4. Không tra cứu Map hay tính toán locale/route ở mỗi lần gọi — sử dụng ngữ cảnh đã được tính sẵn
+
+- **Chèn từ phía server qua `window.__I18N__`** — Các bản dịch được tải trong SSR được chèn vào HTML dưới dạng thẻ script. Client đọc trực tiếp từ `window.__I18N__` ở lần tải đầu tiên, tránh fetch trùng lặp.
+
+- **Cache chunk cục bộ trong plugin** — Plugin duy trì một Map `loadedChunks` cục bộ lưu tất cả các chunk bản dịch đã tải. Khi đã tải, bản dịch không bao giờ được fetch lại trong vòng đời của trang.
+
+- **Hợp nhất trước lúc build** — Bước `preMergeLocales` trong `module.ts` hợp nhất tất cả các layer, chuỗi locale fallback và bản dịch cấp root vào mọi tệp trang lúc build. Server-loader chỉ cần đọc một tệp duy nhất đã được build sẵn — không cần hợp nhất lúc runtime.
+
+**Cải thiện hiệu năng:**
+
+- Giảm cấp phát bộ nhớ mỗi yêu cầu (không tạo lại đối tượng ở mỗi lần gọi `$t()`)
+- Giảm áp lực thu gom rác
+- Thời gian phản hồi nhanh hơn khi chịu tải
+- Mức sử dụng bộ nhớ ổn định (không có biểu đồ "nhảy vọt")
+
+### Các gói Route & Path Strategy {#route-&-path-strategy-packages}
+
+- **@i18n-micro/route-strategy** — Sinh route lúc build: mở rộng các trang Nuxt bằng route đã bản địa hóa, xử lý alias, route lồng nhau và đường dẫn tùy chỉnh theo từng strategy. Một điểm vào duy nhất: `new RouteGenerator(options)` và `extendPages(pages)`. Các strategy (`no_prefix`, `prefix`, `prefix_except_default`, `prefix_and_default`) được triển khai thành các lớp riêng và được chọn qua một factory.
+- **@i18n-micro/path-strategy** — Xử lý đường dẫn và locale lúc runtime: cung cấp `PathStrategy` để xây dựng đường dẫn đã bản địa hóa, phân giải chuyển hướng và chuyển đổi locale. Các subpath export có thể tree-shake (`/prefix`, `/no-prefix`, v.v.) nên chỉ strategy được chọn mới được bundle. Sử dụng các hàm thuần cho việc phân giải route và các cờ ngữ cảnh tính sẵn để giảm thiểu cấp phát.
+- **Bố cục gói có cấu trúc** — Logic route nằm trong `@i18n-micro/route-strategy` với `core/`, `strategies/`. Path strategy nằm trong `@i18n-micro/path-strategy` với cấu trúc `src/` phẳng: `types.ts`, `path.ts`, `resolver.ts`, `helpers.ts` và `strategies/`.
+- **Hành vi nhất quán** — Việc xử lý alias, nối đường dẫn cha–con, `globalLocaleRoutes` / `filesLocaleRoutes` / `routeLocales` tùy chỉnh, và các đảm bảo bất biến được bao phủ bởi một bộ kiểm thử riêng.
+
+### Đại tu kiến trúc chuyển hướng {#redirect-architecture-overhaul}
+
+- **Middleware server** — Việc chuyển hướng và xử lý 404 chạy trong middleware Nitro (`i18n.global.ts`). Middleware này thực thi trước khi Nuxt render, nên các chuyển hướng từ `/` đến `/<locale>/` diễn ra mà không bị chớp lỗi khi có cookie locale.
+- **Plugin client (phía client)** — Một plugin chỉ chạy trên client (`06.client-redirect.client.ts`) chạy sau hydration và xử lý chuyển hướng khi `useI18nLocale()` hoặc cookie đặt một locale không phải mặc định. Nitro chạy trước Nuxt, nên server không thể thấy các thay đổi cookie/state từ plugin của người dùng; plugin client bao quát trường hợp này.
+- **Không còn component fallback** — Component fallback `locale-redirect.vue` và tùy chọn `fallbackRedirectComponentPath` đã bị loại bỏ. Logic chuyển hướng được xử lý hoàn toàn bởi middleware server và plugin client.
+- **Hỗ trợ đường dẫn tùy chỉnh** — Các đường dẫn như `/kontakt` cho tiếng Đức (qua `globalLocaleRoutes`) được nhận diện đúng là hợp lệ khi không có tiền tố locale, tránh 404 sai trong quá trình prerender.
+- **Sửa lỗi customRegexMatcher** — Khi dùng `customRegexMatcher`, mẫu giờ khớp với **toàn bộ** đoạn đường dẫn đầu tiên (với các neo `^` và `$`). Điều này ngăn 404 sai cho các route như `/locale-test` khi mẫu `[a-z]{2}-[a-z]{2}` trước đây khớp với chuỗi con.
+- **Sửa lỗi autoDetectPath** — Tùy chọn `autoDetectPath` giờ so sánh đúng với đường dẫn URL gốc, ngăn các chuyển hướng không mong muốn khi chủ động điều hướng đến URL có tiền tố locale.
+
+### Composable useI18nLocale {#usei18nlocale-composable}
+
+- **Quản lý locale tập trung** — Composable `useI18nLocale()` mới thay thế `useLocaleCookies` và cung cấp một điểm vào duy nhất cho trạng thái locale, cookie và các tiện ích đồng bộ.
+- **API** — `locale`, `localeCookie`, `hashCookie`, `getLocale()`, `getPreferredLocale()`, `setLocale()`, `syncLocale()`, `isValidLocale()`, `getEffectiveLocale()`, `resolveInitialLocale()`.
+- **Locale theo lập trình** — Dùng `useI18nLocale().setLocale(locale)` trong plugin server thay vì `useState('i18n-locale')` để xử lý locale gọn gàng và tập trung hơn.
+
+### Tự động phát hiện tùy chỉnh & Cấu hình {#custom-auto-detection-&-configuration}
+
+- **`getI18nConfig()`** — Các plugin tùy chỉnh (ví dụ để phát hiện locale) nên dùng `getI18nConfig()` từ `#build/i18n.strategy.mjs` thay vì `useRuntimeConfig().public.i18nConfig`. Cách này cho phép truy cập trực tiếp vào cấu hình i18n đã phân giải (ví dụ `localeCookie`) mà không phụ thuộc vào runtime config.
+- **Tên cookie** — Dùng `getI18nConfig().localeCookie ?? 'user-locale'` khi triển khai logic phát hiện tùy chỉnh.
+
+### Các gói tích hợp được đơn giản hóa {#simplified-integration-packages}
+
+Tất cả các gói tích hợp (`@i18n-micro/vue`, `@i18n-micro/astro`, `@i18n-micro/node`, `@i18n-micro/react`, `@i18n-micro/preact`, `@i18n-micro/solid`) đã được đơn giản hóa và tối ưu, dùng chung cùng một logic dịch lõi.
+
+### Thay đổi cấu hình {#configuration-changes}
+
+- **Đã loại bỏ `previousPageFallback`** — Tùy chọn này không còn cần thiết. Chiến lược hợp nhất cộng dồn mới tự động giữ bản dịch của trang trước khả dụng trong các hiệu ứng chuyển trang, rồi dọn dẹp chúng qua hook `page:transition:finish`.
+- **`hmr`** — Được chuyển từ `experimental.hmr` thành một tùy chọn cấp cao nhất. Điều khiển HMR phía server cho các tệp bản dịch (bật mặc định trong môi trường phát triển).
+
+```typescript
+// Before (v2.x)
+export default defineNuxtConfig({
+  i18n: {
+    experimental: {
+      hmr: true,
+    },
+  },
+})
+
+// After (v3.0.0)
+export default defineNuxtConfig({
+  i18n: {
+    hmr: true,
+  },
+})
+```
+
+## Thay đổi phá vỡ tương thích {#breaking-changes}
+
+- **`fallbackRedirectComponentPath`** — Đã bị loại bỏ. Module không còn dùng component route fallback cho việc chuyển hướng. Nếu bạn đã cấu hình đường dẫn component tùy chỉnh, hãy xóa nó khỏi cấu hình.
+- **`useLocaleCookies`** — Đã bị loại bỏ. Hãy dùng `useI18nLocale()` thay thế. Composable mới cung cấp `locale`, `localeCookie`, `hashCookie`, `setLocale()`, `syncLocale()` và nhiều hơn nữa.
+- **`experimental.i18nPreviousPageFallback` / `previousPageFallback`** — Đã bị loại bỏ hoàn toàn. Chiến lược hợp nhất cộng dồn tự động xử lý hiện tượng nhấp nháy khi chuyển trang. Hãy xóa tùy chọn này khỏi cấu hình.
+- **`experimental.hmr`** — Đã chuyển thành `hmr`. Hãy cập nhật cấu hình nếu bạn đang dùng tùy chọn này.
+- **Plugin tùy chỉnh** — Nếu plugin phát hiện locale tùy chỉnh của bạn dùng `useRuntimeConfig().public.i18nConfig`, hãy chuyển sang `getI18nConfig()` từ `#build/i18n.strategy.mjs`. Nên dùng `useI18nLocale().setLocale()` thay vì `useState('i18n-locale')`. Xem [Phát hiện ngôn ngữ tùy chỉnh](/vi/guide/custom-auto-detect) để có các ví dụ cập nhật.
+- **Thay đổi tệp nội bộ** — `load-from-storage.ts` và `translation-loader.ts` đã bị loại bỏ và được thay bằng `storage.ts` và `server-loader.ts`. Nếu bạn đang import trực tiếp từ các tệp này (không khuyến khích), hãy cập nhật các import.
+
+## Vì sao điều này quan trọng {#why-it-matters}
+
+- **Hiệu năng**: Cache singleton tập trung loại bỏ việc tạo đối tượng cho mỗi yêu cầu và giảm áp lực GC.
+- **Khả năng bảo trì**: Logic route và đường dẫn nằm trong các gói riêng với ranh giới và kiểu rõ ràng.
+- **Kiểm thử**: Hành vi của strategy và các trường hợp biên được kiểm thử độc lập.
+- **Độ tin cậy**: Việc tách logic chuyển hướng giữa server (Nitro) và client tránh các vấn đề về thời điểm khi cookie/useState được đặt bởi plugin của người dùng.
+- **Sẵn sàng cho Serverless**: Plugin Nitro chạy trong cùng ngữ cảnh với các handler Nitro, tương thích với Edge/Workers.
+- **Tài liệu**: Hành vi định tuyến được ghi lại trong [hướng dẫn Strategy](/vi/guide/strategy) và trong các gói [path-strategy](https://github.com/s00d/nuxt-i18n-micro/tree/main/packages/path-strategy) và [route-strategy](https://github.com/s00d/nuxt-i18n-micro/tree/main/packages/route-strategy).
+
+Để xem ghi chú nâng cấp và danh sách đầy đủ các thay đổi, hãy xem [changelog](https://github.com/s00d/nuxt-i18n-micro/blob/main/CHANGELOG.md).
+
+---

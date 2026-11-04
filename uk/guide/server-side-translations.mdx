@@ -1,0 +1,120 @@
+---
+title: "Серверні маршрути та API"
+description: "Перекладайте рядки та читайте локаль запиту в серверних маршрутах Nitro та обробниках API."
+---
+
+Серверні обробники в `server/api/` і `server/routes/` можуть перекладати рядки та читати локаль запиту за допомогою двох автоімпортованих допоміжних функцій. Використовуйте їх для відповідей API, електронних листів, фідів або будь-чого, що рендериться поза сторінкою Vue. Вони читають ті самі файли перекладів, що й ваші сторінки, і визначають локаль із запиту.
+
+## Переклад в обробнику {#translate-in-a-handler}
+
+```ts
+// server/api/greeting.get.ts
+export default defineEventHandler(async (event) => {
+  const t = await useTranslationServerMiddleware(event)
+  return { message: t('greeting', { name: 'Ada' }) }
+})
+```
+
+```bash
+curl 'http://localhost:3000/api/greeting?locale=de'
+# {"message":"Hallo, Ada!"}
+```
+
+`useTranslationServerMiddleware(event, defaultLocale?, locale?)` є асинхронною і повертає `t(key, params?, defaultValue?)`. `t` повертає рядок, підставляє параметри `{name}`, а коли ключ відсутній — повертає непорожнє `defaultValue`, інакше сам ключ.
+
+`t` бачить лише чанк `index`: кореневі файли (`locales/<locale>.json`) плюс `locales/pages/index/`, якщо він існує (лише кореневі файли з `disablePageLocales`). Ключі інших сторінок не завантажуються. Для них завантажте чанк самостійно:
+
+```ts
+const { data } = await loadTranslationsFromServer('de', 'about') // Translations object of the about page
+```
+
+## Читання локалі запиту {#read-the-request-locale}
+
+```ts
+// server/api/locale.get.ts
+export default defineEventHandler((event) => {
+  const { current, isDefault, locale } = useLocaleServerMiddleware(event)
+  return { current, isDefault, dir: locale?.dir ?? 'ltr' }
+})
+```
+
+`useLocaleServerMiddleware(event, defaultLocale?, locale?)` є синхронною і повертає:
+
+```ts
+interface LocaleInfo {
+  current: string // detected locale code
+  default: string // defaultLocale, runtime overrides included (fixed at build under prefix_except_default / prefix_and_default)
+  fallback: string // fallbackLocale, else the default
+  available: string[] // enabled locale codes
+  locale: Locale | null // the config entry of `current`
+  isDefault: boolean
+  isFallback: boolean
+}
+```
+
+## Як вибирається локаль {#how-the-locale-is-chosen}
+
+Обидві допоміжні функції використовують однаковий порядок на кожному серверному маршруті, `/api` чи ні:
+
+1. query `?locale=` (перше значення, якщо повторюється);
+2. параметр маршруту `[locale]` або префікс локалі в шляху (`/de/...`);
+3. cookie локалі, коли задано [`localeCookie`](/uk/api/module-options#localecookie) (`hash-locale` у режимі `hashMode`);
+4. `Accept-Language`, коли ввімкнено `autoDetectLanguage` (з урахуванням q-значень);
+5. `defaultLocale`.
+
+Недійсні та вимкнені коди пропускаються на кожному кроці. Це порядок для API; рендеринг сторінки ігнорує `?locale=` за префіксних стратегій. Обидва порядки порівнюються на сторінці [Визначення локалі](/uk/guide/locale-detection).
+
+## Примусове задання локалі {#force-a-locale}
+
+Передайте третій аргумент, щоб пропустити визначення, наприклад у задачі, яка надсилає лист мовою користувача:
+
+```ts
+export default defineEventHandler(async (event) => {
+  const user = await getUser(event) // your code
+  const t = await useTranslationServerMiddleware(event, undefined, user.locale)
+  return sendMail(user.email, t('mail.welcome.subject'))
+})
+```
+
+Другий аргумент замінює `defaultLocale` для визначення в цьому виклику, тож він не має ефекту, коли локаль задано примусово. Словники кешуються для кожного запиту і кожної локалі, а також між запитами в серверному кеші перекладів, тож багаторазовий виклик допоміжної функції обходиться дешево.
+
+## Серверні компоненти {#server-components}
+
+Серверний компонент (`.server.vue`, `<NuxtIsland>`) рендериться з власного URL, `/__nuxt_island/...`, тож він не бачить URL сторінки, а Nuxt передає йому лише його props. Передавайте локаль як prop `locale`. Тоді компонент рендериться в цій локалі, а перемикання завантажує його знову, оскільки props є частиною URL і ключа кешу island. Це ім'я зарезервоване: будь-який код увімкненої локалі в prop з назвою `locale` задає локаль рендерингу, тож prop, який означає щось інше, наприклад формат чисел, назвіть інакше:
+
+```vue
+<!-- components/Greeting.server.vue -->
+<template><p>{{ $t('greeting') }}</p></template>
+<script setup lang="ts">
+defineProps<{ locale?: string }>()
+</script>
+```
+
+```vue
+<template>
+  <Greeting :locale="$getLocale()" />
+  <NuxtIsland name="Greeting" :props="{ locale: $getLocale() }" />
+</template>
+```
+
+Без цього prop компонент рендериться в локалі з cookie, інакше в локалі за замовчуванням, незалежно від URL, і не реагує на перемикання. Його `$t` бачить чанк `index`: кореневі файли плюс `locales/pages/index/`.
+
+## Пов'язане {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Визначення локалі" icon="book-open" href="/uk/guide/locale-detection">
+
+</Card>
+
+<Card title="Файли перекладів" icon="book-open" href="/uk/guide/translations">
+
+</Card>
+
+<Card title="Розгортання" icon="book-open" href="/uk/guide/deployment">
+
+Звідки сервер читає переклади
+
+</Card>
+
+</CardGroup>

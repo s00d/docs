@@ -1,0 +1,249 @@
+---
+title: "Astro"
+description: "Vertalingen aan de serverkant, routes met locale-prefix, detectie op de homepage en SEO-tags voor Astro met @i18n-micro/astro."
+---
+
+`@i18n-micro/astro` vertaalt Astro-pagina's op de server: een middleware kiest de locale uit de URL en plaatst een instantie per request in `Astro.locals`, en `useI18n(Astro)` leest die. Gebruik het in een Astro-site die URL's met locale-prefix (`/about`, `/fr/about`) en gedeelde JSON-woordenboeken nodig heeft. Je krijgt `.astro`-componenten, een redirect van de homepage naar de taal van de bezoeker, `hreflang`-tags en props voor [islands](/nl/integrations/astro-islands).
+
+## Installeren {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add @i18n-micro/astro
+```
+
+```bash npm
+npm install @i18n-micro/astro
+```
+
+```bash yarn
+yarn add @i18n-micro/astro
+```
+
+</CodeGroup>
+
+Peer dependencies: `astro` `^5.0.0 || ^6.0.0 || ^7.0.0`. Optioneel, alleen voor [islands](/nl/integrations/astro-islands): `vue` `^3.3.0`, `react` `^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0`, `preact` `^10.0.0 || ^11.0.0`, `svelte` `^4.0.0 || ^5.0.0`.
+
+## Instellen {#setup}
+
+Voeg de integratie toe. Die bundelt je woordenboeken in de server en installeert de middleware, dus een `src/middleware.ts` is niet nodig:
+
+```ts
+// astro.config.mjs
+import { defineConfig } from 'astro/config'
+import node from '@astrojs/node'
+import { i18nIntegration } from '@i18n-micro/astro'
+
+export default defineConfig({
+  output: 'server',
+  adapter: node({ mode: 'standalone' }),
+  integrations: [
+    i18nIntegration({
+      locale: 'en',
+      fallbackLocale: 'en',
+      locales: [
+        { code: 'en', iso: 'en-US', displayName: 'English' },
+        { code: 'de', iso: 'de-DE', displayName: 'Deutsch' },
+        { code: 'fr', iso: 'fr-FR', displayName: 'Français' },
+      ],
+      translationDir: 'src/locales',
+    }),
+  ],
+})
+```
+
+De woordenboeken worden bij het builden code: de server leest niets van schijf, dus hij draait ook op de edge (Cloudflare, Vercel Edge). In `astro dev` wordt een wijziging in een bestand bij het volgende request toegepast.
+
+### Integratie-opties {#integration-options}
+
+| Optie | Standaard | Opmerkingen |
+| --- | --- | --- |
+| `locale` | verplicht | Standaardlocale. |
+| `fallbackLocale` | `locale` | |
+| `locales` | `[]` | Volledige `Locale`-objecten. Een `disabled` locale is van geen enkele URL de locale en geen redirectdoel. `iso` is de tag waarop meervouden worden bepaald wanneer de code dat niet is (`ua` → `uk-UA`). |
+| `translationDir` | geen | Map die in de server wordt gebundeld, relatief ten opzichte van de projectroot. |
+| `disablePageLocales` | `false` | Paginabestanden tellen als rootvertalingen. |
+| `autoDetect` | `true` | Redirect op de homepage, zie [Localedetectie](#locale-detection). |
+| `redirectToDefault` | `false` | `/` stuurt ook door wanneer niets de voorkeur geeft aan een andere locale. |
+| `localeCookie` | `'i18n-locale'` | `null` schakelt de cookie uit. |
+| `missingWarn` | `false` | |
+| `middleware` | `true` | `false`: schrijf de middleware zelf, zie hieronder. |
+
+De runtime-instellingen worden gepubliceerd in `virtual:i18n-micro/config` (`config.base` is de `base` van Astro, `config.localeCodes` de ingeschakelde codes), de woordenboeken in `virtual:i18n-micro/messages`.
+
+### Je eigen middleware {#your-own-middleware}
+
+Een meervoudsregel, een handler voor ontbrekende sleutels en een router-adapter kunnen niet van het configuratieproces naar de serverbundel. Geef daarvoor `middleware: false` mee en schrijf `src/middleware.ts`. De `i18n`-config van Astro wordt dan voor je ingesteld met `routing: 'manual'`, zodat `Astro.currentLocale` en `astro:i18n` werken. Astro staat die instelling niet toe zonder een `src/middleware.ts`, dus met de eigen middleware van de integratie werken ze niet.
+
+```ts
+// src/middleware.ts
+import { config } from 'virtual:i18n-micro/config'
+import { messages } from 'virtual:i18n-micro/messages'
+import { createAstroRouterAdapter, createI18n, createI18nMiddleware, localeIsoMap } from '@i18n-micro/astro'
+
+const i18n = createI18n({
+  locale: config.defaultLocale,
+  fallbackLocale: config.fallbackLocale,
+  localeIso: localeIsoMap(config.locales),
+  messages: messages.root,
+  routeMessages: messages.routes,
+  plural: myPluralRule,
+})
+
+export const onRequest = createI18nMiddleware({
+  i18n,
+  defaultLocale: config.defaultLocale,
+  locales: config.localeCodes,
+  localeObjects: config.locales,
+  autoDetect: config.autoDetect,
+  redirectToDefault: config.redirectToDefault,
+  localeCookie: config.localeCookie,
+  base: config.base,
+  routingStrategy: createAstroRouterAdapter(config.locales, config.defaultLocale),
+})
+```
+
+Om de map in plaats daarvan tijdens runtime te lezen, staan `loadTranslationsFromDir` en `loadTranslationsIntoI18n` in `@i18n-micro/astro/node` (alleen Node).
+
+### Middleware-opties {#middleware-options}
+
+| Optie | Standaard | Opmerkingen |
+| --- | --- | --- |
+| `i18n` | verplicht | Globale instantie; elk request krijgt `i18n.fork(locale)`, wat evenveel kost ongeacht het aantal woordenboeken. |
+| `defaultLocale` | verplicht | |
+| `locales` | verplicht | Localecodes. |
+| `localeObjects` | `locales` als `{ code }` | Volledige `Locale`-objecten voor componenten en SEO. |
+| `autoDetect` | `true` | Redirect op de homepage, zie [Localedetectie](#locale-detection). |
+| `redirectToDefault` | `false` | `/` stuurt ook door wanneer niets de voorkeur geeft aan een andere locale, naar de homepage van de standaardlocale zoals de routeringsstrategie die oplost. |
+| `localeCookie` | `'i18n-locale'` | `null` schakelt de cookie uit. |
+| `routingStrategy` | prefix behalve standaard | Router-adapter. Methoden die hij weglaat, komen van de standaardadapter. |
+| `base` | geen | De `base` van Astro: `config.base`. |
+
+Paginabestanden (`src/locales/pages/blog/post/de.json`) zijn de route `blog-post`: het paginapad samengevoegd met `-`.
+
+## Vertalen {#translate}
+
+```astro
+---
+// src/pages/index.astro
+import { useI18n } from '@i18n-micro/astro'
+import I18nT from '@i18n-micro/astro/i18n-t'
+
+const { t, tc, locale } = useI18n(Astro)
+---
+
+<h1>{t('greeting', { name: 'Ada' })}</h1>
+<p>{tc('apples', 3)}</p>
+<I18nT keypath="welcome" tag="p" />
+<p>{locale}</p>
+```
+
+`useI18n(Astro)` geeft `locale`, `defaultLocale`, `locales`, `t`, `ts`, `tc`, `tn`, `td`, `tdr`, `has`, `getRoute`, `getRouteName(path?)`, `getLocaleFromPath(path?)`, `switchLocalePath(locale)`, `localizePath(path, locale?)`, `getBasePath(url?)`, `getI18n`, `addTranslations`, `addRouteTranslations`, `mergeTranslations` en `clearCache` terug. Het gooit een fout wanneer de middleware niet heeft gedraaid. De helpers `getI18n`, `getLocale`, `getDefaultLocale` en `getLocales` lezen dezelfde `Astro.locals`.
+
+De routenaam komt van de route zonder locale: `/fr/blog/post` → `blog-post`, en elke URL van `src/pages/blog/[slug].astro` → `blog-slug`, zodat één map `locales/pages/blog-slug/` ze allemaal bedient. `[...path]` is `path`. Onder de `base` van Astro nemen en geven de helpers URL's van de site: `switchLocalePath` en `localizePath` bevatten hem, `getBasePath` niet, omdat `Astro.rewrite` het pad zonder hem verwacht.
+
+### Componenten {#components}
+
+Importeer ze uit `@i18n-micro/astro/<name>` (of `@i18n-micro/astro/components/<name>.astro`):
+
+| Component | Props |
+| --- | --- |
+| `i18n-t` | `keypath`, `params`, `plural`, `number`, `date`, `relativeDate`, `tag` (`span`, elke tag), `html`, `hideIfEmpty`, `defaultValue`; andere attributen worden doorgegeven. Met `html` wordt het resultaat van elke tak als HTML gerenderd en worden `params` ge-escaped. Er zijn geen slots |
+| `i18n-link` | `href`, `locale` (doellocale, standaard de huidige), `class`; andere attributen worden doorgegeven. Externe URL's, `#hash` en `?query` blijven zoals geschreven; een route behoudt zijn query, hash en afsluitende slash |
+| `i18n-switcher` | `class`, `activeClass` (`'active'`), `customLabels`; rendert links naar de huidige pagina in elke ingeschakelde locale, met de query |
+| `i18n-group` | geen die de uitvoer veranderen: een `<div>` rond zijn slot, geen prefix |
+
+## Routes met locale-prefix {#locale-prefixed-routes}
+
+Houd één pagina per route in `src/pages/` en voeg dunne rewrite-stubs toe onder `src/pages/[locale]/`:
+
+```
+src/pages/
+  index.astro
+  about.astro
+  [locale]/
+    index.astro
+    about.astro
+```
+
+```astro
+---
+// src/pages/[locale]/about.astro
+import { prepareLocaleRewrite } from '@i18n-micro/astro'
+
+const target = prepareLocaleRewrite(Astro)
+if (target instanceof Response) return target
+return Astro.rewrite(target)
+---
+```
+
+`prepareLocaleRewrite` geeft een `404`-respons terug voor een onbekende `:locale`, en stelt anders de locale in op `Astro.locals` en geeft het pad zonder prefix terug. De middleware behoudt een locale die al in `locals` staat, zodat de herschreven pagina daarin wordt gerenderd. `getLocaleRewritePath(Astro)` geeft alleen het pad terug, voor wanneer je de locale zelf valideert.
+
+## Localedetectie {#locale-detection}
+
+De URL bepaalt de locale van de pagina:
+
+1. Een locale-prefix (`/fr/about` → `fr`; `/en/about` is ook `en`).
+2. Anders wat `getLocaleFromPath` van de router-adapter teruggeeft, als dat niet de standaard is.
+3. Anders de standaardlocale. `/about` is altijd de pagina van de standaardlocale, wat de cookie ook zegt.
+
+`autoDetect` is alleen een redirecthint op de homepage:
+
+- Een request voor `/` waarvan de cookie of `Accept-Language` de voorkeur geeft aan een andere locale, krijgt een `302` naar de homepage van die locale (`/de`). q-gewichten worden gerespecteerd; `de-DE` komt overeen met een `de`-locale, en `de` met een `de-DE`-locale.
+- Met `redirectToDefault` stuurt `/` altijd door: naar de homepage van de voorkeurslocale, anders die van de standaardlocale.
+- De `/`-respons bevat `Vary: Cookie, Accept-Language` (alleen `Accept-Language` wanneer `localeCookie` `null` is).
+- Geprerenderde pagina's sturen nooit door.
+
+`detectLocale(pathname, cookies, headers, defaultLocale, locales, localeCookie?, routingStrategy?, autoDetect?)` geeft dezelfde voorkeurslocale terug voor je eigen logica.
+
+De cookie onthoudt een keuze. Een paginaweergave die komt van een same-origin-pagina in een andere locale is een bezoeker die wisselt, welke link hem daar ook bracht: de HTML-respons zet de cookie op de nieuwe locale, en `/` stuurt niet door, zodat een wisselaar de homepage van de standaardlocale bereikt. Een endpoint, een afbeelding, een 404, een formulier-post en een prefetch veranderen niets. "Same origin" is wat de browser zegt in `Sec-Fetch-Site`; zonder die header wordt de host van de `Referer` vergeleken met die van het request, dus stel achter een proxy de `security.allowedDomains` van Astro in.
+
+Een [server island](https://docs.astro.build/en/guides/server-islands/) of een action heeft geen locale in de URL. Die wordt gerenderd voor de pagina die erom vroeg, gelezen uit de `Referer`, waarvan alleen het pad telt, zodat een proxy vóór de server niets verandert, en stuurt nooit door. De respons bevat `Vary: Referer`. Zonder `Referer` (een `no-referrer`-beleid) is hij in de standaardlocale, en op een dynamische pagina komt zijn route uit de URL, zodat paginawoordenboeken hem niet bereiken.
+
+## Router-adapter {#router-adapter}
+
+`createAstroRouterAdapter(locales, defaultLocale)` geeft elke locale behalve de standaard een prefix. Een Astro-adapter heeft alleen `getCurrentPath` nodig; de andere leden zijn optioneel en vallen terug op de standaardadapter: `getRouteName(path, locales, routePattern?)`, `getLocaleFromPath`, `switchLocalePath`, `localizePath`, `removeLocaleFromPath`, `resolvePath` (redirectdoel voor de homepage), `push`, `replace`, `getRoute`. Schrijf je eigen adapter voor subdomein- of suffix-URL's en geef die door aan `createI18nMiddleware`.
+
+## SEO {#seo}
+
+```astro
+---
+// src/layouts/Layout.astro
+import { useLocaleHead } from '@i18n-micro/astro'
+
+const head = useLocaleHead(Astro, { baseUrl: 'https://example.com' })
+---
+
+<html lang={head.htmlAttrs.lang} dir={head.htmlAttrs.dir}>
+  <head>
+    {head.link.map((l) => <link rel={l.rel} href={l.href} hreflang={l.hreflang} />)}
+    {head.meta.map((m) => <meta property={m.property} content={m.content} />)}
+  </head>
+  <body><slot /></body>
+</html>
+```
+
+Het geeft `htmlAttrs` (`lang` uit `iso`, `dir`) terug, een canonical-link (pad zonder query), `hreflang`-alternates voor elke ingeschakelde locale met `seo !== false` plus `x-default`, `og:locale`, `og:locale:alternate` en `og:url`. Opties: `baseUrl` (`site` uit de Astro-config, anders root-relatieve URL's), `addDirAttribute` (`true`), `addSeoAttributes` (`true`), `hreflangBaseLanguage` (`false`).
+
+## Gerelateerd {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Astro-islands" icon="book-open" href="/nl/integrations/astro-islands">
+
+Vertalingen binnen Vue-, React-, Preact- en Svelte-islands
+
+</Card>
+
+<Card title="Frameworks" icon="book-open" href="/nl/integrations/overview">
+
+Instantie-opties en formattering
+
+</Card>
+
+<Card title="Pakketreferentie" icon="brackets-curly" href="/nl/api/packages/astro">
+
+</Card>
+
+</CardGroup>

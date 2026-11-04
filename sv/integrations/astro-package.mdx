@@ -1,0 +1,249 @@
+---
+title: "Astro"
+description: "Översättningar på serversidan, routes med locale-prefix, identifiering på startsidan och SEO-taggar för Astro med @i18n-micro/astro."
+---
+
+`@i18n-micro/astro` översätter Astro-sidor på servern: en middleware väljer locale utifrån URL:en och lägger en instans per request i `Astro.locals`, och `useI18n(Astro)` läser den. Använd det i en Astro-webbplats som behöver URL:er med locale-prefix (`/about`, `/fr/about`) och delade JSON-ordböcker. Du får `.astro`-komponenter, en omdirigering från startsidan till besökarens språk, `hreflang`-taggar och props för [öar](/sv/integrations/astro-islands).
+
+## Installera {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add @i18n-micro/astro
+```
+
+```bash npm
+npm install @i18n-micro/astro
+```
+
+```bash yarn
+yarn add @i18n-micro/astro
+```
+
+</CodeGroup>
+
+Peer-beroenden: `astro` `^5.0.0 || ^6.0.0 || ^7.0.0`. Valfria, bara för [öar](/sv/integrations/astro-islands): `vue` `^3.3.0`, `react` `^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0`, `preact` `^10.0.0 || ^11.0.0`, `svelte` `^4.0.0 || ^5.0.0`.
+
+## Konfiguration {#setup}
+
+Lägg till integrationen. Den paketerar dina ordböcker i servern och installerar middlewaren, så ingen `src/middleware.ts` behövs:
+
+```ts
+// astro.config.mjs
+import { defineConfig } from 'astro/config'
+import node from '@astrojs/node'
+import { i18nIntegration } from '@i18n-micro/astro'
+
+export default defineConfig({
+  output: 'server',
+  adapter: node({ mode: 'standalone' }),
+  integrations: [
+    i18nIntegration({
+      locale: 'en',
+      fallbackLocale: 'en',
+      locales: [
+        { code: 'en', iso: 'en-US', displayName: 'English' },
+        { code: 'de', iso: 'de-DE', displayName: 'Deutsch' },
+        { code: 'fr', iso: 'fr-FR', displayName: 'Français' },
+      ],
+      translationDir: 'src/locales',
+    }),
+  ],
+})
+```
+
+Ordböckerna blir kod vid byggtiden: servern läser inget från disk, så den körs även på edge (Cloudflare, Vercel Edge). I `astro dev` tillämpas en ändring i en fil vid nästa request.
+
+### Integrationsalternativ {#integration-options}
+
+| Alternativ | Standard | Anmärkningar |
+| --- | --- | --- |
+| `locale` | obligatoriskt | Standard-locale. |
+| `fallbackLocale` | `locale` | |
+| `locales` | `[]` | Fullständiga `Locale`-objekt. En `disabled` locale är ingen URL:s locale och inget omdirigeringsmål. `iso` är taggen som pluralformerna följer när koden inte är en sådan (`ua` → `uk-UA`). |
+| `translationDir` | ingen | Mapp som paketeras i servern, relativt till projektets rot. |
+| `disablePageLocales` | `false` | Sidfiler räknas som rotöversättningar. |
+| `autoDetect` | `true` | Omdirigering från startsidan, se [Identifiering av locale](#locale-detection). |
+| `redirectToDefault` | `false` | `/` omdirigerar även när inget föredrar en annan locale. |
+| `localeCookie` | `'i18n-locale'` | `null` inaktiverar cookien. |
+| `missingWarn` | `false` | |
+| `middleware` | `true` | `false`: skriv middlewaren själv, se nedan. |
+
+Körtidsinställningarna publiceras i `virtual:i18n-micro/config` (`config.base` är Astros `base`, `config.localeCodes` de aktiverade koderna), ordböckerna i `virtual:i18n-micro/messages`.
+
+### Din egen middleware {#your-own-middleware}
+
+En pluralregel, en hanterare för saknade nycklar och en router-adapter kan inte föras över från konfigurationsprocessen till serverbundlen. För dessa skickar du `middleware: false` och skriver `src/middleware.ts`. Astros `i18n`-konfiguration sätts då åt dig med `routing: 'manual'`, så att `Astro.currentLocale` och `astro:i18n` fungerar. Astro tillåter inte den inställningen utan en `src/middleware.ts`, så med integrationens egen middleware fungerar de inte.
+
+```ts
+// src/middleware.ts
+import { config } from 'virtual:i18n-micro/config'
+import { messages } from 'virtual:i18n-micro/messages'
+import { createAstroRouterAdapter, createI18n, createI18nMiddleware, localeIsoMap } from '@i18n-micro/astro'
+
+const i18n = createI18n({
+  locale: config.defaultLocale,
+  fallbackLocale: config.fallbackLocale,
+  localeIso: localeIsoMap(config.locales),
+  messages: messages.root,
+  routeMessages: messages.routes,
+  plural: myPluralRule,
+})
+
+export const onRequest = createI18nMiddleware({
+  i18n,
+  defaultLocale: config.defaultLocale,
+  locales: config.localeCodes,
+  localeObjects: config.locales,
+  autoDetect: config.autoDetect,
+  redirectToDefault: config.redirectToDefault,
+  localeCookie: config.localeCookie,
+  base: config.base,
+  routingStrategy: createAstroRouterAdapter(config.locales, config.defaultLocale),
+})
+```
+
+För att i stället läsa mappen vid körning finns `loadTranslationsFromDir` och `loadTranslationsIntoI18n` i `@i18n-micro/astro/node` (endast Node).
+
+### Middleware-alternativ {#middleware-options}
+
+| Alternativ | Standard | Anmärkningar |
+| --- | --- | --- |
+| `i18n` | obligatoriskt | Global instans; varje request får `i18n.fork(locale)`, vilket kostar lika mycket oavsett hur många ordböcker det finns. |
+| `defaultLocale` | obligatoriskt | |
+| `locales` | obligatoriskt | Locale-koder. |
+| `localeObjects` | `locales` som `{ code }` | Fullständiga `Locale`-objekt för komponenter och SEO. |
+| `autoDetect` | `true` | Omdirigering från startsidan, se [Identifiering av locale](#locale-detection). |
+| `redirectToDefault` | `false` | `/` omdirigerar även när inget föredrar en annan locale, till standard-locales startsida så som routingstrategin löser upp den. |
+| `localeCookie` | `'i18n-locale'` | `null` inaktiverar cookien. |
+| `routingStrategy` | prefix utom standard | Router-adapter. Metoder som den utelämnar kommer från standardadaptern. |
+| `base` | ingen | Astros `base`: `config.base`. |
+
+Sidfiler (`src/locales/pages/blog/post/de.json`) är routen `blog-post`: sidans sökväg sammanfogad med `-`.
+
+## Översätt {#translate}
+
+```astro
+---
+// src/pages/index.astro
+import { useI18n } from '@i18n-micro/astro'
+import I18nT from '@i18n-micro/astro/i18n-t'
+
+const { t, tc, locale } = useI18n(Astro)
+---
+
+<h1>{t('greeting', { name: 'Ada' })}</h1>
+<p>{tc('apples', 3)}</p>
+<I18nT keypath="welcome" tag="p" />
+<p>{locale}</p>
+```
+
+`useI18n(Astro)` returnerar `locale`, `defaultLocale`, `locales`, `t`, `ts`, `tc`, `tn`, `td`, `tdr`, `has`, `getRoute`, `getRouteName(path?)`, `getLocaleFromPath(path?)`, `switchLocalePath(locale)`, `localizePath(path, locale?)`, `getBasePath(url?)`, `getI18n`, `addTranslations`, `addRouteTranslations`, `mergeTranslations` och `clearCache`. Den kastar ett fel när middlewaren inte har körts. Hjälpfunktionerna `getI18n`, `getLocale`, `getDefaultLocale` och `getLocales` läser samma `Astro.locals`.
+
+Route-namnet kommer från routen utan dess locale: `/fr/blog/post` → `blog-post`, och varje URL för `src/pages/blog/[slug].astro` → `blog-slug`, så en enda mapp `locales/pages/blog-slug/` betjänar dem alla. `[...path]` är `path`. Under Astros `base` tar och returnerar hjälpfunktionerna webbplatsens URL:er: `switchLocalePath` och `localizePath` inkluderar den, `getBasePath` gör det inte, eftersom `Astro.rewrite` tar sökvägen utan den.
+
+### Komponenter {#components}
+
+Importera dem från `@i18n-micro/astro/<name>` (eller `@i18n-micro/astro/components/<name>.astro`):
+
+| Komponent | Props |
+| --- | --- |
+| `i18n-t` | `keypath`, `params`, `plural`, `number`, `date`, `relativeDate`, `tag` (`span`, valfri tagg), `html`, `hideIfEmpty`, `defaultValue`; övriga attribut skickas vidare. Med `html` renderas resultatet av varje gren som HTML och `params` escapas. Det finns inga slots |
+| `i18n-link` | `href`, `locale` (mål-locale, standard är aktuell), `class`; övriga attribut skickas vidare. Externa URL:er, `#hash` och `?query` lämnas som de skrivits; en route behåller sin query, hash och avslutande snedstreck |
+| `i18n-switcher` | `class`, `activeClass` (`'active'`), `customLabels`; renderar länkar till den aktuella sidan i varje aktiverad locale, med dess query |
+| `i18n-group` | inga som ändrar utdata: en `<div>` runt sin slot, inget prefix |
+
+## Routes med locale-prefix {#locale-prefixed-routes}
+
+Behåll en sida per route i `src/pages/` och lägg till tunna rewrite-stubbar under `src/pages/[locale]/`:
+
+```
+src/pages/
+  index.astro
+  about.astro
+  [locale]/
+    index.astro
+    about.astro
+```
+
+```astro
+---
+// src/pages/[locale]/about.astro
+import { prepareLocaleRewrite } from '@i18n-micro/astro'
+
+const target = prepareLocaleRewrite(Astro)
+if (target instanceof Response) return target
+return Astro.rewrite(target)
+---
+```
+
+`prepareLocaleRewrite` returnerar ett `404`-svar för en okänd `:locale`, sätter annars locale på `Astro.locals` och returnerar sökvägen utan prefixet. Middlewaren behåller en locale som redan finns i `locals`, så den omskrivna sidan renderas i den. `getLocaleRewritePath(Astro)` returnerar bara sökvägen, för när du validerar locale själv.
+
+## Identifiering av locale {#locale-detection}
+
+URL:en avgör sidans locale:
+
+1. Ett locale-prefix (`/fr/about` → `fr`; `/en/about` är också `en`).
+2. Annars det som router-adapterns `getLocaleFromPath` returnerar, om det inte är standard.
+3. Annars standard-locale. `/about` är alltid standard-locales sida, oavsett vad cookien säger.
+
+`autoDetect` är en omdirigeringsledtråd enbart på startsidan:
+
+- En request till `/` vars cookie eller `Accept-Language` föredrar en annan locale får en `302` till den locales startsida (`/de`). q-vikter respekteras; `de-DE` matchar en `de`-locale, och `de` matchar en `de-DE`-locale.
+- Med `redirectToDefault` omdirigerar `/` alltid: till den föredragna locales startsida, annars till standard-locales.
+- Svaret för `/` har `Vary: Cookie, Accept-Language` (endast `Accept-Language` när `localeCookie` är `null`).
+- Förrenderade sidor omdirigerar aldrig.
+
+`detectLocale(pathname, cookies, headers, defaultLocale, locales, localeCookie?, routingStrategy?, autoDetect?)` returnerar samma föredragna locale för din egen logik.
+
+Cookien kommer ihåg ett val. En sidvisning som kommer från en sida med samma ursprung i en annan locale är en besökare som byter, oavsett vilken länk som ledde dit: HTML-svaret sätter cookien till den nya locale, och `/` omdirigerar inte, så en väljare når standard-locales startsida. En endpoint, en bild, en 404, ett formulärinlägg och en prefetch ändrar ingenting. "Samma ursprung" är vad webbläsaren anger i `Sec-Fetch-Site`; utan den headern jämförs värden i `Referer` med requestens, så bakom en proxy ska du sätta Astros `security.allowedDomains`.
+
+En [server island](https://docs.astro.build/en/guides/server-islands/) eller en action har ingen locale i sin URL. Den renderas för den sida som bad om den, läst från `Referer`, där bara sökvägen räknas, så en proxy framför servern ändrar ingenting, och den omdirigerar aldrig. Dess svar har `Vary: Referer`. Utan `Referer` (en `no-referrer`-policy) är den i standard-locale, och på en dynamisk sida kommer dess route från URL:en, så sidordböcker når den inte.
+
+## Router-adapter {#router-adapter}
+
+`createAstroRouterAdapter(locales, defaultLocale)` lägger prefix på varje locale utom standard. En Astro-adapter behöver bara `getCurrentPath`; de övriga medlemmarna är valfria och faller tillbaka på standardadaptern: `getRouteName(path, locales, routePattern?)`, `getLocaleFromPath`, `switchLocalePath`, `localizePath`, `removeLocaleFromPath`, `resolvePath` (mål för omdirigering från startsidan), `push`, `replace`, `getRoute`. Skriv en egen för URL:er med subdomän eller suffix och skicka den till `createI18nMiddleware`.
+
+## SEO {#seo}
+
+```astro
+---
+// src/layouts/Layout.astro
+import { useLocaleHead } from '@i18n-micro/astro'
+
+const head = useLocaleHead(Astro, { baseUrl: 'https://example.com' })
+---
+
+<html lang={head.htmlAttrs.lang} dir={head.htmlAttrs.dir}>
+  <head>
+    {head.link.map((l) => <link rel={l.rel} href={l.href} hreflang={l.hreflang} />)}
+    {head.meta.map((m) => <meta property={m.property} content={m.content} />)}
+  </head>
+  <body><slot /></body>
+</html>
+```
+
+Den returnerar `htmlAttrs` (`lang` från `iso`, `dir`), en canonical-länk (sökväg utan query), `hreflang`-alternativ för varje aktiverad locale med `seo !== false` plus `x-default`, `og:locale`, `og:locale:alternate` och `og:url`. Alternativ: `baseUrl` (`site` från Astro-konfigurationen, annars rotrelativa URL:er), `addDirAttribute` (`true`), `addSeoAttributes` (`true`), `hreflangBaseLanguage` (`false`).
+
+## Relaterat {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Astro-öar" icon="book-open" href="/sv/integrations/astro-islands">
+
+Översättningar i Vue-, React-, Preact- och Svelte-öar
+
+</Card>
+
+<Card title="Ramverk" icon="book-open" href="/sv/integrations/overview">
+
+Instansalternativ och formatering
+
+</Card>
+
+<Card title="Paketreferens" icon="brackets-curly" href="/sv/api/packages/astro">
+
+</Card>
+
+</CardGroup>

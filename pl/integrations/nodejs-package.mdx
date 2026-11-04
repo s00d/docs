@@ -1,0 +1,131 @@
+---
+title: "Node.js"
+description: "Wczytuj pliki tłumaczeń z dysku i tłumacz w serwerach, skryptach i CLI Node.js za pomocą @i18n-micro/node."
+---
+
+`@i18n-micro/node` to instancja [runtime](/pl/integrations/runtime-package) wraz z loaderem, który odczytuje folder tłumaczeń z dysku. Używaj go w serwerze Express lub Fastify, w CLI, w generatorze e-maili lub PDF albo w dowolnym skrypcie, który potrzebuje tych samych plików JSON co Twoja aplikacja Nuxt. Wczytujesz pliki raz i tłumaczysz dla każdego żądania, bez współdzielenia zmiennego stanu między żądaniami.
+
+## Instalacja {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add @i18n-micro/node @i18n-micro/utils
+```
+
+```bash npm
+npm install @i18n-micro/node @i18n-micro/utils
+```
+
+```bash yarn
+yarn add @i18n-micro/node @i18n-micro/utils
+```
+
+</CodeGroup>
+
+Brak zależności peer; Node.js `>=20`. `@i18n-micro/utils` jest potrzebny tylko dla poniższej funkcji pomocniczej `Accept-Language`.
+
+## Konfiguracja {#setup}
+
+Loader odczytuje [układ folderów Nuxt](/pl/guide/translations): `locales/en.json` to słownik główny, a `locales/pages/blog/post/en.json` należy do trasy `blog-post`.
+
+```ts
+import { createI18n } from '@i18n-micro/node'
+
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', translationDir: './locales' })
+await i18n.loadTranslations()
+
+i18n.t('greeting', { name: 'Ada' }) // 'Hello, Ada!'
+i18n.t('title', undefined, undefined, 'blog-post') // from locales/pages/blog/post/en.json
+```
+
+Opcje są takie same jak w runtime (zobacz [instancja](/pl/integrations/overview#the-instance)), plus `translationDir` i `disablePageLocales` (traktowanie plików `pages/**` jako słowników głównych). `i18n.reload()` czyści wszystkie słowniki i ponownie odczytuje folder, na potrzeby obserwatora plików w trybie deweloperskim.
+
+`loadTranslations(dir, disablePageLocales?)` jest też eksportowane samodzielnie i zwraca `{ root, routes }`:
+
+```ts
+import { loadTranslations } from '@i18n-micro/node'
+
+const { root, routes } = await loadTranslations('./locales')
+// root:   { en: {...}, de: {...} }
+// routes: { 'blog-post': { en: {...}, de: {...} } }
+```
+
+## Na żądanie {#per-request}
+
+Instancja przechowuje jedną lokalizację i jedną trasę. Przełączanie `i18n.locale` we współdzielonej instancji wewnątrz obsługi żądania powoduje wyścig z równoczesnymi żądaniami. `run` daje żądaniu jego własną:
+
+```ts
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', translationDir: './locales' })
+await i18n.loadTranslations()
+
+// `() => next()`: `run` hands its callback the fork, and Express reads an argument of `next` as an error
+app.use((req, res, next) => i18n.run(pickLocale(req), () => next()))
+
+app.get('/', (req, res) => {
+  res.send(i18n.t('greeting')) // the request's locale, in everything it awaits
+})
+```
+
+Wewnątrz `run` współdzielona instancja odczytuje i ustawia lokalizację oraz trasę żądania (`AsyncLocalStorage`); fork startuje na bieżącej trasie, a `i18n.setRoute(...)` wewnątrz callbacku zmienia trasę tego żądania. Callback otrzymuje też fork żądania: słowniki zapisane do niego pozostają w żądaniu, a słowniki zapisane do współdzielonej instancji docierają do wszystkich.
+
+Bez `AsyncLocalStorage` `i18n.fork(locale)` zwraca ten sam rodzaj instancji, który można przekazywać dalej.
+
+`reload()` ponownie odczytuje katalog; stare słowniki odpowiadają, dopóki nie zostaną wczytane nowe.
+
+## Wybór lokalizacji {#pick-the-locale}
+
+`detectLocaleFromAcceptLanguage(header, locales)` uwzględnia wagi `q` i dopasowuje `de-DE` do lokalizacji `de` (oraz `de` do `de-DE`). Zwraca `null`, gdy nic nie pasuje.
+
+```ts
+import express from 'express'
+import { detectLocaleFromAcceptLanguage } from '@i18n-micro/utils/accept-language'
+
+const app = express()
+
+app.get('/hello', (req, res) => {
+  const locale = detectLocaleFromAcceptLanguage(req.headers['accept-language'], locales) ?? 'en'
+  const i18n = byLocale.get(locale)!
+  res.json({ message: i18n.t('greeting', { name: 'Ada' }) })
+})
+```
+
+Dla prefiksu URL, cookie i nagłówka jednocześnie `resolveLocale({ defaultLocale, validLocales, url, cookie, acceptLanguage, autoDetectLanguage: true })` z `@i18n-micro/utils/resolve-locale` stosuje kolejność pierwszeństwa modułu: URL, potem cookie, potem `Accept-Language`, a na końcu wartość domyślna. Nieprawidłowe wartości są pomijane.
+
+Wewnątrz aplikacji Nuxt nie potrzebujesz tego pakietu na serwerze: użyj [tłumaczeń po stronie serwera](/pl/guide/server-side-translations) modułu.
+
+## API {#api}
+
+| Eksport | Uwagi |
+| --- | --- |
+| `createI18n(options)`, `I18n` | instancja runtime + `translationDir`, `loadTranslations(dir?)`, `reload()` |
+| `loadTranslations(dir, disablePageLocales?)` | `{ root, routes }` |
+| `loadRootTranslations(dir, disablePageLocales?)` | tylko `root` |
+| `FormatService`, `interpolate` | z core |
+| Typy: `I18nOptions`, `LoadedTranslations`, `Translations`, `Locale`, `PluralFunc`, `Params` | |
+
+Metody instancji są wymienione na stronie [Runtime](/pl/integrations/runtime-package#api). Pełne sygnatury: [dokumentacja pakietu](/pl/api/packages/node).
+
+## Powiązane {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Runtime" icon="book-open" href="/pl/integrations/runtime-package">
+
+Instancja bez `fs`
+
+</Card>
+
+<Card title="Tłumaczenia" icon="book-open" href="/pl/guide/translations">
+
+Układ folderów
+
+</Card>
+
+<Card title="Wykrywanie lokalizacji" icon="book-open" href="/pl/guide/locale-detection">
+
+Kolejność pierwszeństwa w module Nuxt
+
+</Card>
+
+</CardGroup>

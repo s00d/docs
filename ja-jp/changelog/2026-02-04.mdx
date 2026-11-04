@@ -1,0 +1,115 @@
+---
+title: "v3.0.0 — パフォーマンス最適化、Route & Path Strategy パッケージ"
+description: "リリースノート: v3.0.0 — パフォーマンス最適化、Route & Path Strategy パッケージ"
+---
+
+**日付**: 2026-02-04
+
+**バージョン**: `v3.0.0`
+
+![v3.0.0 リリース](/images/3.0.0.png)
+
+**v3.0.0** をリリースしました。今回は**アーキテクチャの大幅な刷新**です。最大限のパフォーマンスを得るために翻訳ストレージシステムを全面的に書き直し、ルート生成とランタイムのパスロジックを専用パッケージに分離し、信頼性と Serverless 互換性を高めるためにリダイレクトフローを再設計しました。
+
+## 新機能 {#what’s-new}
+
+### パフォーマンス最適化 — 新しい翻訳ストレージアーキテクチャ {#performance-optimization-—-new-translation-storage-architecture}
+
+最大限のパフォーマンスを得るために、翻訳の読み込みとキャッシュのシステムを全面的に書き直しました。
+
+- **一元化された TranslationStorage クラス** — 新しい `TranslationStorage` クラス(`src/runtime/utils/storage.ts`)は、クライアントとサーバーの両方に統一されたストレージを提供します。`globalThis` と `Symbol.for` を使って Node.js プロセス全体で真のシングルトンを保証し、バンドルされたモジュール間でキャッシュが重複するのを防ぎます。
+
+- **最適化された `$t()` 関数(tFast)** — 翻訳関数は、単一のアクティブな辞書に対して直接ルックアップを行います。
+  1. すべての翻訳(ルート + ページ固有 + フォールバック)は、ビルド時にページごとの単一ファイルへ事前にマージされます
+  2. 同じロケール内でのナビゲーションでは、新しいページの翻訳がアクティブな辞書に累積的にマージされます(トランジションアニメーション中のキーのちらつきを防ぎます)
+  3. 最適化されたパス解決により、ネストされたキー(`key.subkey.subsubkey`)をサポートします
+  4. 呼び出しごとの Map ルックアップやロケール/ルートの計算はなく、事前計算されたコンテキストを使用します
+
+- **`window.__I18N__` によるサーバーサイドインジェクション** — SSR 中に読み込まれた翻訳は、script タグとして HTML に注入されます。クライアントは初回読み込み時に `window.__I18N__` から直接読み取るため、重複したフェッチを回避できます。
+
+- **プラグイン内のローカルチャンクキャッシュ** — プラグインは、読み込まれたすべての翻訳チャンクを保存するローカルの `loadedChunks` Map を保持します。一度読み込まれた翻訳は、ページのライフサイクル中に再フェッチされることはありません。
+
+- **ビルド時の事前マージ** — `module.ts` の `preMergeLocales` ステップが、すべてのレイヤー、フォールバックロケールのチェーン、ルートレベルの翻訳を、ビルド時にすべてのページファイルへマージします。server-loader は事前にビルドされた単一のファイルを読み込むだけで、ランタイムでのマージは不要です。
+
+**パフォーマンスの改善:**
+
+- リクエストあたりのメモリ割り当てを削減(`$t()` 呼び出しごとのオブジェクト再生成なし)
+- ガベージコレクションの負荷を軽減
+- 高負荷時のレスポンスタイムを高速化
+- 安定したメモリ使用パターン(グラフが「跳ね上がる」ことがない)
+
+### Route & Path Strategy パッケージ {#route-&-path-strategy-packages}
+
+- **@i18n-micro/route-strategy** — ビルド時のルート生成: Nuxt のページをローカライズされたルートで拡張し、エイリアス、ネストされたルート、戦略ごとのカスタムパスを処理します。エントリーポイントは `new RouteGenerator(options)` と `extendPages(pages)` の 1 つだけです。戦略(`no_prefix`、`prefix`、`prefix_except_default`、`prefix_and_default`)は個別のクラスとして実装され、ファクトリーを通じて選択されます。
+- **@i18n-micro/path-strategy** — ランタイムのパスとロケールの処理: ローカライズされたパスの構築、リダイレクトの解決、ロケールの切り替えのための `PathStrategy` を提供します。ツリーシェイク可能なサブパスエクスポート(`/prefix`、`/no-prefix` など)により、選択した戦略のみがバンドルされます。ルート解決には純粋関数を、割り当てを最小限にするために事前計算されたコンテキストフラグを使用します。
+- **構造化されたパッケージレイアウト** — ルートロジックは `core/`、`strategies/` を持つ `@i18n-micro/route-strategy` にあります。パス戦略は、フラットな `src/` 構造(`types.ts`、`path.ts`、`resolver.ts`、`helpers.ts`、`strategies/`)を持つ `@i18n-micro/path-strategy` にあります。
+- **一貫した動作** — エイリアスの処理、親子パスの結合、カスタムの `globalLocaleRoutes` / `filesLocaleRoutes` / `routeLocales`、およびイミュータビリティの保証は、専用のテストスイートでカバーされています。
+
+### リダイレクトアーキテクチャの刷新 {#redirect-architecture-overhaul}
+
+- **サーバーミドルウェア** — リダイレクトと 404 の処理は Nitro ミドルウェア(`i18n.global.ts`)で実行されます。これは Nuxt のレンダリング前に実行されるため、ロケール Cookie が存在する場合、`/` から `/<locale>/` へのリダイレクトがエラーのちらつきなしで行われます。
+- **クライアントプラグイン(クライアントサイド)** — クライアント専用のプラグイン(`06.client-redirect.client.ts`)がハイドレーション後に実行され、`useI18nLocale()` や Cookie がデフォルト以外のロケールを設定した場合のリダイレクトを処理します。Nitro は Nuxt より前に実行されるため、サーバーはユーザープラグインによる Cookie や状態の変更を認識できません。このケースはクライアントプラグインがカバーします。
+- **フォールバックコンポーネントの廃止** — `locale-redirect.vue` フォールバックコンポーネントと `fallbackRedirectComponentPath` オプションは削除されました。リダイレクトロジックは、サーバーミドルウェアとクライアントプラグインによって完全に処理されます。
+- **カスタムパスのサポート** — ドイツ語の `/kontakt` のようなパス(`globalLocaleRoutes` 経由)は、ロケールプレフィックスがなくても有効なパスとして正しく認識され、プリレンダー中の誤った 404 を回避します。
+- **customRegexMatcher の修正** — `customRegexMatcher` を使用する場合、パターンはパスの最初のセグメント**全体**に一致するようになりました(`^` と `$` のアンカー付き)。これにより、以前はパターン `[a-z]{2}-[a-z]{2}` が部分文字列に一致していた `/locale-test` のようなルートでの誤った 404 を防ぎます。
+- **autoDetectPath の修正** — `autoDetectPath` オプションは元の URL パスと正しく比較するようになり、ロケールプレフィックス付きの URL へ明示的に移動した際の不要なリダイレクトを防ぎます。
+
+### useI18nLocale コンポーザブル {#usei18nlocale-composable}
+
+- **一元化されたロケール管理** — 新しい `useI18nLocale()` コンポーザブルは `useLocaleCookies` を置き換え、ロケールの状態、Cookie、同期ユーティリティのための単一のエントリーポイントを提供します。
+- **API** — `locale`、`localeCookie`、`hashCookie`、`getLocale()`、`getPreferredLocale()`、`setLocale()`、`syncLocale()`、`isValidLocale()`、`getEffectiveLocale()`、`resolveInitialLocale()`。
+- **プログラムによるロケール設定** — サーバープラグインでは、`useState('i18n-locale')` の代わりに `useI18nLocale().setLocale(locale)` を使用すると、よりすっきりと一元化されたロケール処理になります。
+
+### カスタム自動検出と設定 {#custom-auto-detection-&-configuration}
+
+- **`getI18nConfig()`** — カスタムプラグイン(ロケール検出用など)は、`useRuntimeConfig().public.i18nConfig` の代わりに `#build/i18n.strategy.mjs` の `getI18nConfig()` を使用してください。これにより、ランタイム設定に依存せずに、解決済みの i18n 設定(`localeCookie` など)へ直接アクセスできます。
+- **Cookie 名** — カスタム検出ロジックを実装する際は、`getI18nConfig().localeCookie ?? 'user-locale'` を使用してください。
+
+### 簡素化されたインテグレーションパッケージ {#simplified-integration-packages}
+
+すべてのインテグレーションパッケージ(`@i18n-micro/vue`、`@i18n-micro/astro`、`@i18n-micro/node`、`@i18n-micro/react`、`@i18n-micro/preact`、`@i18n-micro/solid`)は簡素化・最適化され、同じコア翻訳ロジックを共有するようになりました。
+
+### 設定の変更 {#configuration-changes}
+
+- **`previousPageFallback` の削除** — このオプションは不要になりました。新しい累積マージ戦略により、トランジションアニメーション中は前のページの翻訳が自動的に利用可能なまま保たれ、その後 `page:transition:finish` フックでクリーンアップされます。
+- **`hmr`** — `experimental.hmr` からトップレベルのオプションに移動しました。翻訳ファイルのサーバーサイド HMR を制御します(開発環境ではデフォルトで有効)。
+
+```typescript
+// Before (v2.x)
+export default defineNuxtConfig({
+  i18n: {
+    experimental: {
+      hmr: true,
+    },
+  },
+})
+
+// After (v3.0.0)
+export default defineNuxtConfig({
+  i18n: {
+    hmr: true,
+  },
+})
+```
+
+## 破壊的変更 {#breaking-changes}
+
+- **`fallbackRedirectComponentPath`** — 削除されました。モジュールはリダイレクトにフォールバックのルートコンポーネントを使用しなくなりました。カスタムコンポーネントのパスを設定していた場合は、設定から削除してください。
+- **`useLocaleCookies`** — 削除されました。代わりに `useI18nLocale()` を使用してください。新しいコンポーザブルは `locale`、`localeCookie`、`hashCookie`、`setLocale()`、`syncLocale()` などを提供します。
+- **`experimental.i18nPreviousPageFallback` / `previousPageFallback`** — 完全に削除されました。累積マージ戦略がトランジション中のちらつきを自動的に処理します。このオプションを設定から削除してください。
+- **`experimental.hmr`** — `hmr` に移動しました。このオプションを使用していた場合は設定を更新してください。
+- **カスタムプラグイン** — カスタムのロケール検出プラグインで `useRuntimeConfig().public.i18nConfig` を使用していた場合は、`#build/i18n.strategy.mjs` の `getI18nConfig()` に切り替えてください。`useState('i18n-locale')` よりも `useI18nLocale().setLocale()` を推奨します。更新された例については [カスタム言語検出](/ja-jp/guide/custom-auto-detect) を参照してください。
+- **内部ファイルの変更** — `load-from-storage.ts` と `translation-loader.ts` は削除され、`storage.ts` と `server-loader.ts` に置き換えられました。これらのファイルから直接インポートしていた場合(推奨されません)は、インポートを更新してください。
+
+## なぜ重要なのか {#why-it-matters}
+
+- **パフォーマンス**: 一元化されたシングルトンキャッシュにより、リクエストごとのオブジェクト生成がなくなり、GC の負荷が軽減されます。
+- **保守性**: ルートとパスのロジックは、明確な境界と型を持つ専用パッケージに置かれています。
+- **テスト**: 戦略の動作とエッジケースは個別にテストされます。
+- **信頼性**: サーバー(Nitro)とクライアントのリダイレクトロジックを分離することで、ユーザープラグインが Cookie や useState を設定する際のタイミングの問題を回避します。
+- **Serverless 対応**: Nitro プラグインは Nitro ハンドラーと同じコンテキストで実行され、Edge/Workers と互換性があります。
+- **ドキュメント**: ルーティングの動作は、[Strategy ガイド](/ja-jp/guide/strategy)と、[path-strategy](https://github.com/s00d/nuxt-i18n-micro/tree/main/packages/path-strategy) および [route-strategy](https://github.com/s00d/nuxt-i18n-micro/tree/main/packages/route-strategy) パッケージに記載されています。
+
+アップグレードに関する注意事項と変更の全一覧については、[変更履歴](https://github.com/s00d/nuxt-i18n-micro/blob/main/CHANGELOG.md)を参照してください。
+
+---

@@ -1,0 +1,441 @@
+---
+title: "デプロイ"
+description: "Node サーバー、サーバーレスやエッジ、または静的サイトとしてデプロイします。翻訳ペイロードの配置先、各プラットフォームで必要なこと、プロキシ、キャッシュについて説明します。"
+---
+
+このモジュールは追加設定なしで任意の Nitro プリセットで動作します。ビルド対象のプリセットから、翻訳ファイルの配置先を選びます。ほとんどのアプリではデフォルトで問題ありません。ご利用のプラットフォームのセクションを読んでください。このページでは次のことを説明します:
+
+- `.output/` に何が出力され、ペイロードにどのヘッダーが付くか
+- 静的ホスティング、大規模なカタログ、サブパス、プロキシ、CDN の場合に何を変更するか
+
+<Note>
+
+実際のホストでデプロイして確認済み: Cloudflare Workers と Pages、Vercel と Vercel Edge、Netlify と Netlify Edge、Cloud Run と Deno Deploy。それぞれ [プラットフォーム](#platforms) に記載された内容で確認しています。その他のプリセットはローカルでビルドして実行しました。
+
+</Note>
+
+## 翻訳の配信方法 {#how-translations-are-delivered}
+
+ビルド時に、モジュールは `locales/`(すべてのレイヤーをマージしたもの)を **ペイロード** に変換します。ページとロケールごとに 1 つの JSON ファイルです。これを読み取るのは次の 2 者です:
+
+- **SSR** は描画するページのペイロードをプロセス内で読み込みます。HTTP リクエストは発生せず、辞書が HTML に埋め込まれることもありません。
+- **ブラウザー** は、ハイドレーション時とナビゲーション時に `/_locales/<page>/<locale>/data.json?v=<dateBuild>` を取得します。
+
+`_locales` は [`apiBaseUrl`](/ja/api/module-options#apibaseurl) です。組み込みのサーバールートがその URL に応答し、`public/` 内の静的コピーはサーバーなしで応答します。
+
+## Node サーバー {#node-server}
+
+```bash
+npx nuxi build
+node .output/server/index.mjs
+```
+
+`node-server`(デフォルトのプリセット)、`node-cluster`、`bun`、`deno-server`、またはその他の `public/` をディスクから配信するプリセットで、`public/` が `server/` フォルダーの隣にある場合:
+
+- ペイロードは `.output/public/_locales/<page>/<locale>/data.json` にコピーされます
+- SSR はそのフォルダーから `fs` で読み取ります(サーバーには何もバンドルされません)
+- ブラウザーは静的ファイルとして、またはサーバールートから取得します
+
+`.output/` ディレクトリ全体をデプロイしてください。このモジュールには Node 20 以降が必要で、Nuxt にも独自の最小要件があります。Nuxt 4.5 は `^22.19.0 || ^24.11.0 || >=26.0.0` を宣言しています。
+
+継続的な負荷のかかるプロセスは、実際のヒープよりはるかに多くのメモリを保持することがあります。コンテナの制限を設定する前に [Node サーバーのメモリ](/ja/guide/performance#memory-on-a-node-server) を参照してください。
+
+それ以外の構成では、モジュールは次のセクションで説明するようにペイロードを埋め込みます。これには次の場合が含まれます:
+
+- カスタムの `nitro.output.publicDir`(ビルドが一度だけ読み取ります)
+- 静的ファイルを別の場所に置くプリセットでの `serveStatic: true`
+
+<Warning>
+
+ビルドが `public/` を読み取るにもかかわらず、そのフォルダーがサーバーに届かない場合(`aws-lambda` と `serveStatic: true` の組み合わせなど)、サーバーはエラーを 1 回ログに出力し、ページには生のキーが表示されます。ペイロードを埋め込むには `nitro.serveStatic: false` を設定してください。
+
+</Warning>
+
+## サーバーレスとエッジ {#serverless-and-edge}
+
+以下のプリセットはランタイムで `public/` を読み取れません:
+
+- `public/` を CDN に配置する、または配信しない関数プリセット: `vercel`、`netlify`、`aws-lambda`、`aws-amplify`、`azure-swa`、`firebase`、`stormkit`、`zeabur`、`node-listener`
+- ファイルシステムを持たないエッジプリセット: `cloudflare-module`、`cloudflare-pages`、`vercel-edge`、`netlify-edge`、`deno_deploy`
+- `winterjs` などの `serveStatic: 'inline'`
+
+これらの場合、モジュールはペイロードを Nitro のサーバーアセット(`assets:i18n`)としてサーバーバンドルに埋め込み、ブラウザー向けの公開コピーも引き続き書き出します。
+
+ページ × ロケールの全組み合わせを埋め込むと、バンドルが大きくなります。エッジプラットフォームの制限を超えると、ビルドはその制限名を挙げて警告します。[バンドルの制限](#bundle-limits-on-edge) を参照してください。大規模なカタログでは `source` モードに切り替えます。このモードはコンパクトなソースファイルを埋め込み、ルート、ページ、フォールバックの翻訳をランタイムでマージします:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    translationPayloads: {
+      mode: 'source',
+    },
+  },
+})
+```
+
+`source` モードでは、ブラウザーは常にサーバールートからペイロードを取得し、サーバールートはリクエスト時にそれらをマージします(公開コピーがあっても、それはサーバーだけが読むコンパクトなソースツリーです)。実行中のサーバーが必要なため、純粋な静的サイトでは `source` を使わないでください。
+
+### エッジでのバンドルの制限 {#bundle-limits-on-edge}
+
+| プラットフォーム           | 制限                                                                                  |
+| ------------------ | -------------------------------------------------------------------------------------- |
+| Cloudflare Workers | Free と Paid のいずれも非圧縮で 64 MiB。圧縮後の制限はなし。起動 1 秒、メモリ 128 MB |
+| Vercel Edge        | Hobby で gzip 1 MB、Pro で 2 MB、Enterprise で 4 MB                                    |
+| Netlify Edge       | 圧縮後 20 MB                                                                       |
+
+ビルドは埋め込む辞書の合計を算出し、プラットフォームの最も低い制限を超えた場合にのみ警告します。数えるのは辞書だけなので、アプリの分がその上に加わります。たとえば、60 KB のルートファイルを持つ 120 ページ × 4 ロケールでは次のように埋め込まれます:
+
+| モード | 埋め込みサイズ | 収まる先 |
+| --- | --- | --- |
+| `premerged` | 34.9 MiB | Cloudflare。Vercel Edge と Netlify Edge には収まらない |
+| `source` | 5.7 MiB | Vercel Edge では依然として gzip で 3 MB |
+
+その規模のカタログを Vercel Edge で扱うには [ペイロードホスト](#app-baseurl-and-payload-hosts) が必要です。
+
+`source` はアイソレートごとに、ページとロケールごとのマージのコストがかかります。この例では約 1 ms、コールドなアイソレートでは CPU 7 ms です。フォールバックチェーンのサイズに応じて増え、チェーンファイルが 4 MB なら約 43 ms になります。Netlify Edge はリクエストあたり CPU 50 ms、Cloudflare の Free プランは 10 ms まで許可します。
+
+### エッジランタイムでの日付 {#dates-on-edge-runtimes}
+
+`$td` はランタイムの `Intl` を使用し、その ICU データはブラウザーのものと異なる場合があります。Netlify Edge では、Chrome が通常のスペースを使う箇所で、フォーマットされた日付に U+202F(狭いノーブレークスペース)が含まれることがあり、Vue はハイドレーションの不一致を 1 回ログに出力し、テキストはハイドレーション時に自動的に修正されます。素の `Intl` を使う素の Nuxt でも同様のことが起こりますが、Deno Deploy では起こりません。
+
+<Tip>
+
+`date` または `relativeDate` を指定した `<i18n-t>` は、すでに不一致を許容しています。テンプレート内の `$td` には、要素に `data-allow-mismatch="text"` を付けてください。
+
+</Tip>
+
+## 静的サイト(nuxi generate) {#static-site-nuxi-generate}
+
+```bash
+npx nuxi generate
+```
+
+`nuxi build --preset <static preset>` も同じ動作をします。
+
+- デフォルトの `premerged` モードはすべてのペイロードを `.output/public/_locales/` に書き出すため、任意の静的ホストで配信できます。
+- ページはロケールごとにプリレンダリングされます。`prefix` では、モジュールはローカライズされたすべてのルート(`/en`、`/de`)をシードし、`/` はリダイレクト用のスタブとして残されます。
+- [`prerenderRoutes`](/ja/api/module-options#translationpayloads) はオフのままにしてください。公開コピーにはすでにペイロードファイルが含まれています。
+- `source` モードまたは `publicAssets: false` の場合、ブラウザーが読み取るものがないため、ビルドは警告を出します。
+
+<Note>
+
+Cookie や `Accept-Language` を読み取るサーバーがないため、保存されたロケールによって初回読み込み時に `/` がリダイレクトされることはありません。`no_prefix` では HTML はデフォルトロケールを保持し、保存された Cookie は読み込み時に適用されません。開いているページでは `$switchLocale` は引き続き動作します。
+
+</Note>
+
+Cloudflare Pages については [Cloudflare Pages](#cloudflare-pages) を参照してください。
+
+[ロケールドメイン](/ja/guide/layers#multiple-domains) を使うビルドでは、ドメインごとに 1 回 generate を実行し、`NUXT_I18N_DOMAIN` にその実行のホストを指定します。すると各ツリーにはそのドメインのページとペイロードが含まれます。Nitro には出力フォルダー用の変数がないため、設定から独自の変数を読み取ります:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: { output: { publicDir: process.env.PUBLIC_DIR } },
+})
+```
+
+```bash
+NUXT_I18N_DOMAIN=example.de PUBLIC_DIR=sites/example.de npx nuxi generate
+NUXT_I18N_DOMAIN=example.com PUBLIC_DIR=sites/example.com npx nuxi generate
+```
+
+- フォルダーは `.output` の外に置いてください。実行のたびに `.output` は空にされます。
+- 他のドメインへの絶対リンクはクロールされません。
+- この変数がない場合、`baseUrl` を持つロケールを含むビルドは警告を出し、ビルド設定のまま生成します。その場合、それらのロケールはリンクとなり、ページは生成されません。
+- Node サーバーでは、同じ変数を指定すると、`Host` が何であってもプロセスが 1 つのドメインに固定されます。
+
+静的ホストはこれらのファイルに独自のヘッダーを適用します。キャッシュはホストの設定で行ってください。モジュールの `/_locales/*` ルールは、Cloudflare Pages には `_headers` を通じて、Vercel には `config.json` を通じて、`public, max-age=60` として届きます。`.gz` / `.br` の兄弟ファイルを配布するには `nitro.compressPublicAssets` を有効にしてください。モジュールは同じ設定でペイロードのコピーを圧縮します。
+
+
+## キャッシュヘッダーと dateBuild {#cache-headers-and-datebuild}
+
+| リクエスト                                                                                  | `Cache-Control`                                                                                                 |
+| ---------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Node サーバーまたはルート、`?v=` が現在の `dateBuild` と一致、辞書が空でない     | `private, max-age=<httpCacheDuration>, immutable`                                                               |
+| Node サーバーまたはルート、`?v=` なし、古い `?v=`、または辞書が空             | `public, max-age=0, must-revalidate`                                                                            |
+| ホスト上の `public/` のコピー、任意の `?v=`                                                    | `public, max-age=60` ([`httpCacheControl`](/ja/api/module-options#other)) |
+| `source` モード、`cacheTtl`、または `apiBaseServerHost`: ビルドなしで辞書が変わり得る | 常に `httpCacheControl` ヘッダー                                                                           |
+| サーバールート、辞書を読み取れなかった                                           | `503`、`no-store`                                                                                               |
+| 開発サーバー                                                                               | なし                                                                                                            |
+
+この表がこうなっている理由:
+
+- 現在の `v` を持つ URL はハッシュ付きアセットのように固定されますが、そう言えるのはクエリを見られるものだけです。つまりサーバールートと、静的ファイルにヘッダーを設定する Node サーバーです。
+- `private` なので、クエリを無視する CDN がこのレスポンスで次の `v` に応答することはありません。
+- ホストの静的ファイルは `/_locales/**` のルートルールからパス全体のヘッダーを受け取りますが、これはクエリを見られないため短いままです。それでも再読み込み時に何かを待つことはありません。
+- キャッシュされた HTML が参照しているため、古い `v` も引き続き配信可能です。
+
+`httpCacheControl: false` にすると、すべての静的ファイルは `max-age=0, must-revalidate` のままになります。[`httpCacheDuration`](/ja/api/module-options#httpcacheduration) のデフォルトは 1 年で、`0` を指定するとヘッダーを送りません。`$clearCache()` は次に読み込むものを再検証します。
+
+Safari は、レスポンスを再利用できない可能性がある場合、プリロードされたペイロードを再度リクエストします。`no-cache` と `ETag` があれば 2 回目のリクエストは `304` になり、キャッシュヘッダーもバリデーターもない場合は 2 回目の完全なダウンロードになります。`max-age` が `0` より大きければリクエストは 1 回で済みます。このコストを払うのは、バリデーターを付けないホストで `httpCacheDuration: 0` を使う場合だけです。
+
+[`dateBuild`](/ja/api/module-options#datebuild) は `?v=` の値です。デフォルトでは翻訳ファイルのハッシュなので、翻訳が変わったときにだけ変化し、翻訳に触れていないデプロイをまたいでもブラウザーはキャッシュされたペイロードを保持します。フォールバックチェーンが変わった場合にも変化します。
+
+- 値を固定するには自分で設定します。
+- `?v=` を完全になくすには `0` または `''` を設定します。その場合、ペイロードは決して `immutable` になりません。
+
+<Tip>
+
+Node サーバー上で辞書をその場で置き換えた後は、`NUXT_I18N_DATE_BUILD=<new value>` を付けて再起動してください。リビルドなしで `v` を変えるものは他にありません。
+
+</Tip>
+
+### ルートファイルと差分ファイル {#root-and-delta-files}
+
+`premerged` はロケールごとに 1 つのルート `__root/<locale>/data.json` を書き出し、各ページのファイルにはそれとの差分だけを書き出します。
+
+- ページファイルは、作成時の基準となったルートを `__i18n_root` キーで示します。
+- ブラウザーは両方を取得し、両方が揃うまでページには何も表示されません。SSR はチャンクごとに 1 回それらをマージします。
+- 目印のないファイルは完全な辞書であり、単独で成立します。開発環境、`source` モード、サーバールート、そして古いファイルを保持したままのホストは、いずれも設定なしでそのようなファイルを返します。
+
+そのため、`_locales/*/data.json` を直接読む人は差分を読むことになります。完全なファイルを維持するには `translationPayloads.rootDelta: false` を設定してください。
+
+デプロイをまたいで開いたままのタブが新しい差分を要求すると、それが別のルートに対して作られたことを検知し、表示する前にそのルートを取得します。
+
+### 辞書を読み取れない場合 {#when-a-dictionary-cannot-be-read}
+
+ホストからの取得の失敗(404 以外)、読み取れないか破損したファイル、または JSON オブジェクトではない 200 レスポンスは、どのキャッシュにも保存されず、次のリクエストで再度読み取られます:
+
+- ページの描画では警告がログに出力され、その辞書については生のキーが表示され、`Cache-Control: no-store` 付きの `503` が返されます。すべての CDN ヘッダー(`CDN-Cache-Control`、`Cloudflare-CDN-Cache-Control`、`Netlify-CDN-Cache-Control`、`Vercel-CDN-Cache-Control`、`Surrogate-Control`。ルートルールからのものより優先)でも同様で、`Retry-After: 60` も付きます
+- `/_locales/...` は `no-store` 付きの `503` を返します
+- `useTranslationServerMiddleware` は、キーまたはデフォルト値を返す `t` を提供します
+
+障害中に起こること:
+
+- **訪問者:** その 503 の本文はページそのものです。ハイドレーション時にブラウザーが辞書を再度読み取り、ホストが復旧するとテキストが表示されます。サーバーの HTML にはキーが含まれていたため、Vue はハイドレーションの不一致に関するコンソールエラーを 1 回出力します。
+- **クローラー** には後で再訪するよう伝えられます。
+- **キャッシュ:** `swr` や `cache` のルートルールはステータス 400 以上のものを保存せず、CDN は `no-store` を受け取るため、生のキーを保持するキャッシュはなく、復旧後の最初のリクエストで実際のテキストが描画されます。
+- ルールによって **すでにキャッシュされたページ** はそのまま残ります。再検証は失敗し、何も保存しません。Vercel では、失敗した `isr` の再検証も同様に最後のページを保持します。
+
+これは描画が読み込むすべてのチャンクに当てはまります。ルートが手元にある状態で失敗したページチャンクや、描画の後半でマージされたチャンクも含みます。辞書が正常なページ、リダイレクト、エラーページはそれぞれのステータスを維持します。例外は [コンポーネントアイランド](/ja/guide/server-side-translations) です。503 にするとページから取り除かれてしまうため 200 のままとなり、自身の辞書が読み込まれたページでもアイランドの生のキーが残ることがあります。障害中のリクエストはそれぞれホストに到達し、レスポンスヘッダーを待つ 60 秒以外にモジュール独自のタイムアウトはありません。
+
+ホストからの 404 は、そのファイルが存在しないことを意味し、失敗ではありません。ページの描画ではブラウザーと同様にルート辞書が表示され、`/_locales/...` は同じ 404 を返します。どちらもキャッシュには保存されないため、後からファイルが現れれば次のリクエストで読み取られます。その代わり、そのようなページを描画するたびにホストへのリクエストが 1 回発生します。ルートファイルもない場合は辞書が空になり、[プリレンダリング](/ja/guide/upgrade#server,-build-and-deployment) は失敗します。
+
+サーバーは読み込んだペイロードを、最大 `cacheMaxSize` 件(デフォルトは 1000)のプロセス内 LRU キャッシュに保持し、`cacheTtl` が設定されていればその時間の経過後にエントリーを再読み込みします。両方とも [パフォーマンスチューニング](/ja/guide/performance) で説明しており、[`cacheStorage`](/ja/guide/performance#shared-cache-for-several-instances) を使うとインスタンス間で共有するキャッシュを追加できます。さらに `/_locales/**` に Nitro の `cache` ルートルールを追加しないでください。それはクエリを含む完全な URL をキーとし、3 つ目のコピーを保存してしまいます。
+
+## アプリの baseURL とペイロードホスト {#app-baseurl-and-payload-hosts}
+
+**`app.baseURL`** には他に何も必要ありません。`app.baseURL: '/shop/'` の場合、ブラウザーは `/shop/_locales/...` を取得します。コピーは `.output/public/_locales/` に残り、Nitro はそれをベースの下で配信します(静的ホストでは出力を `/shop/` にマウントする必要があります)。ロケールプレフィックスと [除外パス](/ja/guide/excluding-static-files) はベースを除いて照合されます。
+
+**`app.cdnURL`** は、ペイロードが `public/` 内のファイルである場合、ペイロードも移動させます。ブラウザーは `<cdnURL>/_locales/...` を取得・プリロードします。
+
+- CDN はそのパスで、`_nuxt/` の隣に `_locales/` を保持している必要があります。
+- ファイルは `fetch` で取得されるため、CDN はサイトのオリジンを許可(CORS)している必要があります。
+- サーバールートだけが応答する辞書(`source` モード、公開コピーなし)はアプリのオリジンに残ります。
+
+`cloudflare-module` でランタイムの `NUXT_APP_BASE_URL` を使うには Node 互換(`nodejs_compat`)が必要です。`nitro.cloudflare.nodeCompat` がオフの場合(フラグなしで古い日付を指定したときも Nitro はこれにフォールバックします)、変数が認識されず `/` で配信されます。これは素の Nuxt でも同じですが、ロケールのリダイレクトは引き続きベースに向かいます。その場合はビルド時に `app.baseURL` を設定してください。
+
+別のオリジンからペイロードを配信するには、クライアントとサーバーをそこに向け、ローカルの出力をオフにします:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    apiBaseClientHost: 'https://cdn.example.com',
+    apiBaseServerHost: 'https://cdn.example.com',
+    translationPayloads: {
+      serverHandler: false,
+      publicAssets: false,
+      serverAssets: false,
+    },
+  },
+})
+```
+
+- Node では、`serverAssets` はサーバー自身が読み取るために同じコピーを書き出し、そのファイルが `/_locales` に応答します。そのため、ブラウザー向けにサーバールートを残す場合でも、これもオフにする必要があります(そうしないとサーバールートには決して到達しません)。
+- ホストは同じ `<apiBaseUrl>/<page>/<locale>/data.json` 構成で配信する必要があります。
+- すべてのローカル出力がオフでホストが指定されていない場合、ビルドは警告を出します。
+
+同じ値はビルド時に `NUXT_I18N_APP_BASE_URL`、`NUXT_I18N_APP_BASE_CLIENT_HOST`、`NUXT_I18N_APP_BASE_SERVER_HOST` から指定することもできます。`NUXT_I18N_APP_BASE_SERVER_HOST` はランタイムでも機能し、ビルド時の値より優先されます。詳細は [`apiBaseServerHost`](/ja/api/module-options#apibaseserverhost) を参照してください。
+
+## プラットフォーム {#platforms}
+
+ここではモジュールまたはその出力に必要なことだけを扱います。アカウント、リージョン、CLI のログインについてはプラットフォームのドキュメントを参照してください。
+
+### Cloudflare Workers {#cloudflare-workers}
+
+プリセット `cloudflare_module`。`wrangler deploy` は Nitro の出力を esbuild でもう一度バンドルし、その後は素の `defineAsyncComponent(() => import('./X.vue'))` がサーバー上で空として描画されます。Nuxt のデフォルトのエラーページがこれに該当するため、404 の本文が空になり、ブラウザーはハイドレーションの不一致をログに出力します。その後クライアントがページを描画し、ステータスは 404 のままですが、JavaScript がなければページは空白です。これは [nuxt#33270](https://github.com/nuxt/nuxt/issues/33270) で、モジュールなしの素の Nuxt でも同じことが起こります。ページのルートには影響しません。
+
+2 回目のバンドルをオフにします:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: {
+    preset: 'cloudflare_module',
+    cloudflare: {
+      deployConfig: true, // `wrangler` below applies only with it
+      wrangler: {
+        no_bundle: true,
+        find_additional_modules: true,
+        rules: [{ type: 'ESModule', globs: ['**/*.mjs'] }],
+      },
+    },
+  },
+})
+```
+
+```bash
+npx nuxi build
+cd .output/server && npx wrangler deploy -c wrangler.json
+```
+
+`compatibilityDate` は `2024-09-19` 以降に設定してください。それより古い日付ではレガシーなプリセットが選ばれ、`wrangler.json` が書き出されず、エラーも出ません。これで 404 が描画されるようになり、アップロードも小さくなります。テストアプリでは gzip で 246 KiB から 190 KiB になりました。独自の `error.vue` を用意するのも別の解決策ですが、それで対処できるのはエラーページだけです。
+
+モジュール自体は `nodejs_compat` を必要としません。制限については [バンドルの制限](#bundle-limits-on-edge) を参照してください。
+
+### Cloudflare Pages {#cloudflare-pages}
+
+`cloudflare-pages-static` プリセットを使います。`nuxi generate --preset cloudflare-pages` は `index.html` のないサーバービルドになります。
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: {
+    preset: 'cloudflare-pages-static',
+    prerender: { autoSubfolderIndex: false },
+  },
+})
+```
+
+```bash
+npx nuxi generate
+npx wrangler pages project create my-site --production-branch main --force
+npx wrangler pages deploy dist --project-name my-site --branch main
+```
+
+- **出力。** このプリセットは `.output/public` ではなく `dist/` に書き出します。
+- **`--force`。** これがないと、新しい wrangler(ここでは 4.156)は `pages project create` を Workers に引き渡します。これを付けると従来の Pages プロジェクトになります。必要なのは作成時の 1 回だけです。
+- **`autoSubfolderIndex: false`。** Pages は `/de` に対して `/de/` への 308 を返しますが、canonical と `hreflang` は `/de` を指すため、リダイレクトを指すことになります。このオプションを使うとファイルは `de.html` になり、リダイレクトはなくなります。
+- **404 でコンソールに出る `NUXT_E1005`** は通常の 404 です。`404.html` はアプリがマウントされる前にクライアントで開始されるため、Nuxt はこのように報告します。ページは正常に動作し、素の Nuxt でも同じ行が出力されます。
+
+### Vercel と Vercel Edge {#vercel-and-vercel-edge}
+
+プリセット `vercel` と `vercel_edge` で、アプリの変更は不要です。タグはプラットフォームの転送ヘッダーから、`metaBaseUrl` なしで機能します。Vercel Edge はバンドルの制限が小さいため、[バンドルの制限](#bundle-limits-on-edge) を参照してください。共有キャッシュには [`upstash` ドライバー](/ja/guide/performance#upstash-on-vercel-and-vercel-edge) を使ってください。
+
+### Netlify {#netlify}
+
+プリセット `netlify` と `netlify_edge`。
+
+```bash
+npx nuxi build --preset netlify
+npx netlify deploy --prod --no-build --dir dist --functions .netlify/functions-internal
+```
+
+- **`nitro.output` は設定しないでください。** プリセットが `.netlify/` と `dist/` を自分で書き出します。
+- **デプロイするフォルダーに `package.json` を置いてください。** ないと CLI は親フォルダーを参照し、関数を 1 つもデプロイせず、エラーも出しません。
+- **Netlify Edge** は `--dir dist` だけでデプロイします。[エッジランタイムでの日付](#dates-on-edge-runtimes) を参照してください。
+
+### Cloud Run {#cloud-run}
+
+デフォルトの `node-server` ビルドを使います。ローカルで docker が実行されていない場合、`gcloud run deploy --source` には出力フォルダー内の `Dockerfile` が必要です:
+
+```dockerfile
+# .output/Dockerfile
+FROM node:22-slim
+WORKDIR /app
+COPY . .
+ENV NODE_ENV=production
+CMD ["node", "server/index.mjs"]
+```
+
+```bash
+cd .output && gcloud run deploy my-app --source .
+```
+
+タグはプラットフォームの転送ヘッダーから、`metaBaseUrl` なしで機能します。
+
+### Deno Deploy {#deno-deploy}
+
+プリセット `deno_deploy`。`deno deploy` は `deployctl` に代わるものです。エントリーポイント `server/index.ts` で動的アプリを作成し、出力フォルダーからデプロイしてください。
+
+### Firebase {#firebase}
+
+| プロダクト | セットアップ |
+| --- | --- |
+| App Hosting | Node ビルドを実行します。デフォルトのプリセットまたは `firebase-app-hosting` と、Node 20 以降を使ってください |
+| Cloud Functions | `firebase` プリセットはペイロードを埋め込み、`firebase-functions` が必要です |
+| Hosting(静的) | `.output/public` をファイルとして配信するため、`/_locales/**` には Hosting のヘッダーが付きます |
+
+静的 Hosting で JSON が誤った `Content-Type` やキャッシュ設定で返される場合は、`firebase.json` に `/_locales/**` 用の `headers` エントリーを追加してください。Nuxt の `routeRules` のヘッダーは、Hosting が自身で配信するファイルには適用されません。ペイロードのルートは、サーバーに届いたレスポンスに独自の `Content-Type` と `Cache-Control` を設定します。
+
+### AWS Amplify {#aws-amplify}
+
+`aws-amplify` は静的ファイルをサーバーの隣ではなくコンピュートフォルダーの隣に置くため、ペイロードは関数プラットフォームと同様に埋め込まれます。
+
+### 1 つのビルドの複数インスタンス {#several-instances-of-one-build}
+
+1 つの成果物を、環境変数によってインスタンスごとに異なるデフォルトロケールや無効化ロケールで実行できます。[ランタイムでの上書き](/ja/guide/runtime-overrides) を参照してください。ランタイムでのみ無効化されたロケールの静的ファイルは `public/` に残ります。それらにアクセスできてはならない場合は、ビルド時に無効化してください。
+
+リモートホストから辞書を読み込むインスタンスは、Redis、Upstash、Cloudflare KV や D1、Deno KV、またはその他の Nitro ストレージでそれらを共有でき、バックエンドへのリクエストをインスタンスごとではなく 1 回にできます。これはキャッシュであり、翻訳のソースではありません。[複数インスタンス用の共有キャッシュ](/ja/guide/performance#shared-cache-for-several-instances) を参照してください。
+
+## プロキシや CDN の背後 {#behind-a-proxy-or-cdn}
+
+アプリはリクエストから公開ホストとスキームを知る必要があります。
+
+| プロキシが送るもの                              | 通常のビルド                                      | ロケールに `baseUrl` を持つビルド                                                   |
+| -------------------------------------------- | ------------------------------------------------ | --------------------------------------------------------------------------------- |
+| 実際の `Host`                              | 設定不要                                   | 設定不要                                                                    |
+| オリジンの `Host` と `X-Forwarded-Host` | 設定不要                                   | [`trustForwardedHost: true`](/ja/api/module-options#trustforwardedhost)              |
+| どちらもなし                                      | [`metaBaseUrl`](/ja/api/module-options#metabaseurl) | どの設定も役に立ちません。すべてのリクエストがオリジンのホストに見えるため、プロキシを変更してください |
+
+- **`swr` または `cache` のルート。** この表はそこでは当てはまりません。[HTML のキャッシュ](#caching-html) を参照してください。`metaBaseUrl` または `site.url` を設定してください。
+- **`X-Forwarded-Proto`。** これを送らないと、HTTPS プロキシの背後で canonical URL が `http://` になります。`metaBaseUrl` でもこれを解決できます。
+- **ドメインビルドでは**、ドメインがタグのベース URL を決めます。そこでドメインを選ぶのは `trustForwardedHost` だけで、`metaTrustForwardedHost` ではありません。
+- **リダイレクトは相対であり、ロケール Cookie には `Domain` がない** ため、どちらも公開ホストにとどまります。
+
+<Warning>
+
+**オリジンにアクセス可能なままなら `metaBaseUrl` を固定する** — `metaBaseUrl` や `site.url` のない通常のビルドでは、canonical、`hreflang`、`og:url` はホストをリクエストから取得します。[`metaTrustForwardedHost`](/ja/api/module-options#metatrustforwardedhost) はデフォルトで有効なので、`X-Forwarded-Host: evil.example` 付きの直接リクエストではそれらのタグに `https://evil.example` が入り、前段のキャッシュがそのページを拡散します。`*.workers.dev` のようなプラットフォームのホストはまさにそのようなオリジンです。`metaBaseUrl` は `Host` についてもこれを防ぎます。ドメインビルドの既知のホストは独自の `baseUrl` を維持します。`trustForwardedHost: true` では直接のクライアントが別のドメインのページを選べるため、ヘッダーを上書きするプロキシの背後でのみ有効にしてください。
+
+</Warning>
+
+## HTML のキャッシュ {#caching-html}
+
+ほとんどの URL は自身のロケールを示しているため、キャッシュしても安全です。次の URL は訪問者に依存します:
+
+| 構成                          | URL                                              |
+| ------------------------------ | ------------------------------------------------- |
+| デフォルト、`autoDetectPath: '/'` | `/`                                               |
+| `prefix`                       | `/` と、リダイレクトするだけのすべてのプレフィックスなし URL |
+| `autoDetectPath: '*'`          | すべての URL                                         |
+| `no_prefix`                    | すべてのページ                                        |
+
+- **`Vary`。** これらのレスポンスには、[`localeCookie`](/ja/api/module-options#localecookie) が設定されていれば `Cookie` を、`autoDetectLanguage` が有効なら `Accept-Language` を含む `Vary` が付きます。これを尊重するキャッシュは応答を区別して保持します。
+- **`Vary` を無視するキャッシュ**("URL ですべてをキャッシュ" など)では、これらの URL を除外する必要があります。そうしないと、ある訪問者の `302 /de` が次の訪問者に届き、保存されたデフォルトページによって全員のリダイレクトが失われます。`/` では `redirects: false` を設定することもできます。Nitro のルートキャッシュはパスとその `varies` リストをキーとするため、`/` は `swr` と `cache` のルールからも除外してください。
+- **`Set-Cookie`。** `localeCookie` が設定されていると、プレフィックス下のサーバー描画ページにはすべて `Set-Cookie` が付き、正しく動作する CDN はそれを保存しません。HTML をキャッシュする場合は `localeCookie` をオフにするか、エッジでヘッダーを除去してください。
+- **`swr` と `cache` のルールには `metaBaseUrl` または `site.url` が必要です。** Nitro はそのようなルートを `cache.varies` にあるヘッダーだけで描画するため、`Host`、`X-Forwarded-Host`、`X-Forwarded-Proto` は失われ、リクエスト URL は `http://localhost` になります。固定されたオリジンがなければ、それらのルートの canonical、`hreflang`、`og:url` はどのプラットフォームでも `http://localhost` を指します。素の Nuxt の `useRequestURL()` もそこでは同じ値を返します。代わりに訪問者からホストを取得すると、ある訪問者の `X-Forwarded-Host` が全訪問者に配られるページに入ってしまいます。ドメインビルドは影響を受けません。そのタグはロケールの `baseUrl` を使います。
+
+  1 つのビルドが複数のホストを配信し、単一のオリジンでは対応できない場合は、ルールにヘッダーを見せて値ごとに 1 つのコピーを保持させます: `'/blog/**': { swr: 60, cache: { varies: ['host', 'x-forwarded-host', 'x-forwarded-proto'] } }`。異なる値ごとに新しいキャッシュエントリーになるため、でたらめなヘッダーを送るクライアントがキャッシュを埋め尽くせます。オリジンは、これらのヘッダーを設定するプロキシの背後に置いてください。
+- **ドメインビルドでの `swr` と `cache` のルール。** モジュールはそのようなすべてのルールの `cache.varies` に `host` を追加し、`trustForwardedHost` があれば `x-forwarded-host` も追加するため、あるドメインが別のドメインにそのページを配信することはありません。`cache: false` のルールは書いたとおりのままです。`isr` はプラットフォームのキャッシュなので、ホストをキーにしているか確認してください。ホストがキーに含まれる場合、でたらめなホストを送るクライアントはキャッシュエントリーを増やします。
+
+ペイロードファイルについては [キャッシュヘッダーと dateBuild](#cache-headers-and-datebuild) を参照してください。
+
+## 関連 {#related}
+
+<CardGroup cols={2}>
+
+<Card title="パフォーマンスチューニング" icon="book-open" href="/ja/guide/performance">
+
+</Card>
+
+<Card title="ランタイムでの上書き" icon="book-open" href="/ja/guide/runtime-overrides">
+
+</Card>
+
+<Card title="translationPayloads リファレンス" icon="brackets-curly" href="/ja/api/module-options#translationpayloads">
+
+</Card>
+
+<Card title="レイヤーとドメイン" icon="book-open" href="/ja/guide/layers">
+
+</Card>
+
+<Card title="SEO" icon="book-open" href="/ja/guide/seo">
+
+</Card>
+
+</CardGroup>

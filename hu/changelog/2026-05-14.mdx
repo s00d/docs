@@ -1,0 +1,83 @@
+---
+title: "v3.20.0 — A futásidejű réteg refaktorálása és az átirányítás szétválasztása"
+description: "Kiadási megjegyzések: v3.20.0 — A futásidejű réteg refaktorálása és az átirányítás szétválasztása"
+---
+
+**Dátum**: 2026-05-14
+
+**Verzió**: `v3.20.0`
+
+![v3.20.0 kiadás](/images/3.20.0.png)
+
+Ez a kiadás egy külön **`NuxtI18n`** rétegbe szervezi a Nuxt futásidejű részét, szétválasztja a szerver- és kliensoldali átirányítás kezelését, és több SSR-/hidratálási regressziót is javít. A nyilvános composable-ök és a `nuxt.config` opciók a szokásos alkalmazások esetében változatlanok.
+
+## Mi újság? {#what’s-new}
+
+### `NuxtI18n` és `NuxtTranslationLoader` {#nuxti18n-&-nuxttranslationloader}
+
+A futásidejű i18n-logika a monolitikus pluginból célzott osztályokba költözik:
+
+- **`NuxtI18n`** — az aktív fordítások nézetrétege (`$t`, `$has`, locale-/útvonalkontextus, egyesítés/takarítás átmenetkor)
+- **`NuxtTranslationLoader`** — betölti a chunkokat, navigáláskor kontextust vált, előkészíti az SSR payloadot
+- **`createNuxtI18nPluginApi`** — vékony plugin-felület (`$switchLocale`, `$localeRoute` stb.)
+
+Lásd a frissített [Gyorsítótár- és tárolóarchitektúra](https://s00d.github.io/nuxt-i18n-micro/v3/api/i18n-cache-api) és [Teljesítmény](/hu/guide/performance) oldalakat.
+
+### SSR payload a `useState('i18n-ssr-chunks')` segítségével {#ssr-payload-via-usestate‘i18n-ssr-chunks’}
+
+Az SSR-fordítások szerializálása a **Nuxt állapoton** keresztül történik, nem egy `window.__I18N__` script tag révén:
+
+1. A szerver betölti a chunkokat → `useState('i18n-ssr-chunks')`
+2. A kliens hidratál → `translationStorage.seedFromSsrChunks()`
+3. Nulla extra lekérés az első megjelenítéskor
+
+A régi `window.__I18N__` olvasási útvonal **megszűnt**.
+
+### Az átirányítási architektúra szétválasztása {#redirect-architecture-split}
+
+Az átirányítások most környezetspecifikusak a világosabb működés és a kevesebb kliensoldali akadozás érdekében:
+
+| Környezet    | Komponens                      | Szerep                                       |
+| -------------- | ------------------------------ | ------------------------------------------ |
+| **Szerver SSR** | `06.redirect.ts` (csak szerver) | 302 renderelés előtt, 404-ellenőrzések, süti-szinkronizálás |
+| **Kliens SPA** | `i18n-redirect.global.ts`      | Globális route middleware navigáláskor      |
+
+A kliensoldali átirányítások a **célútvonalból** határozzák meg a locale-t, megőrzik a **lekérdezési karakterláncot és a hasht**, és tiszteletben tartják a `redirects: false` beállítást (ilyenkor a middleware nincs regisztrálva). Lásd: [Locale-felismerés — átirányítások stratégiánként](/hu/guide/locale-detection#redirects-per-strategy).
+
+### Az `i18n:register` hook időzítése {#i18nregister-hook-timing}
+
+Az **`05.hooks`** plugin (`dependsOn: i18n-plugin-loader`) azután váltja ki az `i18n:register` eseményt, hogy a loader elkészült — indításkor és navigáláskor is —, így a felhasználói pluginok megbízhatóan megkapják az eseményt. A `hooks: false` beállítással kikapcsolható. Lásd: [Események](/hu/api/events).
+
+### Build idejű `defineI18nRoute` kinyerés {#build-time-definei18nroute-extraction}
+
+Egy Vite unplugin build időben átvizsgálja az oldalak `.vue` fájljait, és útvonal-metaadatokat ír a `@i18n-micro/route-strategy` számára. A futásidejű `$defineI18nRoute` a `script setup` blokkban továbbra is megmarad fejlesztéshez és inline konfigurációhoz. Lásd: [Komponensenkénti fordítások](/hu/guide/per-component-translations).
+
+## Hibajavítások {#bug-fixes}
+
+- **SSR-hidratálás** — a reaktív SSR-chunkok klónozása az `Object.freeze` előtt (javítja a kliensoldali `#locale` / 404 összeomlásokat)
+- **Locale-váltás** — a nézetréteg cseréje locale-váltáskor (nincsenek elavult kulcsok az előző locale-ból)
+- **Kliensoldali átirányítás** — a locale a célútvonalból származik; a lekérdezés/hash átirányításkor megmarad
+- **`has()`** — csak az aktív locale-t ellenőrzi; a tartalék a `$t()` hívásban érvényes, a `$has()` hívásban nem
+- **`defineI18nRoute` meta** — plugin-példányonkénti gyorsítótár; a leghosszabb `rootDir` egyezés; helyes `pages/index` és `pages/index/index` útvonalak
+
+## Dokumentáció {#documentation}
+
+Az útmutatók és az API-referencia frissültek az új architektúrához:
+
+- [Stratégia](/hu/guide/strategy), [Frissítés v3-ra](https://s00d.github.io/nuxt-i18n-micro/v3/guide/v3-upgrade), [Egyéni nyelvfelismerés](/hu/guide/custom-auto-detect)
+- [GYIK — locale váltása az URL megváltoztatása nélkül](/hu/guide/faq#can-i-switch-locale-without-changing-the-url?)
+- [Konfiguráció](https://s00d.github.io/nuxt-i18n-micro/v3/guide/configuration) — a `redirects` és a `hooks` működése
+
+## Kompatibilitástörő változások {#breaking-changes}
+
+Nincsenek a szokásos `nuxt.config` + composable-ök használat esetén. A belső útvonalak és az SSR-befecskendezési mechanizmus megváltozott; azoknak az alkalmazásoknak, amelyek kézi `window.__I18N__` befecskendezésre támaszkodtak, helyette a Nuxt payloadot / a modul API-jait kell használniuk.
+
+## Miért fontos? {#why-it-matters}
+
+- **Megbízhatóbb SSR → kliens átadás** — Nuxt-natív állapot alkalmi globális változók helyett
+- **Világosabb átirányítási modell** — szerveroldali 302 a megjelenítés előtt; kliensoldali middleware csak ott, ahol szükséges
+- **Könnyebb karbantartás** — a futásidejű rész tesztelhető egységekre bontva, célzott regressziós tesztekkel
+
+A teljes changelog a kiadással együtt jelenik meg a [GitHubon](https://github.com/s00d/nuxt-i18n-micro/blob/main/CHANGELOG.md).
+
+---

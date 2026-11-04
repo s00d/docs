@@ -1,0 +1,66 @@
+---
+title: "v3.24.0 — `public/` からの Node SSR、Rollup `raw:` の廃止"
+description: "リリースノート：v3.24.0 — public/ からの Node SSR、Rollup raw: の廃止"
+---
+
+**日付**: 2026-07-30
+
+**バージョン**: `v3.24.0`
+
+![v3.24.0 リリース](/images/3.24.0.png)
+
+Node の本番ビルドでは、翻訳ペイロードを Nitro の `serverAssets` / Rollup の `raw:` として埋め込まなくなりました（大規模なカタログではビルド時の RSS が数 GB に達していました）。SSR は、クライアントが取得するのと同じ `/{apiBaseUrl}/{page}/{locale}/data.json` ツリーを、`public/` から `readFile` で読み取ります。Edge では引き続き Nitro への埋め込みを行い、`mode: 'source'` を優先すべきです。
+
+## 新機能 {#what’s-new}
+
+### Node：`public/<apiBaseUrl>` からの SSR {#node-ssr-from-public/&lt;apibaseurl&gt;}
+
+- ディスク上の `public/` を配信する Node プリセットでは、Nitro の `serverAssets` を登録**しません**。
+- ペイロードは `public/<apiBaseUrl>`（デフォルトは `_locales`）に `{page}/{locale}/data.json` としてコピーされます。
+- SSR は `#i18n-internal/payload-source` → `readFile` を通じてそれらを読み込みます（本番環境のパスは `.output/server` の隣）。
+- `translationPayloads.serverAssets: true` は引き続き「ローカル SSR」を意味し、`publicAssets` が false であってもそのパブリックコピーを**強制**します。
+
+Playground（以前の `serverAssets` 埋め込みとの比較）：約 **1.25 GB** / 約 6〜7 秒 / `raw`=0 に対し、以前は約 **3 GB** / 約 13 秒 / 約 170 個の raw チャンク。
+
+### Edge：必要な場合のみ `serverAssets` {#edge-serverassets-only-when-needed}
+
+- Edge（`nitro.node === false`）では、引き続き Nitro の `serverAssets`（`assets:i18n`）を介して、`mode` と同じレイアウトで埋め込みます。
+- Edge ではパブリックコピーを強制**しません** — CDN／静的配信には `publicAssets: true` を設定してください。
+- Edge + `mode: 'premerged'` の場合に警告します（大規模なカタログでは `mode: 'source'` を推奨）。
+
+### `publicDir` がクライアントの URL と一致 {#publicdir-aligns-with-client-urls}
+
+- `translationPayloads.publicDir` のデフォルトは（`translationDir` ではなく）**`apiBaseUrl`** になりました。
+- プリマージされたパブリック／Edge のツリーは `{page}/{locale}/data.json` で、`$fetch('/_locales/...')` と一致します。
+- モジュールのデフォルトでは、ネストされた `publicAssets: true` を設定しなくなりました（Nuxt のディープマージにより、`mode: 'source'` の場合でもパブリックコピーが強制されていました）。
+
+[モジュールオプション — `translationPayloads`](/ja-jp/api/module-options#translationpayloads)、[デプロイ — サーバーレスと Edge](/ja-jp/guide/deployment#serverless-and-edge)、および [Cache & Storage Architecture](https://s00d.github.io/nuxt-i18n-micro/v3/api/i18n-cache-api) を参照してください。
+
+## 破壊的変更 {#breaking-changes}
+
+- **Nuxt の SSR HTML ペイロードに辞書が含まれなくなりました。** `payload.data['i18n-ssr-chunks']`、`setSsrChunk`、`seedFromSsrChunks` は**削除**されました。デフォルトの方針は `@nuxtjs/i18n`（`experimental.preload: false`）と同じです：サーバーは SSR のために翻訳をメモリに保持し、クライアントはプラグインのセットアップ中（`await switchContext`）に `/{apiBaseUrl}/.../data.json` を読み込みます。
+- **`prerenderRoutes` のデフォルトが `false` になりました。** `publicAssets` がまだツリーを書き出していない場合に、Nitro にハンドラールートを実体化させる必要があるときのみオプトインしてください（プリマージの `publicAssets` はすでに `{page}/{locale}/data.json` を出力します）。
+- **`publicDir` のデフォルトは `translationDir` ではなく `apiBaseUrl` です。** `publicDir` を明示的に設定しない限り、静的出力は例えば `public/locales/...` から `public/_locales/{page}/{locale}/data.json` に移動します。
+- **プリマージのストレージレイアウト**が `{page}/{locale}/data.json` になりました（以前は `pages/{page}/{locale}.json`）。Nitro／ストレージのキーを読み取ったり、古い形でツリーをコピーしたりしていたものは更新が必要です。
+- **Node では、`serverAssets: true` は Nitro への埋め込みを意味しなくなりました** — パブリックコピーを介したローカル SSR を意味します。本来の Rollup `raw:` 埋め込みは Edge 専用のままです。
+
+## 移行 {#migration}
+
+1. `payload.data['i18n-ssr-chunks']` を読み取っていたり、`seedFromSsrChunks` / `setSsrChunk` を呼び出していたりするコードを削除します。
+2. 純粋な静的ホストの場合：デフォルトのプリマージ + `publicAssets` のままにする（ファイルは `/_locales/.../data.json` に配置されます）か、`prerenderRoutes: true` を設定する／ペイロードを CDN でホストします。
+3. Cloudflare やその他の Edge の場合：大規模なカタログでは `translationPayloads: { mode: 'source' }` を設定します。静的／CDN コピーが必要な場合のみ `publicAssets: true` を追加します。
+4. `public/<translationDir>` 配下のペイロードに依存していた場合は、`translationPayloads.publicDir` を設定するか、ツールの参照先を `public/<apiBaseUrl>` に変更します。
+
+## 修正：プリマージされたパブリックペイロードで無効なロケールをスキップ {#fix-skip-disabled-locales-in-premerged-public-payloads}
+
+`preMergeLocales` は、マージに渡されたロケールについてのみ `{page}/{locale}/data.json` を書き出すようになりました（ビルド時に `locale.disabled: true` のものは除外されます）。以前はディスク上のすべての JSON ロケールが `public/` にコピーされていたため、Nitro の静的配信が無効なロケールを 200 で返し、ハンドラーをバイパスしていました。ランタイムの `disabledLocales` では、すでにビルドされたファイルの公開を取り消すことはできません — `publicAssets` / Node のパブリック SSR コピーが有効な場合は、ビルド時に `locale.disabled` を使用してください。
+
+## なぜ重要なのか {#why-it-matters}
+
+- Node のビルドが軽量に保たれます：翻訳カタログによって Rollup `raw:` が数 GB に急増することはありません。
+- パブリックファイルとクライアントの `$fetch` の URL が同じパスレイアウトを共有します — 特別なリマップなしで静的ホスティングが機能します。
+- Edge では、重複したパブリックツリーを強制することなく、コンパクトな `source` ペイロードを引き続き埋め込めます。
+
+完全な変更履歴は、リリース時に [GitHub](https://github.com/s00d/nuxt-i18n-micro/blob/main/CHANGELOG.md) で公開されます。
+
+---

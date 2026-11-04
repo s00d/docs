@@ -1,0 +1,139 @@
+---
+title: "Deteksi locale"
+description: "Bagaimana locale dipilih untuk sebuah halaman atau request API: URL, query, state, cookie, Accept-Language dan default, serta kapan pengunjung di-redirect."
+---
+
+Setiap request mendapatkan satu locale, yang dipilih dari daftar sumber yang sama dengan urutan yang sama di server maupun di browser. Baca halaman ini ketika Anda menentukan bagaimana pengunjung pertama kali mendarat pada sebuah bahasa, apakah pilihan mereka diingat, dan apa yang dilihat oleh API server Anda. Anda akan mendapatkan urutan prioritas, redirect yang dibuat oleh setiap strategi, serta opsi untuk mengaktifkan atau menonaktifkan setiap sumber.
+
+<Tip>
+
+**Prasyarat** — [Strategi routing](/id/guide/strategy)
+
+</Tip>
+
+## Urutan prioritas {#the-precedence}
+
+Sumber pertama yang menyebut locale yang **diaktifkan** akan menang. Nilai yang tidak valid atau rusak (kode yang tidak dikenal, cookie yang rusak) dilewati dan sumber berikutnya yang dihitung.
+
+| # | Sumber | Dihitung ketika |
+| --- | --- | --- |
+| 1 | Prefiks URL (`/de/about`) | strategi berprefiks. Di bawah `prefix_except_default` dan `prefix_and_default`, URL tanpa prefiks adalah locale default |
+| 2 | `?locale=de` | halaman: hanya `no_prefix`. Helper API server: selalu, dan sebelum URL |
+| 3 | State locale yang diatur oleh aplikasi (`useI18nLocale().setLocale()`) | URL tidak memiliki locale |
+| 4 | Cookie | [`localeCookie`](/id/api/module-options#localecookie) diatur (`'user-locale'` secara otomatis di bawah `no_prefix`) |
+| 5 | Header `Accept-Language` | [`autoDetectLanguage`](/id/api/module-options#autodetectlanguage) bernilai `true` (default) |
+| 6 | [`defaultLocale`](/id/api/module-options#defaultlocale) | selalu |
+
+Jadi di bawah strategi berprefiks, URL menentukan apa yang ditampilkan halaman; sumber preferensi (3–5) hanya menentukan ke mana pengunjung **di-redirect**, dan hanya pada path yang diizinkan oleh `autoDetectPath`. Di bawah `no_prefix` tidak ada yang perlu di-redirect, dan sumber preferensi menentukan apa yang ditampilkan halaman.
+
+![Decision flow: a locale prefix in the URL renders that locale. Without one, no_prefix renders from the preference sources, prefix_and_default renders the default locale, and prefix or prefix_except_default redirect by preference when autoDetectPath allows the path](/images/diagrams/locale-detection.svg)
+
+## Redirect per strategi {#redirects-per-strategy}
+
+Redirect berupa `302`, dibuat di server sebelum halaman dirender, dan oleh route middleware untuk navigasi di klien. Query dan hash dipertahankan. Dengan [`redirects: false`](/id/api/module-options#redirects) tidak ada redirect yang terjadi; prefiks yang salah tetap menghasilkan 404.
+
+Pengunjung lebih memilih `de` (cookie atau header), `defaultLocale: 'en'`, `autoDetectPath: '/'` default:
+
+| Request | `prefix_except_default` | `prefix` | `prefix_and_default` | `no_prefix` |
+| --- | --- | --- | --- | --- |
+| `/` | → `/de` | → `/de` | `/` dalam `en` | `/` dalam `de` |
+| `/about` | `/about` dalam `en` | → `/de/about` | `/about` dalam `en` | `/about` dalam `de` |
+| `/fr/about` | `/fr/about` | `/fr/about` | `/fr/about` | — |
+| `/en/about` | 404 | `/en/about` | `/en/about` | — |
+
+`prefix_and_default` tidak pernah melakukan redirect: URL tanpa prefiks milik locale default, dan locale lain berada di bawah prefiksnya masing-masing. Pengunjung yang lebih memilih `en` tidak di-redirect dari `/` di bawah `prefix_except_default`. Target redirect tidak memiliki garis miring di akhir (`/de`, bukan `/de/`) dan mengikuti path kustom (`/about` → `/de/ueber-uns`).
+
+Di mana pun cookie atau header yang menentukan (redirect dari `/`, setiap halaman di bawah `no_prefix`), respons membawa `Vary: Cookie, Accept-Language`, sehingga CDN menyimpan jawaban-jawaban tersebut secara terpisah.
+
+### `autoDetectPath` {#autodetectpath}
+
+Ke mana sumber preferensi boleh memindahkan pengunjung:
+
+| Nilai | Preferensi dihitung pada |
+| --- | --- |
+| `'/'` (default) | hanya `/`. Deep link tetap dalam bahasa URL |
+| `'no_prefix'` | setiap path tanpa prefiks locale (`/about` → `/de/about`) |
+| `'/welcome'` | path persis tersebut (garis miring di akhir diabaikan) |
+| `'*'` | setiap path, termasuk yang berprefiks: `/about` dan `/fr/about` → `/de/about` ketika pengunjung lebih memilih `de` |
+
+- Pada path yang tidak diizinkan, URL tanpa prefiks diperlakukan sebagai locale default.
+- `prefix` adalah pengecualian: strategi ini tidak memiliki halaman tanpa prefiks, sehingga `/about` selalu menuju locale pengunjung (`/de/about` dengan cookie `de`, `/en/about` tanpa preferensi).
+- Dengan `'*'` server mengabaikan state aplikasi, dan URL berprefiks tidak lagi mencatat locale-nya sendiri di cookie; cookie berubah ketika pengunjung berpindah dengan `$switchLocale`.
+
+<Warning>
+
+Dengan `'*'`, tautan yang dibagikan akan terbuka dalam bahasa pembaca, yang bisa mengejutkan. Pilih `'/'` atau `'no_prefix'` kecuali memang itu yang Anda inginkan.
+
+</Warning>
+
+## Accept-Language {#accept-language}
+
+Header dibaca sesuai definisi RFC 9110 dan dicocokkan dengan **kode** locale di konfigurasi Anda:
+
+- Entri dicoba berdasarkan nilai `q`, dari yang tertinggi (`fr;q=0.1, de;q=0.9` → `de`). `q=0` berarti "bukan bahasa ini"; entri dengan `q` yang rusak diabaikan. `*` tidak cocok dengan apa pun.
+- `_` dibaca sebagai `-` (`en_US` = `en-US`).
+- Per entri: kode persis, lalu bentuk yang lebih pendek (`de-AT` → `de`), lalu locale regional dari bahasa yang sama (`en` → `en-US`). Kode persis dan bentuk yang lebih pendek tidak bergantung pada urutan `locales`; di antara beberapa kecocokan regional, yang pertama di `locales` menang.
+- Aksara tidak pernah disilangkan: `zh-TW` dan `zh-HK` menyiratkan Tradisional, `zh-CN` Sederhana, sehingga `zh-CN` tidak pernah cocok dengan locale `zh-Hant`.
+- Locale yang dinonaktifkan tidak pernah cocok.
+
+```ts
+// locales: [{ code: 'en' }, { code: 'de' }, { code: 'zh-Hant' }]
+// 'de-CH,de;q=0.9,en;q=0.8'  → 'de'
+// 'en-GB'                    → 'en'
+// 'zh-TW'                    → 'zh-Hant'
+// 'zh-CN'                    → no match, next source
+```
+
+Nonaktifkan deteksi header dengan `autoDetectLanguage: false`; cookie dan state tetap dihitung.
+
+## Cookie {#the-cookie}
+
+- **Nonaktif secara default** untuk strategi berprefiks (`localeCookie: null`). Redirect kemudian hanya bekerja dari header, dan pilihan tidak diingat antarkunjungan. Atur `localeCookie: 'user-locale'` untuk mengingatnya.
+- Di bawah `no_prefix` nilainya `'user-locale'` kecuali Anda mengatur nama lain. `localeCookie: null` juga menonaktifkannya di sana.
+- Cookie ditulis ketika pengunjung berpindah (`$switchLocale`, `<i18n-switcher>`, `useI18nLocale().setLocale()`), dan saat render server untuk halaman di bawah sebuah prefiks (`/fr/about` menyimpan `fr`; tidak di bawah `autoDetectPath: '*'` dengan redirect aktif, di mana URL masih bisa berpindah). Navigasi klien ke sebuah halaman juga menyimpan locale halaman tersebut, termasuk pada halaman tanpa prefiks dari locale default; pemuatan pertama URL tersebut tidak. Di bawah `no_prefix` dan dalam mode hash, navigasi hanya menyimpan perubahan. Halaman 404 tidak menyimpan apa pun, kecuali `$switchLocale` mendarat di sana.
+- Cookie berlaku selama satu tahun (`path=/`, `SameSite=Lax`).
+- Di bawah `hashMode` preferensi disimpan di cookie `hash-locale`; server dan klien membaca cookie yang sama. Server merender locale tersebut dan, di luar `prefix`, tidak pernah melakukan redirect; locale di hash (`/#/de`) mengalahkannya dan diterapkan tepat setelah hidrasi. Di bawah `prefix` tidak ada halaman di `/`, sehingga `/` dirender di browser, yang menuju `/#/de` berdasarkan cookie, lalu bahasa browser (`autoDetectLanguage`); dokumen lain mana pun (`/about`, `/de`) di-redirect ke dalam hash.
+
+Baca dan atur preferensi dengan [`useI18nLocale`](/id/composables/useI18nLocale), bukan dengan `useCookie` atau `useState` secara langsung.
+
+## Deteksi Anda sendiri {#your-own-detection}
+
+Untuk memilih locale sendiri (pengaturan pengguna, subdomain), panggil `useI18nLocale().setLocale(code)` di plugin yang berjalan sebelum plugin modul. Ini menjadi sumber 3, yaitu state aplikasi. [Deteksi locale kustom](/id/guide/custom-auto-detect) berisi resep lengkapnya, termasuk cara menonaktifkan deteksi bawaan.
+
+## Rute API server {#server-api-routes}
+
+[`useLocaleServerMiddleware`](/id/guide/server-side-translations) dan `useTranslationServerMiddleware` menggunakan urutannya sendiri, karena URL API jarang dilokalkan:
+
+1. `?locale=`
+2. parameter rute `[locale]`, atau prefiks locale di path
+3. cookie (ketika `localeCookie` diatur)
+4. `Accept-Language` (ketika `autoDetectLanguage` aktif)
+5. `defaultLocale`
+
+`localeCookie: null` dan `autoDetectLanguage: false` juga menonaktifkan sumber 3 dan 4 di sini.
+
+## Override runtime {#runtime-overrides}
+
+[Override runtime](/id/guide/runtime-overrides) mengubah daftar yang dicocokkan dengan sumber-sumber tersebut:
+
+- `disabledLocales` runtime dihapus dari setiap langkah: cookie atau header yang menyebut salah satunya dilewati.
+- `defaultLocale` runtime menjadi langkah 6 di bawah `prefix` dan `no_prefix`.
+- Di bawah `prefix_except_default` dan `prefix_and_default`, locale default ditetapkan saat build (halamannya adalah rute tanpa prefiks). `defaultLocale` runtime, atau menonaktifkan default build, diabaikan dengan peringatan.
+
+## Terkait {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Deteksi locale kustom" icon="book-open" href="/id/guide/custom-auto-detect">
+
+</Card>
+
+<Card title="Rute server dan API" icon="book-open" href="/id/guide/server-side-translations">
+
+</Card>
+
+<Card title="useI18nLocale" icon="brackets-curly" href="/id/composables/useI18nLocale">
+
+</Card>
+
+</CardGroup>

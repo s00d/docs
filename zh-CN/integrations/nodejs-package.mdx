@@ -1,0 +1,131 @@
+---
+title: "Node.js"
+description: "使用 @i18n-micro/node 从磁盘加载翻译文件，并在 Node.js 服务器、脚本和 CLI 中进行翻译。"
+---
+
+`@i18n-micro/node` 是 [runtime](/zh-CN/integrations/runtime-package) 实例加上一个从磁盘读取翻译文件夹的加载器。可以在 Express 或 Fastify 服务器、CLI、邮件或 PDF 生成器，或任何需要与 Nuxt 应用使用相同 JSON 文件的脚本中使用它。文件只需加载一次，即可按请求进行翻译，且请求之间不共享可变状态。
+
+## 安装 {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add @i18n-micro/node @i18n-micro/utils
+```
+
+```bash npm
+npm install @i18n-micro/node @i18n-micro/utils
+```
+
+```bash yarn
+yarn add @i18n-micro/node @i18n-micro/utils
+```
+
+</CodeGroup>
+
+没有 peer 依赖；要求 Node.js `>=20`。只有使用下文的 `Accept-Language` 辅助函数时才需要 `@i18n-micro/utils`。
+
+## 设置 {#setup}
+
+加载器读取 [Nuxt 文件夹结构](/zh-CN/guide/translations)：`locales/en.json` 是根词典，`locales/pages/blog/post/en.json` 属于路由 `blog-post`。
+
+```ts
+import { createI18n } from '@i18n-micro/node'
+
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', translationDir: './locales' })
+await i18n.loadTranslations()
+
+i18n.t('greeting', { name: 'Ada' }) // 'Hello, Ada!'
+i18n.t('title', undefined, undefined, 'blog-post') // from locales/pages/blog/post/en.json
+```
+
+选项包括 runtime 的选项（参见[实例](/zh-CN/integrations/overview#the-instance)），以及 `translationDir` 和 `disablePageLocales`（将 `pages/**` 文件视为根词典）。`i18n.reload()` 会清空所有词典并重新读取文件夹，适合在开发环境中配合文件监听器使用。
+
+`loadTranslations(dir, disablePageLocales?)` 也被单独导出，返回 `{ root, routes }`：
+
+```ts
+import { loadTranslations } from '@i18n-micro/node'
+
+const { root, routes } = await loadTranslations('./locales')
+// root:   { en: {...}, de: {...} }
+// routes: { 'blog-post': { en: {...}, de: {...} } }
+```
+
+## 按请求处理 {#per-request}
+
+一个实例只持有一个语言环境和一个路由。在请求处理函数中切换共享实例的 `i18n.locale` 会与并发请求产生竞态。`run` 会为每个请求提供独立的实例：
+
+```ts
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', translationDir: './locales' })
+await i18n.loadTranslations()
+
+// `() => next()`: `run` hands its callback the fork, and Express reads an argument of `next` as an error
+app.use((req, res, next) => i18n.run(pickLocale(req), () => next()))
+
+app.get('/', (req, res) => {
+  res.send(i18n.t('greeting')) // the request's locale, in everything it awaits
+})
+```
+
+在 `run` 内部，共享实例会读取并设置该请求的语言环境和路由（`AsyncLocalStorage`）；分叉实例从当前路由开始，在回调中调用 `i18n.setRoute(...)` 会更改该请求的路由。回调还会收到该请求的分叉实例：写入分叉实例的词典只留在该请求中，写入共享实例的词典则对所有人可见。
+
+没有 `AsyncLocalStorage` 时，`i18n.fork(locale)` 会返回同类实例，供你自行传递。
+
+`reload()` 会重新读取目录；在新词典加载完成之前，旧词典仍会继续响应。
+
+## 选择语言环境 {#pick-the-locale}
+
+`detectLocaleFromAcceptLanguage(header, locales)` 会考虑 `q` 权重，并将 `de-DE` 匹配到 `de` 语言环境（以及将 `de` 匹配到 `de-DE`）。没有匹配时返回 `null`。
+
+```ts
+import express from 'express'
+import { detectLocaleFromAcceptLanguage } from '@i18n-micro/utils/accept-language'
+
+const app = express()
+
+app.get('/hello', (req, res) => {
+  const locale = detectLocaleFromAcceptLanguage(req.headers['accept-language'], locales) ?? 'en'
+  const i18n = byLocale.get(locale)!
+  res.json({ message: i18n.t('greeting', { name: 'Ada' }) })
+})
+```
+
+如需同时考虑 URL 前缀、cookie 和请求头，可使用 `@i18n-micro/utils/resolve-locale` 中的 `resolveLocale({ defaultLocale, validLocales, url, cookie, acceptLanguage, autoDetectLanguage: true })`，它采用与模块相同的优先级：先 URL，再 cookie，然后 `Accept-Language`，最后是默认值。无效值会被跳过。
+
+在 Nuxt 应用中，服务端不需要这个包：请使用模块的[服务端翻译](/zh-CN/guide/server-side-translations)。
+
+## API {#api}
+
+| 导出 | 说明 |
+| --- | --- |
+| `createI18n(options)`, `I18n` | runtime 实例 + `translationDir`、`loadTranslations(dir?)`、`reload()` |
+| `loadTranslations(dir, disablePageLocales?)` | `{ root, routes }` |
+| `loadRootTranslations(dir, disablePageLocales?)` | 仅 `root` |
+| `FormatService`, `interpolate` | 来自 core |
+| 类型：`I18nOptions`, `LoadedTranslations`, `Translations`, `Locale`, `PluralFunc`, `Params` | |
+
+实例方法列在 [Runtime](/zh-CN/integrations/runtime-package#api) 页面中。完整签名：[包参考](/zh-CN/api/packages/node)。
+
+## 相关内容 {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Runtime" icon="book-open" href="/zh-CN/integrations/runtime-package">
+
+不依赖 `fs` 的实例
+
+</Card>
+
+<Card title="翻译" icon="book-open" href="/zh-CN/guide/translations">
+
+文件夹结构
+
+</Card>
+
+<Card title="语言环境检测" icon="book-open" href="/zh-CN/guide/locale-detection">
+
+Nuxt 模块中的优先级
+
+</Card>
+
+</CardGroup>

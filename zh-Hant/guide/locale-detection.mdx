@@ -1,0 +1,139 @@
+---
+title: "Locale 偵測"
+description: "如何為頁面或 API 請求選擇 locale：URL、查詢參數、狀態、cookie、Accept-Language 與預設值，以及訪客何時會被重新導向。"
+---
+
+每個請求都會取得一個 locale，伺服器與瀏覽器會以相同的順序從同一份來源清單中選出。當你要決定首次造訪者會進入哪種語言、是否記住他們的選擇，以及你的伺服器 API 會看到什麼時，請閱讀本頁。你將了解優先順序、每種策略的重新導向行為，以及開啟或關閉各個來源的選項。
+
+<Tip>
+
+**先備知識** — [路由策略](/zh-Hant/guide/strategy)
+
+</Tip>
+
+## 優先順序 {#the-precedence}
+
+第一個指定了**已啟用** locale 的來源勝出。無效或格式錯誤的值（未知的代碼、損壞的 cookie）會被略過，改由下一個來源決定。
+
+| # | 來源 | 生效條件 |
+| --- | --- | --- |
+| 1 | URL 前綴（`/de/about`） | 前綴類策略。在 `prefix_except_default` 與 `prefix_and_default` 下，無前綴的 URL 即為預設 locale |
+| 2 | `?locale=de` | 頁面：僅限 `no_prefix`。伺服器 API 輔助函式：一律生效，且優先於 URL |
+| 3 | 由應用程式設定的 locale 狀態（`useI18nLocale().setLocale()`） | URL 中沒有 locale |
+| 4 | Cookie | 已設定 [`localeCookie`](/zh-Hant/api/module-options#localecookie)（在 `no_prefix` 下自動為 `'user-locale'`） |
+| 5 | `Accept-Language` 標頭 | [`autoDetectLanguage`](/zh-Hant/api/module-options#autodetectlanguage) 為 `true`（預設） |
+| 6 | [`defaultLocale`](/zh-Hant/api/module-options#defaultlocale) | 一律生效 |
+
+因此，在前綴類策略下，由 URL 決定頁面顯示的內容；偏好來源（3–5）只決定訪客會被**重新導向**到何處，而且只在 `autoDetectPath` 允許的路徑上生效。在 `no_prefix` 下沒有可重新導向的目標，由偏好來源決定頁面顯示的內容。
+
+![決策流程：URL 中有 locale 前綴時以該 locale 渲染。沒有前綴時，no_prefix 依偏好來源渲染，prefix_and_default 以預設 locale 渲染，而 prefix 或 prefix_except_default 在 autoDetectPath 允許該路徑時依偏好重新導向](/images/diagrams/locale-detection.svg)
+
+## 各策略的重新導向 {#redirects-per-strategy}
+
+重新導向為 `302`，在頁面渲染前由伺服器執行，用戶端導覽時則由路由 middleware 執行。查詢參數與 hash 會被保留。設定 [`redirects: false`](/zh-Hant/api/module-options#redirects) 時不會發生任何重新導向；錯誤的前綴仍會回傳 404。
+
+訪客偏好 `de`（cookie 或標頭）、`defaultLocale: 'en'`、預設 `autoDetectPath: '/'`：
+
+| 請求 | `prefix_except_default` | `prefix` | `prefix_and_default` | `no_prefix` |
+| --- | --- | --- | --- | --- |
+| `/` | → `/de` | → `/de` | `/` 以 `en` 顯示 | `/` 以 `de` 顯示 |
+| `/about` | `/about` 以 `en` 顯示 | → `/de/about` | `/about` 以 `en` 顯示 | `/about` 以 `de` 顯示 |
+| `/fr/about` | `/fr/about` | `/fr/about` | `/fr/about` | — |
+| `/en/about` | 404 | `/en/about` | `/en/about` | — |
+
+`prefix_and_default` 永遠不會重新導向：無前綴的 URL 屬於預設 locale，其他 locale 則位於各自的前綴之下。在 `prefix_except_default` 下，偏好 `en` 的訪客不會從 `/` 被重新導向。目標 URL 不含結尾斜線（是 `/de`，不是 `/de/`），並會遵循自訂路徑（`/about` → `/de/ueber-uns`）。
+
+凡是由 cookie 或標頭決定的情況（從 `/` 的重新導向、`no_prefix` 下的每個頁面），回應都會帶有 `Vary: Cookie, Accept-Language`，讓 CDN 能區分不同的回應。
+
+### `autoDetectPath` {#autodetectpath}
+
+偏好來源可以將訪客導向何處：
+
+| 值 | 偏好生效的位置 |
+| --- | --- |
+| `'/'`（預設） | 僅限 `/`。深層連結會維持 URL 的語言 |
+| `'no_prefix'` | 所有沒有 locale 前綴的路徑（`/about` → `/de/about`） |
+| `'/welcome'` | 該確切路徑（結尾斜線會被忽略） |
+| `'*'` | 所有路徑，包含帶前綴的路徑：當訪客偏好 `de` 時，`/about` 與 `/fr/about` → `/de/about` |
+
+- 在不允許的路徑上，無前綴的 URL 會被視為預設 locale。
+- `prefix` 是例外：它沒有無前綴的頁面，因此 `/about` 一律前往訪客的 locale（cookie 為 `de` 時是 `/de/about`，沒有偏好時是 `/en/about`）。
+- 使用 `'*'` 時，伺服器會忽略應用程式的狀態，且帶前綴的 URL 不再將自身的 locale 記錄到 cookie 中；cookie 只會在訪客透過 `$switchLocale` 切換時改變。
+
+<Warning>
+
+使用 `'*'` 時，分享的連結會以讀者的語言開啟，這可能令人意外。除非這正是你想要的，否則建議使用 `'/'` 或 `'no_prefix'`。
+
+</Warning>
+
+## Accept-Language {#accept-language}
+
+此標頭依照 RFC 9110 的定義進行解析，並與設定中的 locale **代碼**進行比對：
+
+- 項目依 `q` 值由高至低嘗試（`fr;q=0.1, de;q=0.9` → `de`）。`q=0` 表示「不要這種語言」；`q` 格式錯誤的項目會被忽略。`*` 不符合任何項目。
+- `_` 會被視為 `-`（`en_US` = `en-US`）。
+- 每個項目依序比對：完全相同的代碼，接著是較短的形式（`de-AT` → `de`），再來是同一語言的地區 locale（`en` → `en-US`）。完全相符與較短形式的比對不受 `locales` 順序影響；若有多個地區 locale 相符，則以 `locales` 中的第一個為準。
+- 絕不跨越書寫系統：`zh-TW` 與 `zh-HK` 代表繁體，`zh-CN` 代表簡體，因此 `zh-CN` 永遠不會符合 `zh-Hant` locale。
+- 已停用的 locale 永遠不會符合。
+
+```ts
+// locales: [{ code: 'en' }, { code: 'de' }, { code: 'zh-Hant' }]
+// 'de-CH,de;q=0.9,en;q=0.8'  → 'de'
+// 'en-GB'                    → 'en'
+// 'zh-TW'                    → 'zh-Hant'
+// 'zh-CN'                    → no match, next source
+```
+
+使用 `autoDetectLanguage: false` 可關閉標頭偵測；cookie 與狀態仍然有效。
+
+## Cookie {#the-cookie}
+
+- 前綴類策略**預設關閉**（`localeCookie: null`）。此時重新導向僅依據標頭運作，且選擇不會在多次造訪之間被記住。設定 `localeCookie: 'user-locale'` 即可記住選擇。
+- 在 `no_prefix` 下，除非你設定其他名稱，否則它為 `'user-locale'`。在該策略下，`localeCookie: null` 同樣會將其關閉。
+- 它會在訪客切換時寫入（`$switchLocale`、`<i18n-switcher>`、`useI18nLocale().setLocale()`），也會在伺服器渲染帶前綴的頁面時寫入（`/fr/about` 會儲存 `fr`；但在啟用重新導向且 `autoDetectPath: '*'` 時不會，因為此時 URL 仍可能改變）。用戶端導覽至某頁面時也會儲存該頁面的 locale，包括預設 locale 的無前綴頁面；但首次載入該 URL 時則不會。在 `no_prefix` 與 hash 模式下，導覽只會儲存變更。404 不會儲存任何內容，除非是 `$switchLocale` 導向該頁面。
+- 有效期限為一年（`path=/`、`SameSite=Lax`）。
+- 在 `hashMode` 下，偏好改存於 `hash-locale` cookie；伺服器與用戶端讀取的是同一個 cookie。伺服器會以該 locale 渲染，且在 `prefix` 以外永遠不會重新導向；hash 中的 locale（`/#/de`）優先於它，並會在 hydration 後立即套用。在 `prefix` 下 `/` 沒有頁面，因此 `/` 會在瀏覽器中渲染，並依 cookie、再依瀏覽器語言（`autoDetectLanguage`）前往 `/#/de`；其他任何文件（`/about`、`/de`）都會重新導向至 hash 中。
+
+請使用 [`useI18nLocale`](/zh-Hant/composables/useI18nLocale) 讀取與設定偏好，而不要直接使用 `useCookie` 或 `useState`。
+
+## 自訂偵測 {#your-own-detection}
+
+若要自行選擇 locale（使用者設定、子網域），請在一個早於模組外掛執行的外掛中呼叫 `useI18nLocale().setLocale(code)`。它會成為來源 3，即應用程式的狀態。[自訂 locale 偵測](/zh-Hant/guide/custom-auto-detect)提供完整做法，包括如何關閉內建偵測。
+
+## 伺服器 API 路由 {#server-api-routes}
+
+[`useLocaleServerMiddleware`](/zh-Hant/guide/server-side-translations) 與 `useTranslationServerMiddleware` 使用自己的順序，因為 API URL 很少會被在地化：
+
+1. `?locale=`
+2. `[locale]` 路由參數，或路徑中的 locale 前綴
+3. cookie（已設定 `localeCookie` 時）
+4. `Accept-Language`（啟用 `autoDetectLanguage` 時）
+5. `defaultLocale`
+
+`localeCookie: null` 與 `autoDetectLanguage: false` 在這裡同樣會關閉來源 3 與 4。
+
+## 執行階段覆寫 {#runtime-overrides}
+
+[執行階段覆寫](/zh-Hant/guide/runtime-overrides)會改變來源所比對的清單：
+
+- 執行階段的 `disabledLocales` 會從每個步驟中移除：指定這些 locale 的 cookie 或標頭會被略過。
+- 在 `prefix` 與 `no_prefix` 下，執行階段的 `defaultLocale` 即為步驟 6。
+- 在 `prefix_except_default` 與 `prefix_and_default` 下，預設 locale 在建置時即已固定（其頁面就是無前綴的路由）。執行階段的 `defaultLocale`，或停用建置時的預設 locale，都會被忽略並顯示警告。
+
+## 相關內容 {#related}
+
+<CardGroup cols={2}>
+
+<Card title="自訂 locale 偵測" icon="book-open" href="/zh-Hant/guide/custom-auto-detect">
+
+</Card>
+
+<Card title="伺服器路由與 API" icon="book-open" href="/zh-Hant/guide/server-side-translations">
+
+</Card>
+
+<Card title="useI18nLocale" icon="brackets-curly" href="/zh-Hant/composables/useI18nLocale">
+
+</Card>
+
+</CardGroup>

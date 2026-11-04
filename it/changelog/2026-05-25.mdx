@@ -1,0 +1,95 @@
+---
+title: "v3.19.0 — Pacchetti Utils e HMR, modalità payload source"
+description: "Note di rilascio: v3.19.0 — Pacchetti Utils e HMR, modalità payload source"
+---
+
+**Data**: 2026-05-25
+
+**Versione**: `v3.19.0`
+
+![Rilascio v3.19.0](/images/3.19.0.png)
+
+Questo rilascio si concentra sulla **modularizzazione delle utility interne**, sull'aggiunta di una **modalità payload compatta per il serverless** e sul **riutilizzo della logica condivisa** tra Nuxt, Node, Astro e DevTools, senza modificare l'API pubblica del modulo per le app tipiche.
+
+## Novità {#what’s-new}
+
+### `@i18n-micro/utils` — Utility indipendenti dal framework {#@i18n-micro/utils-—-framework-agnostic-utilities}
+
+La logica condivisa, prima sparsa tra `src/runtime/utils/` e `src/module.ts`, ora risiede in un pacchetto workspace dedicato con **import granulari per subpath** (nessun barrel file monolitico, compatibile con il tree-shaking):
+
+- **Build** — `preMergeLocales`, `buildTranslationSourceLayers` (`@i18n-micro/utils/build`)
+- **Payload** — risoluzione di `translationPayloads`, costruzione degli URL, helper di fetch, statistiche (`payload-config`, `payload-url`, `payload-fetch`, `payload-stats`)
+- **Modalità source** — catene di fallback, percorsi dei file sorgente, merge a runtime (`merge-source`, `source-loader`)
+- **Helper di runtime** — risoluzione della locale, cookie, parsing di Accept-Language, helper per route/meta (`resolve-locale`, `accept-language`, `cookie`, `route`, `route-pattern`, `runtime-config`)
+- **Percorsi FS condivisi** — classificazione dei file di traduzione, percorsi delle pagine annidate (`parse-path`)
+
+Il modulo Nuxt mantiene un sottile strato di collegamento in `src/runtime/` e importa solo i subpath di cui ha bisogno.
+
+### `@i18n-micro/hmr` — Hot reload delle traduzioni in sviluppo {#@i18n-micro/hmr-—-dev-translation-hot-reload}
+
+L'HMR di sviluppo è stato estratto in `@i18n-micro/hmr`:
+
+- **`watcher`** — gestione delle modifiche ai file, invalidazione della cache, merge source/premerged in sviluppo
+- **`generate-plugin`** — generazione del plugin HMR lato client
+- **`cache-keys`** — chiavi `Symbol.for` condivise per le cache del server e dello storage
+
+Funziona sia con `translationPayloads.mode: 'premerged'` sia con `'source'`.
+
+### `translationPayloads.mode: 'source'` — Deployment serverless compatti {#translationpayloads-mode-‘source’-—-compact-serverless-deployments}
+
+Nuova modalità payload per matrici di locale di grandi dimensioni su piattaforme serverless (Cloudflare Workers, ecc.):
+
+```typescript
+export default defineNuxtConfig({
+  i18n: {
+    translationPayloads: {
+      mode: 'source',
+    },
+  },
+})
+```
+
+- Include nei bundle **file sorgente compatti** come asset di Nitro invece di una matrice completa pre-unita
+- Unisce le catene di locale root, di pagina e di fallback **a runtime** tramite la route integrata `/_locales/:page/:locale/data.json`
+- Imposta per default `publicAssets` e `prerenderRoutes` a `false`, ideale quando ti affidi a un runtime Nitro/edge anziché a un hosting puramente statico
+
+Vedi [Deployment — serverless ed Edge](/it/guide/deployment#serverless-and-edge) e [Architettura di cache e storage](https://s00d.github.io/nuxt-i18n-micro/v3/api/i18n-cache-api).
+
+### Utility condivise tra i pacchetti di integrazione {#shared-utilities-across-integration-packages}
+
+- **`@i18n-micro/node`** e **`@i18n-micro/astro`** — parsing dei percorsi delle traduzioni e deep merge unificati tramite `@i18n-micro/utils/parse-path`
+- **`@i18n-micro/astro`** — `detectLocaleFromAcceptLanguage` da `@i18n-micro/utils/accept-language` (rimosso il parser duplicato)
+- **`@i18n-micro/devtools-ui`** — percorsi dei file virtuali tramite gli helper `merge-source` + `parse-path`
+- **Rilevamento della locale sul server** — gestione di Accept-Language allineata alle utility condivise
+
+### Correzioni a HMR e DevTools {#hmr-&-devtools-fixes}
+
+- Il plugin HMR client ora chiama **`$loadPageTranslations`** (l'API corretta) invece del rimosso `$loadTranslations`
+- Copertura Playwright per il watcher delle traduzioni nelle modalità **premerged** e **source**
+
+### Documentazione e guida per i contributori {#documentation-&-contributor-guide}
+
+- [Architettura di cache e storage](https://s00d.github.io/nuxt-i18n-micro/v3/api/i18n-cache-api) — documenta entrambe le modalità payload e i confini tra i pacchetti
+- [Traduzioni lato server](/it/guide/server-side-translations), [Primi passi](/it/guide/getting-started), [Struttura delle cartelle](https://s00d.github.io/nuxt-i18n-micro/v3/guide/folder-structure) — avvertenze su `premerged` rispetto a `source`
+- [Guida per i contributori](https://s00d.github.io/nuxt-i18n-micro/v3/guide/contribution) — Node 18+, pnpm 9+, Oxlint/Oxfmt, struttura del monorepo con `packages/utils` e `packages/hmr`
+
+## Breaking change (avanzate / interne) {#breaking-changes-advanced-/-internal}
+
+Riguardano solo i progetti che importavano percorsi **interni** del modulo (non facenti parte dell'API pubblica):
+
+- Rimossi da `src/runtime/utils/`: `route-utils.ts`, `runtime-i18n-config.ts` e altre utility spostate in `@i18n-micro/utils/*`
+- Rimossi da `src/runtime/server/plugins/`: watcher/generatore HMR inline — usa `@i18n-micro/hmr/*` se hai fatto un fork degli strumenti di sviluppo
+- **`nuxt-i18n-micro`** ora dipende dai pacchetti workspace `@i18n-micro/utils` e `@i18n-micro/hmr` (installati automaticamente con il modulo)
+
+L'uso tipico di `nuxt.config` + composable resta invariato.
+
+## Perché è importante {#why-it-matters}
+
+- **Bundle serverless più piccoli** — la modalità `source` evita di distribuire un file pre-unito per ogni locale × pagina
+- **Un'unica fonte di verità** — una sola implementazione per parsing dei percorsi, merge, rilevamento della locale e configurazione dei payload
+- **Manutenzione più semplice** — il codice indipendente dal framework è testato in `@i18n-micro/utils` (oltre 50 unit test) e riutilizzato ovunque
+- **Migliore esperienza di sviluppo** — la logica HMR è isolata, testabile e coerente tra le modalità payload
+
+Per l'elenco completo dei commit, consulta il [changelog](https://github.com/s00d/nuxt-i18n-micro/blob/main/CHANGELOG.md).
+
+---

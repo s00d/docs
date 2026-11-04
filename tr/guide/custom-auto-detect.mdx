@@ -1,0 +1,111 @@
+---
+title: "Özel locale algılama"
+description: "Locale'i kendiniz seçin — alan adına, başlığa veya kullanıcı profiline göre — bir sunucu eklentisi ve useI18nLocale().setLocale() ile."
+---
+
+Yerleşik algılama URL'yi, bir çerezi ve `Accept-Language` başlığını okur. Locale başka bir şeye bağlı olduğunda — alan adı, CDN'inizin ayarladığı bir coğrafi başlık, bir kullanıcı profili — onu i18n eklentisinden önce çalışan bir eklentide kendiniz ayarlayın. Modül daha sonra o locale'in çevirilerini yükler ve yönlendirmeler için onu tam olarak kendisi algılamış gibi kullanır. Seçilen bir locale'in URL'ye ne zaman üstün geleceğine karar veren kurallar [Locale algılama](/tr/guide/locale-detection) sayfasındadır; bu sayfa kendi kaynağınızı nasıl bağlayacağınızı gösterir.
+
+## Locale'i bir sunucu eklentisinde ayarlayın {#set-the-locale-in-a-server-plugin}
+
+```ts
+// plugins/i18n-locale.server.ts
+export default defineNuxtPlugin({
+  name: 'i18n-custom-locale',
+  enforce: 'pre',
+  order: -10, // before the i18n plugin (order -5)
+  setup() {
+    const { setLocale } = useI18nLocale()
+    const host = (useRequestHeaders(['host']).host ?? '').split(':')[0]! // without the port
+
+    if (host.endsWith('.de')) setLocale('de')
+    else if (host.endsWith('.fr')) setLocale('fr')
+  },
+})
+```
+
+`setLocale(code)` locale durumunu (`useState('i18n-locale')`) ve bir locale çerezi yapılandırılmışsa çerezi yazar. `useState` veya `useCookie`'yi kendiniz yazmak yerine bunu kullanın. Yalnızca etkin locale kodlarını iletin.
+
+Eklenti istek başlıklarını okuyorsa onu `.server.ts` olarak tutun: bu başlıklar tarayıcıda mevcut değildir. `localStorage` gibi yalnızca tarayıcıya özgü kaynaklar için doğru yer bir `.client.ts` eklentisidir.
+
+## Yerleşik Accept-Language adımını kapatın {#turn-off-the-built-in-accept-language-step}
+
+Eklentiniz ve `Accept-Language` farklı sonuçlar verebilir. Kararı yalnızca kodunuza (artı URL ve çereze) bırakmak için başlığı kapatın:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    autoDetectLanguage: false,
+  },
+})
+```
+
+[`autoDetectLanguage`](/tr/api/module-options#autodetectlanguage) yalnızca başlık adımını kontrol eder. URL ve geçerli bir çerez yine de dikkate alınır.
+
+## Sonra ne olur {#what-happens-next}
+
+`setLocale`'in etkisi [stratejiye](/tr/guide/strategy) bağlıdır:
+
+| Strateji | Eklentideki `setLocale('de')` çağrısının etkisi |
+| --- | --- |
+| `no_prefix` | Sayfa Almanca olarak işlenir; URL değişmez. |
+| `prefix`, `prefix_except_default` | [`autoDetectPath`](/tr/api/module-options#autodetectpath) ayarının yönlendirmeye izin verdiği önek içermeyen bir yolda (varsayılan olarak yalnızca `/`), sunucu Almanca URL'ye `302` ile yanıt verir. Locale öneki olan bir URL bu öneki korur. |
+| `prefix_and_default` | Yönlendirme yok: önek içermeyen URL geçerli bir varsayılan locale sayfasıdır. |
+
+Önek stratejilerinde URL'deki locale kullanıcının tercihidir ve eklentiniz bunu geçersiz kılmaz. `autoDetectPath: '*'` istisnadır: bu durumda sunucu önekli URL'leri çereze ve `Accept-Language`'e göre taşır ve durumu yok sayar; ancak `setLocale()` yapılandırılmışsa çerezi de yazar, dolayısıyla bir sonraki istekten itibaren eklentinizin seçimi önekli bir URL'yi yönlendirebilir. Açık locale URL'lerinin öncelikli olması gerektiğinde `'/'` değerini koruyun veya `'no_prefix'` kullanın. Eklentinizi ziyaretçinin nereye ulaşacağını seçmek için kullanın, takip ettikleri bağlantıları yeniden yazmak için değil.
+
+## Kullanıcının seçtiği locale'e saygı gösterin {#respect-a-locale-the-user-picked}
+
+Kullanıcı dili değiştirdiğinde bu geçiş çerezi yazar. Zaten geçerli bir tercih varsa kendi algılamanızı atlayın:
+
+```ts
+// plugins/i18n-locale.server.ts
+import { detectLocaleFromAcceptLanguage } from '@i18n-micro/utils/accept-language'
+
+export default defineNuxtPlugin({
+  name: 'i18n-custom-locale',
+  enforce: 'pre',
+  order: -10,
+  setup() {
+    const { getPreferredLocale, setLocale, validLocales } = useI18nLocale()
+    if (getPreferredLocale()) return // valid state or cookie: keep it
+
+    const country = useRequestHeaders(['x-country'])['x-country']
+    if (country === 'JP') return setLocale('ja')
+
+    const header = useRequestHeaders(['accept-language'])['accept-language']
+    setLocale(detectLocaleFromAcceptLanguage(header, validLocales))
+  },
+})
+```
+
+`getPreferredLocale()` durumu veya çerezi yalnızca etkin bir locale olduğunda döndürür; böylece eskimiş bir çerez algılamayı durdurmaz. `detectLocaleFromAcceptLanguage`, modülün kendisinin kullandığı q-değerini dikkate alan eşleştiricidir (içe aktarmak için `@i18n-micro/utils` paketini yükleyin); `setLocale(null)` hiçbir şey yapmaz.
+
+## Her locale için bir alan adı {#one-domain-per-locale}
+
+Her alan adının kendi locale'lerini sunması gerekiyorsa bir eklentiye ihtiyacınız yoktur: her locale'e bir `baseUrl` verin, her alan adının varsayılan locale'inde `baseDefault: true` ayarlayın ve bir kez derleyin (statik bir site yine de her alan adı için `nuxi generate` çalıştırır). Bkz. [Katmanlar ve alan adları](/tr/guide/layers#multiple-domains).
+
+## İlgili {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Locale algılama" icon="book-open" href="/tr/guide/locale-detection">
+
+Tam öncelik ve yönlendirme kuralları
+
+</Card>
+
+<Card title="useI18nLocale" icon="brackets-curly" href="/tr/composables/useI18nLocale">
+
+</Card>
+
+<Card title="Yönlendirme stratejileri" icon="book-open" href="/tr/guide/strategy">
+
+</Card>
+
+<Card title="Katmanlar ve alan adları" icon="book-open" href="/tr/guide/layers">
+
+</Card>
+
+</CardGroup>

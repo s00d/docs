@@ -1,0 +1,111 @@
+---
+title: "Собственное определение локали"
+description: "Выбирайте локаль сами — по домену, заголовку или профилю пользователя — с помощью серверного плагина и useI18nLocale().setLocale()."
+---
+
+Встроенное определение читает URL, cookie и `Accept-Language`. Когда локаль зависит от чего-то другого — домена, гео-заголовка, который выставляет ваш CDN, профиля пользователя, — задайте её сами в плагине, который выполняется до плагина i18n. Затем модуль загружает переводы этой локали и использует её для редиректов точно так же, как если бы определил её сам. Правила, по которым выбранная локаль берёт верх над URL, описаны на странице [Определение локали](/ru/guide/locale-detection); здесь показано, как подключить собственный источник.
+
+## Задайте локаль в серверном плагине {#set-the-locale-in-a-server-plugin}
+
+```ts
+// plugins/i18n-locale.server.ts
+export default defineNuxtPlugin({
+  name: 'i18n-custom-locale',
+  enforce: 'pre',
+  order: -10, // before the i18n plugin (order -5)
+  setup() {
+    const { setLocale } = useI18nLocale()
+    const host = (useRequestHeaders(['host']).host ?? '').split(':')[0]! // without the port
+
+    if (host.endsWith('.de')) setLocale('de')
+    else if (host.endsWith('.fr')) setLocale('fr')
+  },
+})
+```
+
+`setLocale(code)` записывает состояние локали (`useState('i18n-locale')`) и, если настроен cookie локали, сам cookie. Используйте его вместо того, чтобы самостоятельно записывать `useState` или `useCookie`. Передавайте только коды включённых локалей.
+
+Оставляйте плагин `.server.ts`, если он читает заголовки запроса: в браузере их нет. Плагин `.client.ts` подходит для источников, доступных только в браузере, например `localStorage`.
+
+## Отключите встроенный шаг Accept-Language {#turn-off-the-built-in-accept-language-step}
+
+Ваш плагин и `Accept-Language` могут не совпадать. Чтобы решал только ваш код (плюс URL и cookie), отключите заголовок:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    autoDetectLanguage: false,
+  },
+})
+```
+
+[`autoDetectLanguage`](/ru/api/module-options#autodetectlanguage) управляет только шагом с заголовком. URL и действительный cookie по-прежнему учитываются.
+
+## Что происходит дальше {#what-happens-next}
+
+Эффект `setLocale` зависит от [стратегии](/ru/guide/strategy):
+
+| Стратегия | Эффект `setLocale('de')` в плагине |
+| --- | --- |
+| `no_prefix` | Страница отображается на немецком; URL не меняется. |
+| `prefix`, `prefix_except_default` | На пути без префикса, где [`autoDetectPath`](/ru/api/module-options#autodetectpath) разрешает редиректы (по умолчанию только `/`), сервер отвечает `302` на немецкий URL. URL с префиксом локали его сохраняет. |
+| `prefix_and_default` | Без редиректа: URL без префикса — действительная страница локали по умолчанию. |
+
+В стратегиях с префиксом локаль в URL — это выбор пользователя, и ваш плагин её не переопределяет. Исключение — `autoDetectPath: '*'`: тогда сервер перенаправляет URL с префиксом по cookie и `Accept-Language` и игнорирует состояние, но `setLocale()` также записывает cookie, если он настроен, поэтому начиная со следующего запроса выбор вашего плагина может перенаправить URL с префиксом. Оставьте `'/'` или используйте `'no_prefix'`, если явные URL локалей должны побеждать. Используйте плагин, чтобы выбрать, куда попадает посетитель, а не чтобы переписывать ссылки, по которым он перешёл.
+
+## Уважайте локаль, выбранную пользователем {#respect-a-locale-the-user-picked}
+
+Когда пользователь переключает язык, переключение записывает cookie. Пропускайте собственное определение, если уже есть действительное предпочтение:
+
+```ts
+// plugins/i18n-locale.server.ts
+import { detectLocaleFromAcceptLanguage } from '@i18n-micro/utils/accept-language'
+
+export default defineNuxtPlugin({
+  name: 'i18n-custom-locale',
+  enforce: 'pre',
+  order: -10,
+  setup() {
+    const { getPreferredLocale, setLocale, validLocales } = useI18nLocale()
+    if (getPreferredLocale()) return // valid state or cookie: keep it
+
+    const country = useRequestHeaders(['x-country'])['x-country']
+    if (country === 'JP') return setLocale('ja')
+
+    const header = useRequestHeaders(['accept-language'])['accept-language']
+    setLocale(detectLocaleFromAcceptLanguage(header, validLocales))
+  },
+})
+```
+
+`getPreferredLocale()` возвращает состояние или cookie, только если это включённая локаль, поэтому устаревший cookie не мешает определению. `detectLocaleFromAcceptLanguage` — это сопоставитель с учётом q-значений, который использует сам модуль (установите `@i18n-micro/utils`, чтобы импортировать его); `setLocale(null)` ничего не делает.
+
+## Один домен на локаль {#one-domain-per-locale}
+
+Если каждый домен должен обслуживать свои локали, плагин не нужен: задайте каждой локали `baseUrl`, установите `baseDefault: true` для локали по умолчанию каждого домена и выполните сборку один раз (для статического сайта `nuxi generate` всё равно запускается для каждого домена). См. [Слои и домены](/ru/guide/layers#multiple-domains).
+
+## Связанные материалы {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Определение локали" icon="book-open" href="/ru/guide/locale-detection">
+
+Полные правила приоритета и редиректов
+
+</Card>
+
+<Card title="useI18nLocale" icon="brackets-curly" href="/ru/composables/useI18nLocale">
+
+</Card>
+
+<Card title="Стратегии маршрутизации" icon="book-open" href="/ru/guide/strategy">
+
+</Card>
+
+<Card title="Слои и домены" icon="book-open" href="/ru/guide/layers">
+
+</Card>
+
+</CardGroup>

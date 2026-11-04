@@ -1,0 +1,132 @@
+---
+title: "翻譯檔案"
+description: "翻譯鍵存放的位置、根檔案與頁面檔案如何與後備語系結合，以及頁面如何載入其字典。"
+---
+
+翻譯是一般的 JSON 檔案：每個語系有一個存放共用鍵的根檔案，而每個頁面與語系各有一個存放該頁面鍵的檔案。當你新增頁面、在頁面之間共用鍵或設定後備語系時，請閱讀本頁。你將了解鍵必須放在哪個檔案、頁面能看到什麼，以及各檔案何時被載入。
+
+## 結構 {#layout}
+
+```text
+locales/
+├── en.json                 # root: menus, footer, buttons
+├── de.json
+└── pages/
+    ├── index/              # pages/index.vue
+    │   ├── en.json
+    │   └── de.json
+    ├── about/              # pages/about.vue
+    │   ├── en.json
+    │   └── de.json
+    └── products-id/        # pages/products/[id].vue
+        ├── en.json
+        └── de.json
+```
+
+- `locales/pages/` 底下的資料夾名稱是該頁面的 Nuxt **路由名稱**：`pages/products/[id].vue` 為 `products-id`，`pages/blog/[slug]/comments.vue` 為 `blog-slug-comments`。
+- 鍵可以巢狀至任意深度；`$t('auth.form.login')` 會讀取 `{ "auth": { "form": { "login": … } } }`。
+- `translationDir` 可移動此資料夾（預設為 `'locales'`，相對於專案根目錄，在 Nuxt 4 的 `app/` 結構下亦同）。
+- 除非設定了 [`disableWatcher`](/zh-TW/api/module-options#disablewatcher)，否則缺少的檔案會在 Nuxt 解析頁面時以 `{}` 建立。
+
+## 頁面能看到什麼 {#what-a-page-sees}
+
+![在 de 語系下 /about 的鍵查找順序：pages/about/de.json、de.json、pages/about/en.json、en.json。它們合併為一個供 $t 讀取的 about/de/data.json](/images/diagrams/page-dictionary.svg)
+
+頁面的字典是其根檔案與頁面檔案深層合併（每一層）的結果。發生衝突時以頁面檔案為準：
+
+```json
+// locales/en.json
+{ "title": "My shop", "nav": { "home": "Home", "cart": "Cart" } }
+```
+
+```json
+// locales/pages/about/en.json
+{ "title": "About us", "nav": { "cart": "Basket" } }
+```
+
+```ts
+// on /about
+t('title') // 'About us'
+t('nav.home') // 'Home'   (root)
+t('nav.cart') // 'Basket' (page wins)
+// on any other page
+t('title') // 'My shop'
+```
+
+沒有自己資料夾的頁面只會取得根字典。其他頁面的鍵不可見。
+
+### 後備語系 {#fallback-locales}
+
+目前語系中缺少的鍵，會在顯示鍵本身之前，先從其後備語系取得：
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    locales: [
+      { code: 'en', iso: 'en-US' },
+      { code: 'de', iso: 'de-DE' },
+      { code: 'de-at', iso: 'de-AT', fallbackLocale: 'de' },
+    ],
+    defaultLocale: 'en',
+    fallbackLocale: 'en', // global, for every locale
+  },
+})
+```
+
+- 語系本身的 `fallbackLocale` 會一路追溯到底：`de-at` → `de` → `en`。
+- 全域的 `fallbackLocale` 是最弱的一層，位於每條鏈之下。
+- 鏈中的每個語系會依序加入其根檔案，再加入其頁面檔案，從最弱的後備語系一路到目前語系。因此目前語系的根檔案會優先於後備語系的頁面檔案。
+
+若沒有後備語系，缺少的鍵會以鍵本身（`'nav.home'`）渲染，並在開發模式下於瀏覽器主控台記錄警告（[`missingWarn`](/zh-TW/api/module-options#missingwarn)）。
+
+## 共用與其他來源 {#sharing-and-other-sources}
+
+| 需求 | 選項 |
+| --- | --- |
+| 只使用根檔案，不使用 `pages/` 資料夾 | [`disablePageLocales: true`](/zh-TW/api/module-options#disablepagelocales) |
+| 兩個頁面讀取同一個頁面資料夾 | [`routesLocaleLinks`](/zh-TW/api/module-options#routeslocalelinks)：`{ 'about-us': 'about' }` |
+| 位於其他資料夾的共用根檔案 | [`additionalTranslationDirs`](/zh-TW/api/module-options#additionaltranslationdirs)：`['common']`（以主要的 `translationDir` 為準） |
+| 來自 Nuxt layer 的鍵 | Layers 的檔案會合併，以專案本身的檔案為準。請參閱 [Layers](/zh-TW/guide/layers) |
+| 在執行階段加入的鍵 | [`i18n:register`](/zh-TW/api/events) hook、`$mergeTranslations`、`$setTranslation` |
+| 內嵌於頁面元件中的鍵 | `$defineI18nRoute({ locales: { en: { … } } })`，請參閱 [頁面設定](/zh-TW/guide/per-component-translations) |
+
+## 頁面如何載入其字典 {#how-a-page-loads-its-dictionary}
+
+![語系 JSON 檔案會被建置成 payload 樹，在 Node 上存放於 public/，在 Edge 上存放於伺服器 assets，由伺服器載入器讀取，接著在伺服器上供 $t 使用，並於瀏覽器中擷取供 $t 使用](/images/diagrams/translation-pipeline.svg)
+
+模組會為每個頁面與語系建置一個 payload：`/{apiBaseUrl}/{page}/{locale}/data.json`（預設為 `/_locales/about/de/data.json`）。
+
+1. **伺服器渲染。** Nitro 偵測語系，而頁面會直接從伺服器載入器載入其 payload，不需發出 HTTP 請求。字典不會寫入 HTML payload，因此頁面保持精簡。
+2. **Hydration。** 瀏覽器會擷取相同的 payload。伺服器已為其輸出 `<link rel="preload">`，因此擷取會與 HTML 一同開始。
+3. **導覽。** 下一個頁面的 payload 會取代字典。離開中頁面的鍵在其消失之前（頁面轉場結束，或 `page:finish`）仍可解析，因此淡出中的頁面不會閃現原始的鍵。載入失敗的區塊（網路錯誤、4xx 或 5xx、內容不是物件）會保留目前的字典，並在下一次導覽時再次載入。語系切換失敗時也是如此：`$switchLocale` 會解析為 `false`，再次呼叫它或再次點擊切換器即會重試。在前綴策略下，此時 URL 已經變更，因此 `lang` 與 `$getLocale()` 會顯示 URL 的語系，而舊的文字仍留在畫面上。
+4. **快取。** 已載入的 payload 會快取於伺服器與瀏覽器中；大小與 TTL 的調整選項請參閱 [效能](/zh-TW/guide/performance)。
+
+`translationPayloads.mode` 決定 payload 的建置方式。`'premerged'`（預設）會在建置時寫入每個頁面 × 語系的檔案。`'source'` 會保留來源檔案並在每次請求時合併，對於 Edge 目標上的大型目錄而言體積更小。兩者產生的字典相同。各部署目標的檔案最終位置請參閱 [部署](/zh-TW/guide/deployment)。
+
+## 開發時編輯 {#editing-in-development}
+
+`nuxt dev` 會即時讀取檔案。儲存翻譯檔案時，會就地重新整理目前開啟頁面的字典：不需重新載入，已移除的鍵會消失，而對根檔案的變更會反映到每個頁面。損壞的 JSON 檔案會記錄一則包含其路徑的警告，並被視為空檔案。若想改為手動重新整理，請設定 [`hmr: false`](/zh-TW/api/module-options#hmr)。
+
+## 相關內容 {#related}
+
+<CardGroup cols={2}>
+
+<Card title="頁面設定" icon="book-open" href="/zh-TW/guide/per-component-translations">
+
+各頁面的語系與內嵌翻譯
+
+</Card>
+
+<Card title="方法" icon="brackets-curly" href="/zh-TW/api/methods">
+
+`$t`、`$tc`、`$tn`、`$td`
+
+</Card>
+
+<Card title="部署" icon="book-open" href="/zh-TW/guide/deployment">
+
+</Card>
+
+</CardGroup>
