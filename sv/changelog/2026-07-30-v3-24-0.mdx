@@ -1,0 +1,66 @@
+---
+title: "v3.24.0 — Node SSR från `public/`, ingen Rollup `raw:`"
+description: "Versionsinformation: v3.24.0 — Node SSR från public/, ingen Rollup raw:"
+---
+
+**Datum**: 2026-07-30
+
+**Version**: `v3.24.0`
+
+![v3.24.0 release](/images/3.24.0.png)
+
+Produktionsbuilds för Node bäddar inte längre in översättningsdata som Nitro `serverAssets` / Rollup `raw:` (flera GB RSS vid build för stora kataloger). SSR läser samma `/{apiBaseUrl}/{page}/{locale}/data.json`-träd som klienten hämtar — från `public/` via `readFile`. Edge behåller en Nitro-inbäddning och bör föredra `mode: 'source'`.
+
+## Vad är nytt? {#what’s-new}
+
+### Node: SSR från `public/<apiBaseUrl>` {#node-ssr-from-public/&lt;apibaseurl&gt;}
+
+- Node-presets som serverar `public/` från disk registrerar **inte** Nitro `serverAssets`.
+- Datan kopieras till `public/<apiBaseUrl>` (standard `_locales`) som `{page}/{locale}/data.json`.
+- SSR laddar den via `#i18n-internal/payload-source` → `readFile` (produktionssökväg bredvid `.output/server`).
+- `translationPayloads.serverAssets: true` betyder fortfarande ”lokal SSR” och **tvingar fram** den publika kopian även om `publicAssets` är false.
+
+Playground (jämfört med tidigare `serverAssets`-inbäddning): ~**1,25 GB** / ~6–7 s / `raw`=0 mot ~**3 GB** / ~13 s / ~170 raw-delar.
+
+### Edge: `serverAssets` bara när det behövs {#edge-serverassets-only-when-needed}
+
+- Edge (`nitro.node === false`) bäddar fortfarande in via Nitro `serverAssets` (`assets:i18n`) med samma struktur som `mode`.
+- Edge tvingar **inte** fram en publik kopia — ange `publicAssets: true` för CDN/statiskt.
+- Varnar vid Edge + `mode: 'premerged'` (föredra `mode: 'source'` för stora kataloger).
+
+### `publicDir` följer klientens URL:er {#publicdir-aligns-with-client-urls}
+
+- `translationPayloads.publicDir` har **`apiBaseUrl`** som standard (inte `translationDir`).
+- Det förhandssammanslagna publika/Edge-trädet är `{page}/{locale}/data.json`, vilket matchar `$fetch('/_locales/...')`.
+- Modulens standardvärden sätter inte längre nästlat `publicAssets: true` (Nuxts djupa sammanslagning tvingade fram en publik kopia även för `mode: 'source'`).
+
+Se [Modulalternativ — `translationPayloads`](/sv/api/module-options#translationpayloads), [Driftsättning — serverless och Edge](/sv/guide/deployment#serverless-and-edge) och [Cache- och lagringsarkitektur](https://s00d.github.io/nuxt-i18n-micro/v3/api/i18n-cache-api).
+
+## Bakåtinkompatibla ändringar {#breaking-changes}
+
+- **Inga ordlistor i Nuxts SSR-HTML-data.** `payload.data['i18n-ssr-chunks']`, `setSsrChunk` och `seedFromSsrChunks` är **borttagna**. Samma standardhållning som `@nuxtjs/i18n` (`experimental.preload: false`): servern håller översättningar i minnet för SSR; klienten laddar `/{apiBaseUrl}/.../data.json` under pluginets uppsättning (`await switchContext`).
+- **`prerenderRoutes` har `false` som standard.** Aktivera det bara om du behöver att Nitro materialiserar hanterarroutes när `publicAssets` inte redan har skrivit trädet (förhandssammanslaget `publicAssets` genererar redan `{page}/{locale}/data.json`).
+- **Standardvärdet för `publicDir` är `apiBaseUrl`**, inte `translationDir`. Statisk utdata flyttas från t.ex. `public/locales/...` till `public/_locales/{page}/{locale}/data.json` om du inte anger `publicDir` uttryckligen.
+- **Lagringsstrukturen för förhandssammanslagen data** är nu `{page}/{locale}/data.json` (var `pages/{page}/{locale}.json`). Allt som läste Nitro-/lagringsnycklar eller kopierade träd enligt den gamla strukturen måste uppdateras.
+- **På Node betyder `serverAssets: true` inte längre Nitro-inbäddning** — det betyder lokal SSR via den publika kopian. Äkta Rollup `raw:`-inbäddning finns kvar endast för Edge.
+
+## Migrering {#migration}
+
+1. Ta bort all kod som läste `payload.data['i18n-ssr-chunks']` eller anropade `seedFromSsrChunks` / `setSsrChunk`.
+2. För rent statiska värdar: behåll standardvärdet premerged + `publicAssets` (filerna hamnar på `/_locales/.../data.json`), eller ange `prerenderRoutes: true` / lägg datan på ett CDN.
+3. För Cloudflare / annan Edge: ange `translationPayloads: { mode: 'source' }` för stora kataloger; lägg till `publicAssets: true` endast om du behöver en statisk kopia/CDN-kopia.
+4. Om du var beroende av data under `public/<translationDir>`, ange `translationPayloads.publicDir` eller peka verktygen mot `public/<apiBaseUrl>`.
+
+## Fix: hoppa över inaktiverade locales i förhandssammanslagen publik data {#fix-skip-disabled-locales-in-premerged-public-payloads}
+
+`preMergeLocales` skriver nu `{page}/{locale}/data.json` endast för locales som skickas in i sammanslagningen (`locale.disabled: true` vid build utelämnas). Tidigare kopierades varje JSON-locale på disk till `public/`, så Nitro static serverade inaktiverade locales med 200 och gick förbi hanteraren. `disabledLocales` vid körning kan fortfarande inte avpublicera filer som redan har byggts — använd `locale.disabled` vid build när `publicAssets` / Nodes publika SSR-kopia är aktiverad.
+
+## Varför det spelar roll {#why-it-matters}
+
+- Node-builds förblir slimmade: ingen topp på flera GB från Rollup `raw:` på grund av översättningskataloger.
+- Publika filer och klientens `$fetch`-URL:er delar en gemensam sökvägsstruktur — statisk hosting fungerar utan särskild ommappning.
+- Edge kan fortfarande bädda in kompakt `source`-data utan att tvinga fram ett duplicerat publikt träd.
+
+Den fullständiga ändringsloggen publiceras med versionen på [GitHub](https://github.com/s00d/nuxt-i18n-micro/blob/main/CHANGELOG.md).
+
+---

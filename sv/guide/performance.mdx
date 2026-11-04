@@ -1,0 +1,261 @@
+---
+title: "Prestandajustering"
+description: "Inställningarna som påverkar minne, datastorlek och cachning, och hur du mäter vad din app levererar."
+---
+
+Standardvärdena är anpassade för en typisk app: en JSON-datafil per sida och locale, översättningar hålls utanför HTML:en, begränsade cachar på servern. Den här sidan listar de få inställningar som är värda att ändra när en katalog är stor, servern har begränsat minne eller datan kommer från en annan värd. För uppmätta siffror jämfört med `@nuxtjs/i18n` och ren Nuxt, se [Benchmarks](/sv/guide/performance-results).
+
+## Vad standardvärdena redan gör {#what-the-defaults-already-do}
+
+- **En datafil per sida.** Builden slår samman rot-, sid- och reservlocale-nycklar till `/_locales/<page>/<locale>/data.json`, så att en sida laddar en fil och `$t` är ett enda uppslag.
+- **Ingen ordlista i HTML:en.** SSR håller översättningarna i serverns minne; webbläsaren hämtar datan i stället för att tolka den från `__NUXT_DATA__`.
+- **Webbläsarcache.** `?v=` ändras bara när översättningarna gör det, så en webbläsare behåller sin data över driftsättningar som inte rörde dem. En värds statiska kopia är färsk i 60 sekunder och omvalideras därefter: en upprepad laddning väntar på ett `304`. Serverroutens svar är `immutable` i ett år ([Driftsättning](/sv/guide/deployment#cache-headers-and-datebuild)).
+- **Begränsat serverminne.** Servern cachar som standard högst 1000 datafiler och tar bort den som använts minst nyligen.
+
+## Dela upp översättningar per sida {#split-translations-by-page}
+
+Nycklar som används på en sida hör hemma i `locales/pages/<page>/<locale>.json`, inte i rotfilerna: rotnycklar ingår i varje sidas data. Se [Översättningsfiler](/sv/guide/translations).
+
+Två inställningar ändrar den här uppdelningen:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    // pages that show the same keys share one payload: /de/products/123 loads the products payload
+    routesLocaleLinks: { 'products-id': 'products' },
+    // or: no page files at all, every page loads only the root dictionary
+    // disablePageLocales: true,
+  },
+})
+```
+
+[`routesLocaleLinks`](/sv/api/module-options#routeslocalelinks) tar bort duplicerad data för relaterade routes. [`disablePageLocales`](/sv/api/module-options#disablepagelocales) passar små appar där en ordlista per locale är enklare.
+
+## Servercachar {#server-caches}
+
+| Inställning | Standard | Effekt |
+| --- | --- | --- |
+| [`cacheMaxSize`](/sv/api/module-options#cachemaxsize) | `0` | Max antal poster i datacacharna. `0` = ingen gräns i webbläsaren, 1000 på servern. |
+| [`cacheTtl`](/sv/api/module-options#cachettl) | `0` | Sekunder innan en cachad post laddas om. `0` = aldrig; ange det när datan kommer från `apiBaseServerHost` och ändras utan ny driftsättning. |
+| `serverTranslationPreload` | `false` | Ladda `index`-datan i Nitro-middlewaren för varje sidförfrågan, så att serverhjälpfunktioner och startsidan återanvänder den. |
+
+Sänk `cacheMaxSize` på en liten instans med många sidor × locales. Lokalt redigerade översättningar behöver aldrig en TTL: dev läser filerna direkt, och produktionsdata ändras bara vid en driftsättning.
+
+## Minne på en Node-server {#memory-on-a-node-server}
+
+Under jämn belastning kan en Node-server ligga på ungefär 12 gånger sin levande heap och stanna där. I ett stresstest med 100k nycklar per sida körde en levande heap på 90 MB med ungefär 1,1 GB RSS. Det här är inte en läcka. Efter en överdimensionerad GC-cykel höjer V8 sin heapgräns och behåller de frigjorda sidorna i en pool för återanvändning så länge belastningen pågår. Ungefär 8 sekunder efter att belastningen upphört töms poolen och RSS sjunker till ungefär 160 MB. `global.gc()` lämnar inte tillbaka detta minne. Ren Nuxt utan modulen gör likadant, skalat till sin mindre heap.
+
+Det kostar marginal: med en minnesgräns under den nivån och inget heaptak kan processen dödas. Sätt ett tak som passar din gräns och ligger väl över den levande heapen:
+
+```bash
+NODE_OPTIONS=--max-old-space-size=512 node .output/server/index.mjs
+```
+
+| 100k nycklar, 12 locales, 5 till 30 minuters belastning | Standard | `--max-old-space-size=512` |
+| --- | --- | --- |
+| RSS under belastning | ungefär 1 150 MB | 254-287 MB |
+| Förfrågningar per sekund | 624 | 517-572 |
+
+Taket byter alltså 8 till 10 % av genomströmningen mot minnet. En katalog av normal storlek har en mindre heap och ett mindre steg. Dessa körningar gjordes på macOS med Node 22, inte i en container.
+
+## Tolkningstid och `dir` {#parse-time-and-dir}
+
+`dir: 'auto'` på en locale gör att webbläsaren räknar ut riktningen från innehållet medan den tolkar. I Chromium var DOMContentLoaded vid 20 000 element ungefär 1,1 s med `dir="auto"` och 0,1 s utan, och vid 5 000 element ungefär 130 ms mot 45 ms. Lämna `dir` osatt eller sätt det till `ltr` eller `rtl` ([Textriktning](/sv/guide/seo#text-direction)).
+
+## Delad cache för flera instanser {#shared-cache-for-several-instances}
+
+Med flera instanser av samma build ger [`cacheStorage`](/sv/api/module-options#other) dem en gemensam ordlistecache i valfri Nitro-lagring, via den anslutning som din app konfigurerar i `nitro.storage`. Modulen lägger inte till någon anslutning och inget beroende.
+
+**Det är en cache, inte en källa.** Översättningar kommer från inbäddad eller publik data, eller från `apiBaseServerHost`. Endast det som kom från källan skrivs, och nycklarna innehåller builden, så en lagring som du fyller för hand läses inte. För att servera översättningar från KV eller en databas, placera en liten route som läser dem på `apiBaseServerHost`.
+
+**När det hjälper.** Endast med en fjärr-`apiBaseServerHost`. Tre instanser som gick igenom 39 ordlistor gjorde 117 förfrågningar till värden utan det och 48 med det. Med filer på disk är en träff i lagringen inte snabbare än filen, och en första genomgång av 12 sidor tog 280-296 ms utan alternativet och 308-325 ms med en fylld Redis, så lämna det osatt. På en preset som bäddar in ordlistor gör det ingenting utan en värd, och builden säger det.
+
+En kall ordlista, en klient, en genomgång var, alltså ungefärligt, och det mesta är avståndet till värden:
+
+| Lagring | Från värden | Från lagringen |
+| --- | --- | --- |
+| Cloudflare KV | ungefär 300 ms | ungefär 110 ms |
+| D1 | ungefär 230 ms | ungefär 115 ms |
+| Deno KV | ungefär 430 ms | ungefär 100 ms |
+| Upstash, Vercel serverless | ungefär 445 ms | ungefär 245 ms |
+| Upstash, Vercel Edge | ungefär 505 ms | ungefär 235 ms |
+
+### Redis {#redis}
+
+Kräver `ioredis` i ditt projekt.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      redis: { driver: 'redis', url: process.env.REDIS_URL },
+    },
+  },
+  i18n: {
+    cacheStorage: 'redis', // the mount name
+    apiBaseServerHost: 'https://translations.internal',
+    cacheTtl: 300,
+  },
+})
+```
+
+### Upstash på Vercel och Vercel Edge {#upstash-on-vercel-and-vercel-edge}
+
+Använd drivrutinen `upstash` för båda: den kommunicerar via REST, medan drivrutinen `redis` kräver TCP. Den kräver `@upstash/redis` i ditt projekt och läser `UPSTASH_REDIS_REST_URL` och `UPSTASH_REDIS_REST_TOKEN` från miljön.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      upstash: { driver: 'upstash' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'upstash',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+### Cloudflare KV {#cloudflare-kv}
+
+Bind ett namespace till Workern som `I18N_KV` (`kv_namespaces` i dess wrangler-konfiguration).
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      kv: { driver: 'cloudflare-kv-binding', binding: 'I18N_KV' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'kv',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+En värd som är en annan Worker på samma konto kräver kompatibilitetsflaggan `global_fetch_strictly_public`, annars når hämtningen inte fram.
+
+### Cloudflare D1 {#cloudflare-d1}
+
+`nitro.storage` kan inte innehålla ett databasobjekt, så ett Nitro-plugin monterar drivrutinen. Monteringen kontrolleras vid första användning, så det är tillräckligt tidigt. Bind databasen som `I18N_DB` (`d1_databases`) och ha `unstorage` i ditt projekt.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    experimental: { database: true },
+    database: {
+      default: { connector: 'cloudflare-d1', options: { bindingName: 'I18N_DB' } },
+    },
+  },
+  i18n: {
+    cacheStorage: 'd1',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+```ts
+// server/plugins/i18n-storage.ts
+import dbDriver from 'unstorage/drivers/db0'
+
+export default defineNitroPlugin(() => {
+  useStorage().mount('d1', dbDriver({ database: useDatabase() }))
+})
+```
+
+Drivrutinen `db0` är markerad som experimentell och ignorerar TTL: rader från gamla builds finns kvar tills du tar bort dem.
+
+### Deno KV {#deno-kv}
+
+På Deno Deploy, tillhandahåll en databas (`deno deploy database provision <name> --kind denokv`), tilldela den till appen (`deno deploy database assign`) och använd drivrutinen:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      kv: { driver: 'deno-kv' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'kv',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+### Hur det beter sig {#how-it-behaves}
+
+En ordlista slås upp i instansens egen cache, sedan i den delade lagringen och sedan i sin källa. Instansens egen cache finns kvar, eftersom `$t` är synkron och behöver trädet i minnet: detta skiljer på vem som hämtar och vem som serverar, det sparar inte minne.
+
+- **Vem som hämtar.** Med en fjärrvärd görs en hämtning från backend per ordlista i stället för en per instans. Instanser som missar i samma ögonblick hämtar den var för sig, eftersom det inte finns något lås.
+- **Sidor utan egen ordlista** lagras inte, så att påhittade sidnamn inte kan lägga till nycklar. Varje instans hämtar en sådan sida från värden en gång, och på Workers, där isolat kommer och går, blir det ett jämnt litet flöde.
+- **Värden är nere.** Sidor med en lagrad ordlista fungerar. En sida utan renderas från den lagrade rotordlistan, med sina egna nycklar oöversatta, med [en `503` som ingen cache behåller](/sv/guide/deployment#when-a-dictionary-cannot-be-read), och `/_locales` svarar `503` för den tills värden är tillbaka. `useTranslationServerMiddleware` svarar med nycklar för en ordlista som den inte kan läsa.
+- **Värden** är `NUXT_I18N_APP_BASE_SERVER_HOST` vid körning, annars `apiBaseServerHost` från builden, precis som utan alternativet. På en preset som bäddar in ordlistor (Cloudflare, Vercel, Netlify, se [Driftsättning](/sv/guide/deployment#serverless-and-edge)) gäller lagret bara med en värd: datan finns redan i bundlen, och en kopia i KV vore en nätverksläsning av det som minnet redan har.
+- **Nycklar** är `i18n-micro:<buildId>~<dateBuild>~<fallbackLocale>~<host>:<locale>:<page>`, så två builds i en rullande driftsättning läser aldrig varandras, och inte heller två backends för samma artefakt. Varje instans måste komma från samma build (en artefakt, eller ett fastlåst Nuxt-[`buildId`](https://nuxt.com/docs/api/nuxt-config#buildid)); instanser som byggts separat delar helt enkelt inte. Med ett fastlåst `buildId` och `dateBuild: 0` delar två olika builds nycklar. Endast aktiverade locales slås upp, och sidnamn över 200 tecken hoppar över lagret.
+- **Vad som lagras.** En ordlista jämförs med rotordlistan (`__root`) innan den skrivs, och läggs bara in när den innehåller varje rotnyckel och skiljer sig från roten. En påhittad sida som besvaras med roten lägger alltså inte till någon nyckel, och inte heller en felkropp med 200 på en sida. Varje instans läser en sådan sida från källan en gång. En värd måste besvara okända sidor med roten, ett tomt objekt eller en 404, och servera `__root`. En värd utan `__root`, eller en som serverar sidor utan rotnycklarna, delar ingenting. Om värden besvarar själva `__root` med ett välformat fel lagras det: håll `cacheTtl` kort när backend kan göra så.
+- **Utgång.** En post upphör att gälla `cacheTtl` sekunder efter att den skrevs, eller efter en dag när `cacheTtl` är `0`, så att nycklar från gamla builds inte kan hopa sig. Ett värde kan ligga kvar i en instans egen cache i ytterligare `cacheTtl`, och i renderingens delcache i ytterligare en: ändringar i backend syns inom tre gånger `cacheTtl`. Drivrutiner utan utgång (`fs`) behåller gamla nycklar tills du tar bort dem.
+- **När lagringen fallerar** gör sidan det inte. En läsning får ta 1 sekund, vilket täcker en anslutningshandskakning och en Cloudflare KV-nyckel som är kall på den platsen. Efter ett fel är gränsen 250 ms tills lagringen svarar igen. Tre fel i rad stänger lagret i 5 sekunder. Medan det är stängt, och medan en läsning just har misslyckats, skrivs ingenting. En misslyckad skrivning stänger ingenting, så en skrivskyddad replik fortsätter att leverera läsningar. En lagring vars svar tar längre tid än dessa gränser räknas som fallerande: en miss, och ordlistan kommer från sin källa. Med ioredis börjar det nära 400 ms per kommando, eftersom dess handskakning tar tre rundresor. Modulen loggar en varning per minut; ioredis skriver ut sina egna fel utöver det. Ett värde som inte är en ordlista räknas som en miss och skrivs över. Ett okänt monteringsnamn varnar en gång vid första användning; appen körs då utan lagret.
+- **När källan fallerar** behåller ingenting felet. En misslyckad hämtning eller en oläslig fil når ingen cache, varken denna eller instansens egen, och nästa förfrågan läser igen. Se [Driftsättning](/sv/guide/deployment#when-a-dictionary-cannot-be-read).
+- **Avstängt i dev och vid prerendering**, som läser sina filer och inte ska behöva din produktions-Redis.
+- **Ogiltigförklaring.** Det finns inget rensningsanrop: en ny build använder nya nycklar. För att genast uppdatera en körande build, ta bort `i18n-micro:`-nycklarna från lagringen och starta om instanserna. `clearCache` och HMR påverkar bara processens tillstånd.
+- Ändringar vid körning (`$mergeTranslations`, `$defineI18nRoute`) stannar i den rendering eller webbläsare som gjorde dem och skrivs aldrig till lagringen.
+
+## Datastorlek {#payload-size}
+
+Builden varnar när datautdatan överskrider `translationPayloads.warnFileCount` (500 filer) eller `warnSizeBytes` (10 MB). När det händer:
+
+- flytta nycklar som bara används på en sida ut ur rotfilerna;
+- länka routes som visar samma nycklar (`routesLocaleLinks`);
+- på serverless eller Edge, använd `translationPayloads.mode: 'source'` så att serverbundlen bäddar in kompakta källor i stället för varje sida × locale ([Driftsättning](/sv/guide/deployment#serverless-and-edge)). En Edge-build varnar själv när plattformens gräns överskrids ([Bundle-gränser](/sv/guide/deployment#bundle-limits-on-edge));
+- aktivera `nitro.compressPublicAssets` för `.gz`- / `.br`-kopior av den statiska datan.
+
+## Mätning {#measuring}
+
+Repositoriet följer upp vad playground levererar med `pnpm run budget:payload`; de aktuella siffrorna:
+
+Uppmätt på `playground` över `/`, `/de`:
+
+| Mätning | Storlek |
+| --- | --- |
+| Översättningskällor på disk | 7.8 MB |
+| Serverat som separata datafiler | 23.9 MB |
+| Största inline `__NUXT_DATA__` | 0.4 KB |
+| Klienttillgångar | 624.4 KB |
+
+Playground är en testbänk med genererade ordlistor på upp till 100k nycklar, så detta är inte siffror att förvänta sig från en riktig
+applikation — de är en fast punkt att mäta mot. Budgeten fallerar när de växer oväntat,
+vilket är hur en oavsiktlig ändring av vad datan innehåller upptäcks.
+
+Kör benchmarksviten själv med `pnpm test:performance`; hur den fungerar beskrivs i [benchmarkmetodiken](https://s00d.github.io/nuxt-i18n-micro/contributing/performance-methodology).
+
+## Relaterat {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Benchmarks" icon="book-open" href="/sv/guide/performance-results">
+
+</Card>
+
+<Card title="Driftsättning" icon="book-open" href="/sv/guide/deployment">
+
+</Card>
+
+<Card title="Översättningsfiler" icon="book-open" href="/sv/guide/translations">
+
+</Card>
+
+</CardGroup>

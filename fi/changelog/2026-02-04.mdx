@@ -1,0 +1,115 @@
+---
+title: "v3.0.0 — Suorituskyvyn optimointi, Route- ja Path Strategy -paketit"
+description: "Julkaisutiedot: v3.0.0 — Suorituskyvyn optimointi, Route- ja Path Strategy -paketit"
+---
+
+**Päivämäärä**: 2026-02-04
+
+**Versio**: `v3.0.0`
+
+![v3.0.0 release](/images/3.0.0.png)
+
+Julkistamme **v3.0.0**:n, joka tuo **merkittävän arkkitehtuurimuutoksen**: käännösten tallennusjärjestelmä on kirjoitettu kokonaan uudelleen maksimaalista suorituskykyä varten, reittien generointi ja ajonaikainen polkulogiikka on jaettu omiin paketteihinsa, ja uudelleenohjausten kulku on suunniteltu uudelleen paremman luotettavuuden ja serverless-yhteensopivuuden vuoksi.
+
+## Mitä uutta? {#what’s-new}
+
+### Suorituskyvyn optimointi — uusi käännösten tallennusarkkitehtuuri {#performance-optimization-—-new-translation-storage-architecture}
+
+Käännösten lataus- ja välimuistijärjestelmä on kirjoitettu kokonaan uudelleen maksimaalista suorituskykyä varten:
+
+- **Keskitetty TranslationStorage-luokka** — Uusi `TranslationStorage`-luokka (`src/runtime/utils/storage.ts`) tarjoaa yhtenäisen tallennuksen sekä asiakkaalle että palvelimelle. Se käyttää `globalThis`-oliota ja `Symbol.for`-funktiota taatakseen todellisen singletonin koko Node.js-prosessissa, mikä estää välimuistin monistumisen niputettujen moduulien välillä.
+
+- **Optimoitu `$t()`-funktio (tFast)** — Käännösfunktio tekee suoran haun yhdestä aktiivisesta sanakirjasta:
+  1. Kaikki käännökset (juuri + sivukohtaiset + varakieli) yhdistetään valmiiksi käännösvaiheessa yhdeksi tiedostoksi sivua kohden
+  2. Saman localen sisäisessä navigoinnissa uuden sivun käännökset yhdistetään kumulatiivisesti aktiiviseen sanakirjaan (estää avainten välkkymisen siirtymäanimaatioiden aikana)
+  3. Tukee sisäkkäisiä avaimia (`key.subkey.subsubkey`) optimoidulla polun ratkaisulla
+  4. Ei Map-hakuja eikä locale- tai reittilaskentaa jokaisella kutsulla — käyttää valmiiksi laskettua kontekstia
+
+- **Palvelinpuolen injektio `window.__I18N__`-olion kautta** — SSR:n aikana ladatut käännökset injektoidaan HTML:ään script-tagina. Asiakas lukee suoraan `window.__I18N__`-oliosta ensimmäisellä latauksella, mikä välttää päällekkäiset haut.
+
+- **Paikallinen palavälimuisti liitännäisessä** — Liitännäinen ylläpitää paikallista `loadedChunks`-Mapia, joka tallentaa kaikki ladatut käännöspalat. Kerran ladattuja käännöksiä ei koskaan haeta uudelleen sivun elinkaaren aikana.
+
+- **Esiyhdistäminen käännösvaiheessa** — `module.ts`:n `preMergeLocales`-vaihe yhdistää kaikki kerrokset, varakieliketjut ja juuritason käännökset jokaiseen sivutiedostoon käännösvaiheessa. Palvelinlataaja lukee vain yhden valmiiksi rakennetun tiedoston — ajonaikaista yhdistämistä ei tarvita.
+
+**Suorituskykyparannukset:**
+
+- Vähemmän muistinvarausta pyyntöä kohden (olioita ei luoda uudelleen jokaisella `$t()`-kutsulla)
+- Pienempi roskienkeruun kuormitus
+- Nopeammat vasteajat kuormituksessa
+- Vakaa muistinkäyttö (ei "hyppiviä" kuvaajia)
+
+### Route- ja Path Strategy -paketit {#route-&-path-strategy-packages}
+
+- **@i18n-micro/route-strategy** — Reittien generointi käännösvaiheessa: laajentaa Nuxtin sivuja lokalisoiduilla reiteillä, käsittelee aliakset, sisäkkäiset reitit ja mukautetut polut strategioittain. Yksi sisääntulopiste: `new RouteGenerator(options)` ja `extendPages(pages)`. Strategiat (`no_prefix`, `prefix`, `prefix_except_default`, `prefix_and_default`) on toteutettu erillisinä luokkina, ja ne valitaan tehtaan kautta.
+- **@i18n-micro/path-strategy** — Ajonaikainen polkujen ja localejen käsittely: tarjoaa `PathStrategy`-luokan lokalisoitujen polkujen rakentamiseen, uudelleenohjausten ratkaisemiseen ja localen vaihtamiseen. Tree-shaking-kelpoiset alipolkuviennit (`/prefix`, `/no-prefix` jne.), joten vain valittu strategia niputetaan. Käyttää puhtaita funktioita reittien ratkaisuun ja valmiiksi laskettuja kontekstilippuja allokaatioiden minimoimiseksi.
+- **Jäsennelty pakettirakenne** — Reittilogiikka paketissa `@i18n-micro/route-strategy` hakemistoineen `core/` ja `strategies/`. Polkustrategia paketissa `@i18n-micro/path-strategy` litteällä `src/`-rakenteella: `types.ts`, `path.ts`, `resolver.ts`, `helpers.ts` ja `strategies/`.
+- **Johdonmukainen toiminta** — Aliasten käsittely, vanhempi–lapsi-polkujen yhdistäminen, mukautetut `globalLocaleRoutes` / `filesLocaleRoutes` / `routeLocales` sekä muuttumattomuustakuut on katettu omalla testisarjalla.
+
+### Uudelleenohjausarkkitehtuurin uudistus {#redirect-architecture-overhaul}
+
+- **Palvelinmiddleware** — Uudelleenohjaukset ja 404-käsittely suoritetaan Nitro-middlewaressa (`i18n.global.ts`). Se suoritetaan ennen Nuxtin renderöintiä, joten uudelleenohjaukset polusta `/` polkuun `/<locale>/` tapahtuvat ilman virheen välähdystä, kun locale-eväste on olemassa.
+- **Asiakasliitännäinen (asiakaspuoli)** — Vain asiakkaalla toimiva liitännäinen (`06.client-redirect.client.ts`) suoritetaan hydraation jälkeen ja käsittelee uudelleenohjaukset, kun `useI18nLocale()` tai eväste asettaa muun kuin oletuslocalen. Nitro suoritetaan ennen Nuxtia, joten palvelin ei näe käyttäjän liitännäisten tekemiä eväste- tai tilamuutoksia; asiakasliitännäinen kattaa tämän tapauksen.
+- **Ei varakomponenttia** — `locale-redirect.vue`-varakomponentti ja `fallbackRedirectComponentPath`-asetus on poistettu. Uudelleenohjauslogiikka hoidetaan kokonaan palvelinmiddlewaressa ja asiakasliitännäisessä.
+- **Mukautettujen polkujen tuki** — Polut kuten `/kontakt` saksalle (`globalLocaleRoutes`-asetuksen kautta) tunnistetaan oikein kelvollisiksi ilman locale-etuliitettä, mikä välttää virheelliset 404-virheet esirenderöinnin aikana.
+- **customRegexMatcher-korjaus** — `customRegexMatcher`-asetusta käytettäessä kuvio vastaa nyt **koko** ensimmäistä polkusegmenttiä (ankkureilla `^` ja `$`). Tämä estää virheelliset 404-virheet reiteille kuten `/locale-test`, kun kuvio `[a-z]{2}-[a-z]{2}` olisi aiemmin osunut osamerkkijonoihin.
+- **autoDetectPath-korjaus** — `autoDetectPath`-asetus vertaa nyt oikein alkuperäiseen URL-polkuun, mikä estää ei-toivotut uudelleenohjaukset, kun navigoidaan nimenomaisesti locale-etuliitteellisiin URL-osoitteisiin.
+
+### useI18nLocale-composable {#usei18nlocale-composable}
+
+- **Keskitetty localen hallinta** — Uusi `useI18nLocale()`-composable korvaa `useLocaleCookies`-funktion ja tarjoaa yhden sisääntulopisteen locale-tilalle, evästeille ja synkronointiapuvälineille.
+- **API** — `locale`, `localeCookie`, `hashCookie`, `getLocale()`, `getPreferredLocale()`, `setLocale()`, `syncLocale()`, `isValidLocale()`, `getEffectiveLocale()`, `resolveInitialLocale()`.
+- **Ohjelmallinen locale** — Käytä palvelinliitännäisissä `useI18nLocale().setLocale(locale)`-kutsua `useState('i18n-locale')`-tilan sijaan selkeämpää ja keskitettyä localen käsittelyä varten.
+
+### Mukautettu automaattinen tunnistus ja konfiguraatio {#custom-auto-detection-&-configuration}
+
+- **`getI18nConfig()`** — Mukautettujen liitännäisten (esim. locale-tunnistukseen) tulee käyttää `getI18nConfig()`-funktiota moduulista `#build/i18n.strategy.mjs` `useRuntimeConfig().public.i18nConfig`-olion sijaan. Tämä antaa suoran pääsyn ratkaistuun i18n-konfiguraatioon (esim. `localeCookie`) ilman riippuvuutta ajonaikaisesta konfiguraatiosta.
+- **Evästeen nimi** — Käytä `getI18nConfig().localeCookie ?? 'user-locale'` -lauseketta, kun toteutat mukautettua tunnistuslogiikkaa.
+
+### Yksinkertaistetut integraatiopaketit {#simplified-integration-packages}
+
+Kaikki integraatiopaketit (`@i18n-micro/vue`, `@i18n-micro/astro`, `@i18n-micro/node`, `@i18n-micro/react`, `@i18n-micro/preact`, `@i18n-micro/solid`) on yksinkertaistettu ja optimoitu, ja ne jakavat saman ydinkäännöslogiikan.
+
+### Konfiguraatiomuutokset {#configuration-changes}
+
+- **`previousPageFallback` poistettu** — Tätä asetusta ei enää tarvita. Uusi kumulatiivinen yhdistämisstrategia pitää edellisen sivun käännökset automaattisesti saatavilla siirtymäanimaatioiden aikana ja siivoaa ne sitten `page:transition:finish`-koukun kautta.
+- **`hmr`** — Siirretty `experimental.hmr`-asetuksesta ylätason asetukseksi. Ohjaa käännöstiedostojen palvelinpuolen HMR:ää (oletuksena käytössä kehitystilassa).
+
+```typescript
+// Before (v2.x)
+export default defineNuxtConfig({
+  i18n: {
+    experimental: {
+      hmr: true,
+    },
+  },
+})
+
+// After (v3.0.0)
+export default defineNuxtConfig({
+  i18n: {
+    hmr: true,
+  },
+})
+```
+
+## Rikkovat muutokset {#breaking-changes}
+
+- **`fallbackRedirectComponentPath`** — Poistettu. Moduuli ei enää käytä varareittikomponenttia uudelleenohjauksiin. Jos olit määrittänyt mukautetun komponenttipolun, poista se konfiguraatiostasi.
+- **`useLocaleCookies`** — Poistettu. Käytä sen sijaan `useI18nLocale()`-funktiota. Uusi composable tarjoaa `locale`, `localeCookie`, `hashCookie`, `setLocale()`, `syncLocale()` ja muuta.
+- **`experimental.i18nPreviousPageFallback` / `previousPageFallback`** — Poistettu kokonaan. Kumulatiivinen yhdistämisstrategia käsittelee siirtymien välkkymisen automaattisesti. Poista tämä asetus konfiguraatiostasi.
+- **`experimental.hmr`** — Siirretty asetukseksi `hmr`. Päivitä konfiguraatiosi, jos käytit tätä asetusta.
+- **Mukautetut liitännäiset** — Jos mukautettu locale-tunnistusliitännäisesi käytti `useRuntimeConfig().public.i18nConfig`-oliota, vaihda `getI18nConfig()`-funktioon moduulista `#build/i18n.strategy.mjs`. Suosi `useI18nLocale().setLocale()`-kutsua `useState('i18n-locale')`-tilan sijaan. Katso päivitetyt esimerkit sivulta [Mukautettu kielen tunnistus](/fi/guide/custom-auto-detect).
+- **Sisäiset tiedostomuutokset** — `load-from-storage.ts` ja `translation-loader.ts` on poistettu ja korvattu tiedostoilla `storage.ts` ja `server-loader.ts`. Jos toit näistä tiedostoista suoraan (ei suositeltavaa), päivitä tuontisi.
+
+## Miksi sillä on merkitystä {#why-it-matters}
+
+- **Suorituskyky**: Keskitetty singleton-välimuisti poistaa pyyntökohtaisen olioiden luonnin ja vähentää roskienkeruun kuormitusta.
+- **Ylläpidettävyys**: Reitti- ja polkulogiikka sijaitsevat omissa paketeissaan selkein rajoin ja tyypein.
+- **Testaus**: Strategioiden toimintaa ja reunatapauksia testataan erikseen.
+- **Luotettavuus**: Erilliset palvelimen (Nitro) ja asiakkaan uudelleenohjauslogiikat välttävät ajoitusongelmat, kun käyttäjän liitännäiset asettavat evästeen tai useState-tilan.
+- **Serverless-valmis**: Nitro-liitännäinen suoritetaan samassa kontekstissa kuin Nitro-käsittelijät, yhteensopiva Edge- ja Workers-ympäristöjen kanssa.
+- **Dokumentaatio**: Reititystoiminta on dokumentoitu [Strategia-oppaassa](/fi/guide/strategy) sekä [path-strategy](https://github.com/s00d/nuxt-i18n-micro/tree/main/packages/path-strategy)- ja [route-strategy](https://github.com/s00d/nuxt-i18n-micro/tree/main/packages/route-strategy)-paketeissa.
+
+Päivitysohjeet ja täydellinen muutoslista löytyvät [muutoslokista](https://github.com/s00d/nuxt-i18n-micro/blob/main/CHANGELOG.md).
+
+---

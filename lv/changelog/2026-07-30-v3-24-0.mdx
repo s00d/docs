@@ -1,0 +1,66 @@
+---
+title: "v3.24.0 — Node SSR no `public/`, bez Rollup `raw:`"
+description: "Laidiena piezīmes: v3.24.0 — Node SSR no public/, bez Rollup raw:"
+---
+
+**Datums**: 2026-07-30
+
+**Versija**: `v3.24.0`
+
+![v3.24.0 laidiens](/images/3.24.0.png)
+
+Node produkcijas būves vairs neiegulda tulkojumu datus kā Nitro `serverAssets` / Rollup `raw:` (vairāku GB būves RSS lieliem katalogiem). SSR lasa to pašu `/{apiBaseUrl}/{page}/{locale}/data.json` koku, ko ielādē klients — no `public/` caur `readFile`. Edge saglabā Nitro iegulšanu, un tam ieteicams izmantot `mode: 'source'`.
+
+## Kas jauns? {#what’s-new}
+
+### Node: SSR no `public/<apiBaseUrl>` {#node-ssr-from-public/&lt;apibaseurl&gt;}
+
+- Node priekšiestatījumi, kas pasniedz `public/` no diska, **ne**reģistrē Nitro `serverAssets`.
+- Dati tiek nokopēti uz `public/<apiBaseUrl>` (noklusējums `_locales`) kā `{page}/{locale}/data.json`.
+- SSR tos ielādē caur `#i18n-internal/payload-source` → `readFile` (produkcijas ceļš blakus `.output/server`).
+- `translationPayloads.serverAssets: true` joprojām nozīmē “lokālu SSR” un **piespiež** šo publisko kopiju, pat ja `publicAssets` ir false.
+
+Playground (salīdzinot ar iepriekšējo `serverAssets` iegulšanu): ~**1,25 GB** / ~6–7 s / `raw`=0 pret ~**3 GB** / ~13 s / ~170 raw gabaliem.
+
+### Edge: `serverAssets` tikai tad, kad nepieciešams {#edge-serverassets-only-when-needed}
+
+- Edge (`nitro.node === false`) joprojām iegulda caur Nitro `serverAssets` (`assets:i18n`) ar tādu pašu izkārtojumu kā `mode`.
+- Edge **ne**piespiež publisku kopiju — iestatiet `publicAssets: true` CDN/statiskai vietnei.
+- Brīdina, ja Edge + `mode: 'premerged'` (lieliem katalogiem ieteicams `mode: 'source'`).
+
+### `publicDir` saskaņots ar klienta URL {#publicdir-aligns-with-client-urls}
+
+- `translationPayloads.publicDir` pēc noklusējuma ir **`apiBaseUrl`** (nevis `translationDir`).
+- Iepriekš sapludinātais publiskais/Edge koks ir `{page}/{locale}/data.json`, kas atbilst `$fetch('/_locales/...')`.
+- Moduļa noklusējumi vairs neiestata ligzdotu `publicAssets: true` (Nuxt dziļā sapludināšana piespieda publisku kopiju pat ar `mode: 'source'`).
+
+Skatiet [Moduļa opcijas — `translationPayloads`](/lv/api/module-options#translationpayloads), [Izvietošana — bezservera un Edge](/lv/guide/deployment#serverless-and-edge) un [Cache & Storage Architecture](https://s00d.github.io/nuxt-i18n-micro/v3/api/i18n-cache-api).
+
+## Nesaderīgas izmaiņas {#breaking-changes}
+
+- **Nuxt SSR HTML datos nav vārdnīcu.** `payload.data['i18n-ssr-chunks']`, `setSsrChunk` un `seedFromSsrChunks` ir **noņemti**. Tāda pati noklusējuma pieeja kā `@nuxtjs/i18n` (`experimental.preload: false`): serveris SSR vajadzībām glabā tulkojumus atmiņā; klients ielādē `/{apiBaseUrl}/.../data.json` spraudņa iestatīšanas laikā (`await switchContext`).
+- **`prerenderRoutes` pēc noklusējuma ir `false`.** Ieslēdziet to tikai tad, ja jums vajag, lai Nitro materializē apstrādātāju maršrutus, kad `publicAssets` vēl nav uzrakstījis koku (iepriekš sapludināts `publicAssets` jau izveido `{page}/{locale}/data.json`).
+- **`publicDir` noklusējums ir `apiBaseUrl`**, nevis `translationDir`. Statiskā izvade pārvietojas, piem., no `public/locales/...` uz `public/_locales/{page}/{locale}/data.json`, ja vien neiestatāt `publicDir` skaidri.
+- **Iepriekš sapludinātās krātuves izkārtojums** tagad ir `{page}/{locale}/data.json` (bija `pages/{page}/{locale}.json`). Visam, kas lasīja Nitro/krātuves atslēgas vai kopēja kokus pēc vecās formas, jābūt atjauninātam.
+- **Node vidē `serverAssets: true` vairs nenozīmē Nitro iegulšanu** — tas nozīmē lokālu SSR caur publisko kopiju. Īsta Rollup `raw:` iegulšana paliek tikai Edge.
+
+## Migrācija {#migration}
+
+1. Noņemiet jebkādu kodu, kas lasīja `payload.data['i18n-ssr-chunks']` vai izsauca `seedFromSsrChunks` / `setSsrChunk`.
+2. Tīri statiskiem hostiem: saglabājiet noklusējuma premerged + `publicAssets` (faili nonāk `/_locales/.../data.json`) vai iestatiet `prerenderRoutes: true` / izvietojiet datus CDN.
+3. Cloudflare / citam Edge: lieliem katalogiem iestatiet `translationPayloads: { mode: 'source' }`; pievienojiet `publicAssets: true` tikai tad, ja jums vajag statisku/CDN kopiju.
+4. Ja paļāvāties uz datiem zem `public/<translationDir>`, iestatiet `translationPayloads.publicDir` vai norādiet rīkiem `public/<apiBaseUrl>`.
+
+## Labojums: izlaist atspējotās lokalizācijas iepriekš sapludinātajos publiskajos datos {#fix-skip-disabled-locales-in-premerged-public-payloads}
+
+`preMergeLocales` tagad raksta `{page}/{locale}/data.json` tikai lokalizācijām, kas nodotas sapludināšanai (būves laika `locale.disabled: true` tiek izlaists). Iepriekš katra JSON lokalizācija diskā tika nokopēta uz `public/`, tāpēc Nitro static pasniedza atspējotās lokalizācijas ar 200 un apgāja apstrādātāju. Izpildlaika `disabledLocales` joprojām nevar atcelt jau uzbūvētu failu publicēšanu — izmantojiet `locale.disabled` būves laikā, kad ieslēgts `publicAssets` / Node publiskā SSR kopija.
+
+## Kāpēc tas ir svarīgi {#why-it-matters}
+
+- Node būves paliek vieglas: nav vairāku GB Rollup `raw:` lēciena no tulkojumu katalogiem.
+- Publiskajiem failiem un klienta `$fetch` URL ir viens ceļu izkārtojums — statiskā hostēšana darbojas bez īpašas pārkartēšanas.
+- Edge joprojām var iegult kompaktus `source` datus, nepiespiežot dublētu publisku koku.
+
+Pilns izmaiņu žurnāls tiks publicēts kopā ar laidienu [GitHub](https://github.com/s00d/nuxt-i18n-micro/blob/main/CHANGELOG.md).
+
+---

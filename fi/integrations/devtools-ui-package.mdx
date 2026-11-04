@@ -1,0 +1,134 @@
+---
+title: "DevTools UI"
+description: "Käännöseditori Viten kehityspalvelimille sekä silta, joka yhdistää sen mihin tahansa @i18n-micro-instanssiin."
+---
+
+`@i18n-micro/devtools-ui` on Nuxt DevTools -välilehden käännöseditori, paketoituna web-komponentiksi Vite-liitännäisen kanssa. Lisää se Vue-, React-, Preact-, Solid- tai Astro-projektiin selataksesi ja muokataksesi käännöskansiosi JSON-tiedostoja selaimessa kehityksen aikana. Nuxt-sovelluksissa se on jo valmiina [Nuxt DevToolsissa](/fi/guide/devtools).
+
+![The DevTools UI: a file tree and an editor with the default-locale text next to each key](/images/devtools/02-translations-editor-dark.webp)
+
+## Asennus {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add -D @i18n-micro/devtools-ui
+```
+
+```bash npm
+npm install -D @i18n-micro/devtools-ui
+```
+
+```bash yarn
+yarn add -D @i18n-micro/devtools-ui
+```
+
+</CodeGroup>
+
+Ei vertaisriippuvuuksia.
+
+## Käyttöönotto {#setup}
+
+```ts
+// vite.config.ts
+import { defineConfig } from 'vite'
+import { i18nDevToolsPlugin } from '@i18n-micro/devtools-ui/vite'
+
+export default defineConfig({
+  plugins: [i18nDevToolsPlugin({ translationDir: 'src/locales' })],
+})
+```
+
+| Asetus | Oletus | Huomiot |
+| --- | --- | --- |
+| `translationDir` | `'src/locales'` | JSON-tiedostojen kansio suhteessa Viten juureen. |
+| `base` | `'/__i18n_api'` | API-päätepisteiden peruspolku. |
+| `injectButton` | `true` | Lisää kelluvan painikkeen sivuille, jotka tarjoillaan Viten `index.html`-muunnoksen kautta. Astrossa tällaisia sivuja ei ole: katso alta. |
+| `defaultLocale` | ensimmäinen locale-tiedosto kansiossa `translationDir` | Palautetaan `/config`-päätepisteestä. |
+| `fallbackLocale` | `defaultLocale` | Palautetaan `/config`-päätepisteestä. |
+
+Liitännäinen toimii vain kehityspalvelimella (`apply: 'serve'`); tuotantokäännös ei sisällä siitä mitään. Painike avaa sivun `/__i18n_devtools.html`, joka lukee ja tallentaa tiedostoja liitännäisen päätepisteiden kautta:
+
+| Päätepiste | Toiminto |
+| --- | --- |
+| `GET <base>/translations` | jokainen sanakirja kansiossa `translationDir`, suhteellisen polun mukaan |
+| `POST <base>/save` | runko `{ file, content }`; korvaa olemassa olevan `.json`-tiedoston kansiossa `translationDir`, 403 kaikelle muulle. Se ei koskaan luo tiedostoa |
+| `GET <base>/config` | `{ defaultLocale, fallbackLocale, locales, translationDir }`; `locales` tulevat kansion `translationDir` juuritiedostoista |
+
+Päätepisteet vastaavat vain devtools-sivulle: toisesta originista tai isännästä tuleva pyyntö saa vastauksen `403`, ja `/save` hyväksyy vain `application/json`-sisällön (`415`). Sivu saa tiedon tiedostomuutoksista Viten HMR-socketin kautta.
+
+Astrossa lisää liitännäisen sijaan integraatio. Se lisää sovelluksen kehitystyökalupalkkiin:
+
+```ts
+// astro.config.mjs
+import { defineConfig } from 'astro/config'
+import { i18nDevToolsIntegration } from '@i18n-micro/devtools-ui/vite'
+
+export default defineConfig({
+  integrations: [i18nDevToolsIntegration({ translationDir: 'src/locales' })],
+})
+```
+
+Tallennus vain kirjoittaa tiedoston. Sovellus, joka tuo JSONin Viten kautta, saa sen HMR:n kautta; jos haluat muokkausten koskevan suoraan käynnissä olevaa instanssia, käytä siltaa.
+
+## Silta käynnissä olevaan instanssiin {#bridge-to-a-live-instance}
+
+Upottaaksesi editorin omalle sivullesi ja saadaksesi muokkaukset heti käynnissä olevaan instanssiin, luo silta adapterista ja välitä se `<i18n-devtools-ui>`-elementille:
+
+```ts
+import { createBridge, register } from '@i18n-micro/devtools-ui'
+import { i18n, locales } from './i18n' // a runtime, React, Preact or Solid instance
+
+register() // defines <i18n-devtools-ui> once
+
+const bridge = createBridge({
+  adapter: {
+    getRouteCache: () => Object.fromEntries(i18n.storage.translations),
+    addTranslations: (locale, content, merge) => i18n.addTranslations(locale, content, merge),
+    addRouteTranslations: (locale, route, content, merge) => i18n.addRouteTranslations(locale, route, content, merge),
+    subscribe: (cb) => i18n.subscribe(cb),
+    getCurrentLocale: () => i18n.locale,
+  },
+  locales,
+  defaultLocale: 'en',
+  translationDir: 'src/locales',
+})
+
+const el = document.createElement('i18n-devtools-ui') as HTMLElement & { bridge: typeof bridge }
+el.bridge = bridge
+document.body.append(el)
+```
+
+`getRouteCache`-funktion on palautettava sanakirjat avaimilla `locale:route` (`en:index`, `en:blog-post`), mikä on juuri se, mitä `i18n.storage.translations` sisältää. Vue-instanssille käytä `i18n.global.getRouteCache()`- ja `i18n.global.subscribeToChanges(cb)`-kutsuja.
+
+`saveTranslation` päivittää ensin instanssin ja lähettää sitten POST-pyynnön osoitteeseen `<base>/save`. Kun päätepistettä ei ole (staattinen esikatselukäännös) tai kehityspalvelimeen ei saada yhteyttä, muokkaus säilytetään `localStorage`-tallennustilassa; mikä tahansa muu tallennusvirhe palauttaa edellisen sanakirjan ja heittää poikkeuksen.
+
+## API {#api}
+
+| Vienti | Sisääntulo |
+| --- | --- |
+| `i18nDevToolsPlugin(options)`, `i18nDevToolsIntegration(options)` | `@i18n-micro/devtools-ui/vite` |
+| `register()`, `I18nDevToolsElement` | `@i18n-micro/devtools-ui` |
+| `createBridge(options)`, tyypit `BridgeAdapter`, `CreateBridgeOptions` | `@i18n-micro/devtools-ui` (myös `/bridge/create`) |
+| tyyppi `I18nDevToolsBridge` | `@i18n-micro/devtools-ui` (myös `/bridge`) |
+| `createRpcClient`, `setupRpcHost` | `@i18n-micro/devtools-ui` |
+
+Täydelliset allekirjoitukset: [pakettiviite](/fi/api/packages/devtools-ui).
+
+## Aiheeseen liittyvää {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Nuxt DevTools" icon="book-open" href="/fi/guide/devtools">
+
+Sama editori Nuxtin sisällä
+
+</Card>
+
+<Card title="Kehykset" icon="book-open" href="/fi/integrations/overview">
+
+Instanssi ja sen `storage`
+
+</Card>
+
+</CardGroup>

@@ -1,0 +1,147 @@
+---
+title: "Testa din app"
+description: "Enhetstesta komponenter som använder $t med @i18n-micro/test-utils och Vitest, och kontrollera lokaliserade sidor end-to-end."
+---
+
+Komponenter som anropar `useI18n()` behöver en i18n-instans i enhetstester. `@i18n-micro/test-utils` ger dig en fejkad `useI18n()` med verklig logik för översättning, pluralisering och formatering, så att du kan montera en komponent med dina egna ordlistor och utan Nuxt-server. För routing och omdirigeringar kör du den riktiga modulen end-to-end med `@nuxt/test-utils`.
+
+Den här sidan handlar om att testa din applikation. Hur det här repositoriet testar själva modulen beskrivs på [Testa modulen](https://s00d.github.io/nuxt-i18n-micro/contributing/testing).
+
+## Installation {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add -D @i18n-micro/test-utils @nuxt/test-utils vitest @vue/test-utils happy-dom
+```
+
+```bash npm
+npm install -D @i18n-micro/test-utils @nuxt/test-utils vitest @vue/test-utils happy-dom
+```
+
+</CodeGroup>
+
+## Mocka useI18n {#mock-usei18n}
+
+```ts
+// tests/unit-setup.ts
+import { setupNuxtI18nMock } from '@i18n-micro/test-utils'
+import { mockNuxtImport } from '@nuxt/test-utils/runtime'
+import { beforeEach, vi } from 'vitest'
+
+export const { i18n, useI18n, setTranslationsFromJson } = setupNuxtI18nMock({
+  spy: vi.fn, // every method becomes a vi.fn, so you can assert calls
+  beforeEach, // reset state and reseed `translations` before each test
+  translations: { welcome: 'Welcome' },
+})
+
+mockNuxtImport('useI18n', () => useI18n)
+```
+
+```ts
+// vitest.config.ts
+import { defineVitestConfig } from '@nuxt/test-utils/config'
+
+export default defineVitestConfig({
+  test: {
+    environment: 'nuxt',
+    setupFiles: ['./tests/unit-setup.ts'],
+  },
+})
+```
+
+Behåll `mockNuxtImport` i setup-filen: `@nuxt/test-utils` måste transformera den. `setupNuxtI18nMock` använder en privat översättningscache, så parallella testfiler delar inte tillstånd.
+
+## Skriv ett test {#write-a-test}
+
+```vue
+<!-- components/Greeting.vue -->
+<script setup lang="ts">
+const { $t } = useI18n()
+</script>
+
+<template>
+  <p>{{ $t('welcome') }}</p>
+</template>
+```
+
+```ts
+// tests/greeting.spec.ts
+import { mountSuspended } from '@nuxt/test-utils/runtime'
+import { expect, it } from 'vitest'
+import Greeting from '~/components/Greeting.vue'
+import de from '~/locales/de.json'
+import { i18n, setTranslationsFromJson } from './unit-setup'
+
+it('renders the German greeting', async () => {
+  await setTranslationsFromJson('de', de)
+  i18n.setLocale('de')
+
+  const wrapper = await mountSuspended(Greeting)
+  expect(wrapper.text()).toBe('Willkommen') // de.json: { "welcome": "Willkommen" }
+})
+```
+
+Fejken exponerar samma metoder som den riktiga `useI18n()` (`$t`, `$tc`, `$tn`, `$td`, `$has`, `$localePath`, …, med och utan `$`) plus setters för tester: `setLocale`, `setLocales`, `setDefaultLocale`, `setRouteName`, `setTranslationsFromJson`, `loadPageTranslations`, `mergeTranslations`, `setMissingHandler`.
+
+`$localePath` och `$switchLocalePath` är stubbar som prefixar sökvägen enligt alternativet `strategy` (ingen riktig router). Testa riktiga länkar och omdirigeringar end-to-end.
+
+## Hjälpfunktioner på lägre nivå {#lower-level-helpers}
+
+| Hjälpfunktion | Använd den för |
+| --- | --- |
+| `createIsolatedFakeI18n(options)` | En isolerad fejk utan Nuxts `useI18n`-koppling, t.ex. för vanlig `@vue/test-utils` `mount` med `global.mocks`. |
+| `createFakeI18n(options)` | En fejk på den delade modulcachen (anropa `resetI18n()` i `beforeEach`), eller isolerad med `isolated: true`. |
+| `createI18nTestContext(options)` | Kontexten bakom båda, när du behöver flera fejkar. |
+| `t`, `tc`, `ts`, `tn`, `td`, `tdr`, `has` | Direkta anrop på den delade kontexten, för att testa vanliga funktioner. |
+
+Mocken är en `BaseI18n`: `t`, `tc`, `tn`, `td`, `tdr` och `has` är de riktiga, på riktiga ordlistor, så ett test ser det som appen visar.
+
+Fabrikshjälpfunktionerna ovan accepterar `locale`, `defaultLocale`, `locales`, `routeName`, `strategy`, `translations` och `messages` (ordlistor per locale). Ett komplett exempelprojekt finns i [`packages/test-utils/example`](https://github.com/s00d/nuxt-i18n-micro/tree/main/packages/test-utils/example).
+
+## End-to-end-tester {#end-to-end-tests}
+
+Routing, omdirigeringar, SEO-taggar och laddning av data kräver den riktiga modulen. Starta din app med `@nuxt/test-utils/e2e`:
+
+```ts
+// tests/e2e/locales.test.ts
+import { $fetch, fetch, setup } from '@nuxt/test-utils/e2e'
+import { describe, expect, it } from 'vitest'
+
+describe('locales', async () => {
+  await setup({ server: true })
+
+  it('serves the German page', async () => {
+    expect(await $fetch('/de')).toContain('lang="de-DE"')
+  })
+
+  it('redirects / for a German browser', async () => {
+    const res = await fetch('/', { headers: { 'accept-language': 'de' }, redirect: 'manual' })
+    expect(res.headers.get('location')).toBe('/de')
+  })
+})
+```
+
+Det andra testet förutsätter `prefix` (eller `prefix_except_default` med en annan standard-locale); se [Detektering av locale](/sv/guide/locale-detection) för när `/` omdirigerar.
+
+## Relaterat {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Testa modulen" icon="code-pull-request" href="https://s00d.github.io/nuxt-i18n-micro/contributing/testing">
+
+</Card>
+
+<Card title="useI18n" icon="brackets-curly" href="/sv/composables/useI18n">
+
+</Card>
+
+<Card title="Detektering av locale" icon="book-open" href="/sv/guide/locale-detection">
+
+</Card>
+
+<Card title="Storybook" icon="book-open" href="/sv/guide/storybook">
+
+</Card>
+
+</CardGroup>

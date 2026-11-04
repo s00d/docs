@@ -1,0 +1,83 @@
+---
+title: "v3.20.0 — 執行階段層重構與重新導向拆分"
+description: "版本說明：v3.20.0 — 執行階段層重構與重新導向拆分"
+---
+
+**日期**：2026-05-14
+
+**版本**：`v3.20.0`
+
+![v3.20.0 release](/images/3.20.0.png)
+
+此版本將 Nuxt 執行階段重構為專屬的 **`NuxtI18n`** 層，拆分伺服器／用戶端的重新導向處理，並修正多個 SSR／hydration 回歸問題。對一般應用程式而言，公開的組合式函式與 `nuxt.config` 選項維持不變。
+
+## 有什麼新功能？ {#what’s-new}
+
+### `NuxtI18n` 與 `NuxtTranslationLoader` {#nuxti18n-&-nuxttranslationloader}
+
+執行階段的 i18n 邏輯從單體外掛移出，改由各司其職的類別負責：
+
+- **`NuxtI18n`** — 作用中的翻譯檢視層（`$t`、`$has`、語系／路由上下文、轉場合併／清理）
+- **`NuxtTranslationLoader`** — 載入區塊、在導覽時切換上下文、植入 SSR 酬載
+- **`createNuxtI18nPluginApi`** — 精簡的外掛介面（`$switchLocale`、`$localeRoute` 等）
+
+請參閱更新後的[快取與儲存架構](https://s00d.github.io/nuxt-i18n-micro/v3/api/i18n-cache-api)與[效能](/zh-Hant/guide/performance)。
+
+### 透過 `useState('i18n-ssr-chunks')` 傳遞 SSR 酬載 {#ssr-payload-via-usestate‘i18n-ssr-chunks’}
+
+SSR 翻譯透過 **Nuxt 狀態**序列化，而非 `window.__I18N__` script 標籤：
+
+1. 伺服器載入區塊 → `useState('i18n-ssr-chunks')`
+2. 用戶端 hydration → `translationStorage.seedFromSsrChunks()`
+3. 首次繪製時零額外請求
+
+舊版的 `window.__I18N__` 讀取路徑已**移除**。
+
+### 重新導向架構拆分 {#redirect-architecture-split}
+
+重新導向現在依環境區分，行為更清楚，用戶端卡頓也更少：
+
+| 環境    | 元件                      | 角色                                       |
+| -------------- | ------------------------------ | ------------------------------------------ |
+| **伺服器 SSR** | `06.redirect.ts`（僅限伺服器） | 渲染前 302、404 檢查、cookie 同步 |
+| **用戶端 SPA** | `i18n-redirect.global.ts`      | 導覽時的全域路由中介軟體      |
+
+用戶端重新導向會從**目標路由**推導語系，保留**查詢字串與 hash**，並遵守 `redirects: false`（不註冊中介軟體）。請參閱[語系偵測 — 各策略的重新導向](/zh-Hant/guide/locale-detection#redirects-per-strategy)。
+
+### `i18n:register` Hook 時機 {#i18nregister-hook-timing}
+
+**`05.hooks`** 外掛（`dependsOn: i18n-plugin-loader`）會在載入器就緒後觸發 `i18n:register` — 於啟動時與導覽時 — 讓使用者外掛能可靠地收到事件。可透過 `hooks: false` 停用。請參閱[事件](/zh-Hant/api/events)。
+
+### 建置時擷取 `defineI18nRoute` {#build-time-definei18nroute-extraction}
+
+一個 Vite unplugin 會在建置時掃描頁面的 `.vue` 檔案，並為 `@i18n-micro/route-strategy` 寫入路由 meta。`script setup` 中的執行階段 `$defineI18nRoute` 仍保留，供開發環境與內嵌設定使用。請參閱[元件層級翻譯](/zh-Hant/guide/per-component-translations)。
+
+## 錯誤修正 {#bug-fixes}
+
+- **SSR hydration** — 在 `Object.freeze` 之前複製響應式 SSR 區塊（修正用戶端 `#locale`／404 當機）
+- **語系切換** — 語系變更時替換檢視層（不會殘留前一個語系的鍵）
+- **用戶端重新導向** — 從目標路由取得語系；重新導向時保留查詢字串／hash
+- **`has()`** — 僅檢查作用中的語系；備援只套用於 `$t()`，不套用於 `$has()`
+- **`defineI18nRoute` meta** — 每個外掛實例各自快取；採用最長的 `rootDir` 比對；正確區分 `pages/index` 與 `pages/index/index` 路徑
+
+## 文件 {#documentation}
+
+指南與 API 參考已針對新架構更新：
+
+- [策略](/zh-Hant/guide/strategy)、[v3 升級](https://s00d.github.io/nuxt-i18n-micro/v3/guide/v3-upgrade)、[自訂語言偵測](/zh-Hant/guide/custom-auto-detect)
+- [FAQ — 不變更 URL 即切換語系](/zh-Hant/guide/faq#can-i-switch-locale-without-changing-the-url?)
+- [設定](https://s00d.github.io/nuxt-i18n-micro/v3/guide/configuration) — `redirects` 與 `hooks` 的行為
+
+## 破壞性變更 {#breaking-changes}
+
+標準的 `nuxt.config` + 組合式函式用法沒有破壞性變更。內部路徑與 SSR 注入機制已變更；依賴手動注入 `window.__I18N__` 的應用程式必須改用 Nuxt 酬載／模組 API。
+
+## 為什麼這很重要 {#why-it-matters}
+
+- **更可靠的 SSR → 用戶端交接** — 使用 Nuxt 原生狀態，而非臨時的全域變數
+- **更清楚的重新導向模型** — 伺服器在繪製前回傳 302；用戶端中介軟體只在需要時使用
+- **更容易維護** — 執行階段拆分為可測試的單元，並有針對性的回歸測試
+
+完整的 changelog 將隨版本發布於 [GitHub](https://github.com/s00d/nuxt-i18n-micro/blob/main/CHANGELOG.md)。
+
+---

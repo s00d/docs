@@ -1,0 +1,83 @@
+---
+title: "v3.20.0 — ランタイムレイヤーのリファクタリングとリダイレクトの分離"
+description: "リリースノート: v3.20.0 — ランタイムレイヤーのリファクタリングとリダイレクトの分離"
+---
+
+**日付**: 2026-05-14
+
+**バージョン**: `v3.20.0`
+
+![v3.20.0 リリース](/images/3.20.0.png)
+
+このリリースでは、Nuxt ランタイムを専用の **`NuxtI18n`** レイヤーにリファクタリングし、サーバー/クライアントのリダイレクト処理を分離し、SSR/ハイドレーションに関するいくつかのリグレッションを修正しました。一般的なアプリでは、公開コンポーザブルと `nuxt.config` のオプションに変更はありません。
+
+## 新機能 {#what’s-new}
+
+### `NuxtI18n` & `NuxtTranslationLoader` {#nuxti18n-&-nuxttranslationloader}
+
+ランタイムの i18n ロジックは、モノリシックなプラグインから、役割を絞ったクラスへと移されました。
+
+- **`NuxtI18n`** — アクティブな翻訳ビューレイヤー(`$t`、`$has`、ロケール/ルートのコンテキスト、トランジション時のマージ/クリーンアップ)
+- **`NuxtTranslationLoader`** — チャンクの読み込み、ナビゲーション時のコンテキスト切り替え、SSR ペイロードのシード
+- **`createNuxtI18nPluginApi`** — 薄いプラグインのインターフェース(`$switchLocale`、`$localeRoute` など)
+
+更新された [キャッシュとストレージのアーキテクチャ](https://s00d.github.io/nuxt-i18n-micro/v3/api/i18n-cache-api) と [パフォーマンス](/ja-jp/guide/performance) を参照してください。
+
+### `useState('i18n-ssr-chunks')` による SSR ペイロード {#ssr-payload-via-usestate‘i18n-ssr-chunks’}
+
+SSR の翻訳は、`window.__I18N__` の script タグではなく、**Nuxt の state** を通じてシリアライズされます。
+
+1. サーバーがチャンクを読み込む → `useState('i18n-ssr-chunks')`
+2. クライアントがハイドレートする → `translationStorage.seedFromSsrChunks()`
+3. 初回描画時の追加フェッチはゼロ
+
+従来の `window.__I18N__` を読み取る経路は**削除されました**。
+
+### リダイレクトアーキテクチャの分離 {#redirect-architecture-split}
+
+動作をより明確にし、クライアントでのもたつきを減らすため、リダイレクトは環境ごとに処理されるようになりました。
+
+| 環境           | コンポーネント                 | 役割                                       |
+| -------------- | ------------------------------ | ------------------------------------------ |
+| **サーバー SSR** | `06.redirect.ts`(サーバー専用) | レンダリング前の 302、404 チェック、Cookie の同期 |
+| **クライアント SPA** | `i18n-redirect.global.ts`      | ナビゲーション時のグローバルルートミドルウェア |
+
+クライアントのリダイレクトは**遷移先のルート**からロケールを導出し、**クエリ文字列とハッシュ**を保持し、`redirects: false` を尊重します(ミドルウェアは登録されません)。[ロケール検出 — 戦略ごとのリダイレクト](/ja-jp/guide/locale-detection#redirects-per-strategy) を参照してください。
+
+### `i18n:register` フックのタイミング {#i18nregister-hook-timing}
+
+**`05.hooks`** プラグイン(`dependsOn: i18n-plugin-loader`)は、ローダーの準備が整った後(起動時とナビゲーション時)に `i18n:register` を発火するため、ユーザープラグインは確実にイベントを受け取れます。`hooks: false` で無効にできます。[イベント](/ja-jp/api/events) を参照してください。
+
+### ビルド時の `defineI18nRoute` 抽出 {#build-time-definei18nroute-extraction}
+
+Vite の unplugin がビルド時にページの `.vue` ファイルをスキャンし、`@i18n-micro/route-strategy` 用のルートメタを書き出します。`script setup` 内のランタイムの `$defineI18nRoute` は、開発時とインライン設定用に引き続き利用できます。[コンポーネントごとの翻訳](/ja-jp/guide/per-component-translations) を参照してください。
+
+## バグ修正 {#bug-fixes}
+
+- **SSR ハイドレーション** — `Object.freeze` の前にリアクティブな SSR チャンクを複製するようにしました(クライアントでの `#locale` / 404 のクラッシュを修正)
+- **ロケール切り替え** — ロケール変更時にビューレイヤーを置き換えるようにしました(前のロケールの古いキーが残らない)
+- **クライアントリダイレクト** — 遷移先のルートからロケールを取得し、リダイレクト時にクエリ/ハッシュを保持します
+- **`has()`** — アクティブなロケールのみをチェックします。フォールバックは `$t()` では適用されますが、`$has()` では適用されません
+- **`defineI18nRoute` メタ** — プラグインインスタンスごとのキャッシュ、最長一致の `rootDir`、`pages/index` と `pages/index/index` の正しいパス
+
+## ドキュメント {#documentation}
+
+新しいアーキテクチャに合わせてガイドと API リファレンスを更新しました。
+
+- [戦略](/ja-jp/guide/strategy)、[v3 へのアップグレード](https://s00d.github.io/nuxt-i18n-micro/v3/guide/v3-upgrade)、[カスタム言語検出](/ja-jp/guide/custom-auto-detect)
+- [FAQ — URL を変えずにロケールを切り替える](/ja-jp/guide/faq#can-i-switch-locale-without-changing-the-url?)
+- [設定](https://s00d.github.io/nuxt-i18n-micro/v3/guide/configuration) — `redirects` と `hooks` の動作
+
+## 破壊的変更 {#breaking-changes}
+
+標準的な `nuxt.config` + コンポーザブルの使い方では、ありません。内部パスと SSR インジェクションの仕組みは変更されました。`window.__I18N__` の手動インジェクションに依存していたアプリは、代わりに Nuxt のペイロード / モジュール API を使用する必要があります。
+
+## なぜ重要なのか {#why-it-matters}
+
+- **SSR からクライアントへの受け渡しの信頼性向上** — その場しのぎのグローバル変数ではなく、Nuxt ネイティブの state を使用
+- **より明確なリダイレクトモデル** — 描画前にサーバーが 302 を返し、クライアントミドルウェアは必要な場合のみ
+- **保守のしやすさ** — ランタイムをテスト可能な単位に分割し、対象を絞ったリグレッションテストを追加
+
+完全な変更履歴は、リリース時に [GitHub](https://github.com/s00d/nuxt-i18n-micro/blob/main/CHANGELOG.md) で公開されます。
+
+---

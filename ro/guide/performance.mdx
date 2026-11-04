@@ -1,0 +1,261 @@
+---
+title: "Optimizarea performanței"
+description: "Setările care modifică memoria, dimensiunea payload-urilor și cache-ul și cum măsurați ce livrează aplicația voastră."
+---
+
+Valorile implicite sunt optimizate pentru o aplicație obișnuită: un payload JSON pentru fiecare pagină și locale, traducerile ținute în afara HTML-ului, cache-uri limitate pe server. Această pagină listează puținele setări care merită modificate când un catalog este mare, serverul are memorie limitată sau payload-urile provin de la alt host. Pentru cifre măsurate în comparație cu `@nuxtjs/i18n` și Nuxt simplu, vedeți [Benchmark-uri](/ro/guide/performance-results).
+
+## Ce fac deja valorile implicite {#what-the-defaults-already-do}
+
+- **Un payload per pagină.** Build-ul combină cheile rădăcină, cele ale paginii și cele ale locale-ului de rezervă în `/_locales/<page>/<locale>/data.json`, astfel încât o pagină încarcă un singur fișier, iar `$t` este o singură căutare.
+- **Niciun dicționar în HTML.** SSR păstrează traducerile în memoria serverului; browserul descarcă payload-ul în loc să îl parseze din `__NUXT_DATA__`.
+- **Cache în browser.** `?v=` se schimbă doar când se schimbă traducerile, așa că un browser își păstrează payload-urile între deploy-urile care nu le-au atins. Copia statică a unui host este proaspătă timp de 60 de secunde și apoi se revalidează: o încărcare repetată așteaptă un singur `304`. Ruta serverului răspunde `immutable` timp de un an ([Deployment](/ro/guide/deployment#cache-headers-and-datebuild)).
+- **Memorie limitată pe server.** Serverul păstrează în cache cel mult 1000 de payload-uri în mod implicit și le elimină pe cele mai puțin recent utilizate.
+
+## Împărțirea traducerilor pe pagini {#split-translations-by-page}
+
+Cheile folosite pe o singură pagină își au locul în `locales/pages/<page>/<locale>.json`, nu în fișierele rădăcină: cheile rădăcină fac parte din payload-ul fiecărei pagini. Vedeți [Fișiere de traduceri](/ro/guide/translations).
+
+Două setări modifică această împărțire:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    // pages that show the same keys share one payload: /de/products/123 loads the products payload
+    routesLocaleLinks: { 'products-id': 'products' },
+    // or: no page files at all, every page loads only the root dictionary
+    // disablePageLocales: true,
+  },
+})
+```
+
+[`routesLocaleLinks`](/ro/api/module-options#routeslocalelinks) elimină payload-urile duplicate pentru rutele înrudite. [`disablePageLocales`](/ro/api/module-options#disablepagelocales) se potrivește aplicațiilor mici, unde un singur dicționar per locale este mai simplu.
+
+## Cache-uri pe server {#server-caches}
+
+| Setare | Implicit | Efect |
+| --- | --- | --- |
+| [`cacheMaxSize`](/ro/api/module-options#cachemaxsize) | `0` | Numărul maxim de intrări în cache-urile de payload-uri. `0` = fără limită în browser, 1000 pe server. |
+| [`cacheTtl`](/ro/api/module-options#cachettl) | `0` | Secunde înainte ca o intrare din cache să fie reîncărcată. `0` = niciodată; setați-l când payload-urile provin de la `apiBaseServerHost` și se schimbă fără redeploy. |
+| `serverTranslationPreload` | `false` | Încarcă payload-ul `index` în middleware-ul Nitro pentru fiecare cerere de pagină, astfel încât helperii de server și pagina principală îl refolosesc. |
+
+Micșorați `cacheMaxSize` pe o instanță mică cu multe pagini × locale-uri. Traducerile editate local nu au niciodată nevoie de TTL: în dev fișierele sunt citite în timp real, iar payload-urile de producție se schimbă doar la un deploy.
+
+## Memoria pe un server Node {#memory-on-a-node-server}
+
+Sub încărcare constantă, un server Node poate ajunge la aproximativ 12 ori heap-ul său activ și poate rămâne acolo. Într-un test de stres cu 100k chei per pagină, un heap activ de 90 MB a rulat la aproximativ 1,1 GB RSS. Nu este o scurgere de memorie. După un ciclu GC supradimensionat, V8 își ridică limita heap-ului și păstrează paginile eliberate într-un pool pentru refolosire cât timp durează încărcarea. La aproximativ 8 secunde după oprirea încărcării, pool-ul se golește și RSS scade la aproximativ 160 MB. `global.gc()` nu returnează această memorie. Nuxt simplu fără modul face același lucru, proporțional cu heap-ul său mai mic.
+
+Costul este rezerva de memorie: cu o limită de memorie sub acel nivel și fără plafon pentru heap, procesul poate fi oprit forțat. Setați un plafon care se încadrează în limita voastră și este cu mult peste heap-ul activ:
+
+```bash
+NODE_OPTIONS=--max-old-space-size=512 node .output/server/index.mjs
+```
+
+| 100k chei, 12 locale-uri, 5 până la 30 de minute de încărcare | Implicit | `--max-old-space-size=512` |
+| --- | --- | --- |
+| RSS sub încărcare | aproximativ 1.150 MB | 254-287 MB |
+| Cereri pe secundă | 624 | 517-572 |
+
+Așadar, plafonul sacrifică 8 până la 10 % din throughput în schimbul memoriei. Un catalog de dimensiune obișnuită are un heap mai mic și un salt mai mic. Aceste rulări au fost făcute pe macOS cu Node 22, nu într-un container.
+
+## Timpul de parsare și `dir` {#parse-time-and-dir}
+
+`dir: 'auto'` pe un locale face ca browserul să deducă direcția din conținut în timpul parsării. În Chromium, DOMContentLoaded la 20.000 de elemente a fost de aproximativ 1,1 s cu `dir="auto"` și 0,1 s fără, iar la 5.000 de elemente aproximativ 130 ms față de 45 ms. Lăsați `dir` nesetat sau setați-l la `ltr` sau `rtl` ([Direcția textului](/ro/guide/seo#text-direction)).
+
+## Cache comun pentru mai multe instanțe {#shared-cache-for-several-instances}
+
+Cu mai multe instanțe ale aceluiași build, [`cacheStorage`](/ro/api/module-options#other) le oferă un singur cache de dicționare în orice stocare Nitro, pe conexiunea pe care aplicația voastră o configurează în `nitro.storage`. Modulul nu adaugă niciun connector și nicio dependență.
+
+**Este un cache, nu o sursă.** Traducerile provin din payload-urile încorporate sau publice ori de la `apiBaseServerHost`. Se scrie doar ce a venit de la sursă, iar cheile conțin build-ul, așa că o stocare completată manual nu este citită. Pentru a servi traduceri din KV sau dintr-o bază de date, puneți la `apiBaseServerHost` o rută mică care le citește.
+
+**Când ajută.** Doar cu un `apiBaseServerHost` la distanță. Trei instanțe care parcurg 39 de dicționare au făcut 117 cereri către host fără el și 48 cu el. Cu fișiere pe disc, o citire din stocare nu este mai rapidă decât fișierul, iar o primă trecere prin 12 pagini a durat 280-296 ms fără opțiune și 308-325 ms cu un Redis populat, așa că lăsați-o nesetată. Pe un preset care încorporează dicționarele nu face nimic fără un host, iar build-ul vă spune asta.
+
+Un dicționar rece, un client, o parcurgere fiecare, deci aproximativ, iar cea mai mare parte este distanța până la host:
+
+| Stocare | De la host | Din stocare |
+| --- | --- | --- |
+| Cloudflare KV | aproximativ 300 ms | aproximativ 110 ms |
+| D1 | aproximativ 230 ms | aproximativ 115 ms |
+| Deno KV | aproximativ 430 ms | aproximativ 100 ms |
+| Upstash, Vercel serverless | aproximativ 445 ms | aproximativ 245 ms |
+| Upstash, Vercel Edge | aproximativ 505 ms | aproximativ 235 ms |
+
+### Redis {#redis}
+
+Necesită `ioredis` în proiectul vostru.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      redis: { driver: 'redis', url: process.env.REDIS_URL },
+    },
+  },
+  i18n: {
+    cacheStorage: 'redis', // the mount name
+    apiBaseServerHost: 'https://translations.internal',
+    cacheTtl: 300,
+  },
+})
+```
+
+### Upstash pe Vercel și Vercel Edge {#upstash-on-vercel-and-vercel-edge}
+
+Folosiți driverul `upstash` pe ambele: acesta comunică prin REST, în timp ce driverul `redis` necesită TCP. Necesită `@upstash/redis` în proiectul vostru și citește `UPSTASH_REDIS_REST_URL` și `UPSTASH_REDIS_REST_TOKEN` din mediu.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      upstash: { driver: 'upstash' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'upstash',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+### Cloudflare KV {#cloudflare-kv}
+
+Legați un namespace la Worker ca `I18N_KV` (`kv_namespaces` în configurația sa wrangler).
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      kv: { driver: 'cloudflare-kv-binding', binding: 'I18N_KV' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'kv',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+Un host care este un alt Worker din același cont necesită flag-ul de compatibilitate `global_fetch_strictly_public`, altfel fetch-ul nu ajunge la el.
+
+### Cloudflare D1 {#cloudflare-d1}
+
+`nitro.storage` nu poate conține un obiect de bază de date, așa că un plugin Nitro montează driverul. Montarea este verificată la prima utilizare, deci este suficient de devreme. Legați baza de date ca `I18N_DB` (`d1_databases`) și aveți `unstorage` în proiectul vostru.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    experimental: { database: true },
+    database: {
+      default: { connector: 'cloudflare-d1', options: { bindingName: 'I18N_DB' } },
+    },
+  },
+  i18n: {
+    cacheStorage: 'd1',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+```ts
+// server/plugins/i18n-storage.ts
+import dbDriver from 'unstorage/drivers/db0'
+
+export default defineNitroPlugin(() => {
+  useStorage().mount('d1', dbDriver({ database: useDatabase() }))
+})
+```
+
+Driverul `db0` este marcat ca experimental și ignoră TTL-ul: rândurile build-urilor vechi rămân până le ștergeți.
+
+### Deno KV {#deno-kv}
+
+Pe Deno Deploy, provizionați o bază de date (`deno deploy database provision <name> --kind denokv`), atribuiți-o aplicației (`deno deploy database assign`) și folosiți driverul:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      kv: { driver: 'deno-kv' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'kv',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+### Cum se comportă {#how-it-behaves}
+
+Un dicționar este căutat în cache-ul propriu al instanței, apoi în stocarea comună, apoi la sursa sa. Cache-ul propriu al instanței rămâne, deoarece `$t` este sincron și are nevoie de arbore în memorie: aceasta separă cine descarcă de cine servește, nu economisește memorie.
+
+- **Cine descarcă.** Cu un host la distanță, o singură descărcare din backend per dicționar în loc de una per instanță. Instanțele care ratează în același moment îl descarcă fiecare, deoarece nu există lock.
+- **Paginile fără dicționar propriu** nu sunt stocate, pentru ca nume de pagini inventate să nu poată adăuga chei. Fiecare instanță descarcă o astfel de pagină de la host o singură dată, iar pe Workers, unde izolatele apar și dispar, acesta este un flux constant.
+- **Host-ul este căzut.** Paginile cu un dicționar stocat funcționează. O pagină fără dicționar se randează din dicționarul rădăcină stocat, cu propriile chei brute, cu [un `503` pe care niciun cache nu îl păstrează](/ro/guide/deployment#when-a-dictionary-cannot-be-read), iar `/_locales` răspunde `503` pentru ea până când host-ul revine. `useTranslationServerMiddleware` răspunde cu chei pentru un dicționar pe care nu îl poate citi.
+- **Host-ul** este `NUXT_I18N_APP_BASE_SERVER_HOST` la runtime sau, altfel, `apiBaseServerHost` din build, la fel ca fără opțiune. Pe un preset care încorporează dicționarele (Cloudflare, Vercel, Netlify, vedeți [Deployment](/ro/guide/deployment#serverless-and-edge)), layer-ul se aplică doar cu un host: datele sunt deja în bundle, iar o copie în KV ar fi o citire prin rețea pentru ceea ce memoria deține deja.
+- **Cheile** sunt `i18n-micro:<buildId>~<dateBuild>~<fallbackLocale>~<host>:<locale>:<page>`, astfel încât două build-uri dintr-un rolling deploy nu se citesc niciodată reciproc, și nici două backend-uri ale aceluiași artefact. Fiecare instanță trebuie să provină din același build (un singur artefact sau un [`buildId`](https://nuxt.com/docs/api/nuxt-config#buildid) Nuxt fixat); instanțele construite separat pur și simplu nu partajează. Cu un `buildId` fixat și `dateBuild: 0`, două build-uri diferite partajează chei. Sunt căutate doar locale-urile activate, iar numele de pagini de peste 200 de caractere ocolesc layer-ul.
+- **Ce se stochează.** Un dicționar este comparat cu cel rădăcină (`__root`) înainte de a fi scris și intră doar când conține toate cheile rădăcină și diferă de rădăcină. Astfel, o pagină inventată la care s-a răspuns cu rădăcina nu adaugă nicio cheie, și nici corpul unei erori cu status 200 pe o pagină. Fiecare instanță citește o astfel de pagină de la sursă o singură dată. Un host trebuie să răspundă la paginile necunoscute cu rădăcina, un obiect gol sau un 404 și să servească `__root`. Un host fără `__root` sau unul care servește pagini fără cheile rădăcină nu partajează nimic. Dacă host-ul răspunde la `__root` însuși cu o eroare bine formată, aceasta este stocată: păstrați `cacheTtl` scurt când backend-ul poate face asta.
+- **Expirare.** O intrare expiră la `cacheTtl` secunde după ce a fost scrisă sau după o zi când `cacheTtl` este `0`, astfel încât cheile build-urilor vechi nu se pot acumula. O valoare poate rămâne în cache-ul propriu al unei instanțe încă un `cacheTtl` și în cache-ul de chunk-uri al randării încă unul: modificările din backend apar în cel mult de trei ori `cacheTtl`. Driverele fără expirare (`fs`) păstrează cheile vechi până le eliminați.
+- **Când stocarea eșuează**, pagina nu eșuează. O citire poate dura 1 secundă, ceea ce acoperă un handshake de conexiune și o cheie Cloudflare KV rece în acea locație. După un eșec, limita este de 250 ms până când stocarea răspunde din nou. Trei eșecuri consecutive închid layer-ul timp de 5 secunde. Cât timp este închis și cât timp o citire tocmai a eșuat, nu se scrie nimic. O scriere eșuată nu închide nimic, așa că o replică read-only continuă să servească citiri. O stocare ale cărei răspunsuri durează mai mult decât aceste limite este considerată defectă: o ratare, iar dicționarul vine de la sursa sa. Cu ioredis, asta începe în jur de 400 ms per comandă, deoarece handshake-ul său necesită trei drumuri dus-întors. Modulul înregistrează un avertisment pe minut; ioredis își afișează propriile erori pe deasupra. O valoare care nu este un dicționar contează ca ratare și este suprascrisă. Un nume de montare necunoscut generează un avertisment o dată, la prima utilizare; aplicația rulează apoi fără layer.
+- **Când sursa eșuează**, nimic nu păstrează eșecul. O descărcare eșuată sau un fișier ilizibil nu ajunge în niciun cache, nici în acesta, nici în cel propriu al instanței, iar următoarea cerere citește din nou. Vedeți [Deployment](/ro/guide/deployment#when-a-dictionary-cannot-be-read).
+- **Dezactivat în dev și la prerender**, care își citesc fișierele și nu trebuie să depindă de Redis-ul vostru de producție.
+- **Invalidare.** Nu există un apel de purjare: un build nou folosește chei noi. Pentru a reîmprospăta imediat un build care rulează, eliminați cheile `i18n-micro:` din stocare și reporniți instanțele. `clearCache` și HMR afectează doar starea procesului.
+- Modificările de la runtime (`$mergeTranslations`, `$defineI18nRoute`) rămân în randarea sau browserul care le-a făcut și nu sunt niciodată scrise în stocare.
+
+## Dimensiunea payload-urilor {#payload-size}
+
+Build-ul afișează un avertisment când output-ul de payload-uri depășește `translationPayloads.warnFileCount` (500 de fișiere) sau `warnSizeBytes` (10 MB). Când se întâmplă asta:
+
+- mutați cheile specifice unei pagini din fișierele rădăcină;
+- legați rutele care afișează aceleași chei (`routesLocaleLinks`);
+- pe serverless sau Edge, folosiți `translationPayloads.mode: 'source'`, astfel încât bundle-ul serverului să încorporeze surse compacte în loc de fiecare pagină × locale ([Deployment](/ro/guide/deployment#serverless-and-edge)). Un build Edge afișează singur un avertisment peste limita platformei ([Limitele bundle-ului](/ro/guide/deployment#bundle-limits-on-edge));
+- activați `nitro.compressPublicAssets` pentru copii `.gz` / `.br` ale payload-urilor statice.
+
+## Măsurare {#measuring}
+
+Repository-ul urmărește ce livrează playground-ul cu `pnpm run budget:payload`; cifrele actuale:
+
+Măsurat pe `playground` pentru `/`, `/de`:
+
+| Măsurătoare | Dimensiune |
+| --- | --- |
+| Surse de traduceri pe disc | 7.8 MB |
+| Servite ca fișiere de payload separate | 23.9 MB |
+| Cel mai mare `__NUXT_DATA__` inline | 0.4 KB |
+| Resurse client | 624.4 KB |
+
+Playground-ul este un banc de test cu dicționare generate de până la 100k chei, așa că acestea nu sunt cifre de așteptat de la o aplicație
+reală — sunt un punct fix față de care se măsoară. Bugetul eșuează când acestea cresc în mod neașteptat,
+iar așa se observă o modificare accidentală a ceea ce transportă payload-ul.
+
+Rulați singuri suita de benchmark-uri cu `pnpm test:performance`; modul în care funcționează este descris în [metodologia benchmark-urilor](https://s00d.github.io/nuxt-i18n-micro/contributing/performance-methodology).
+
+## Conexe {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Benchmark-uri" icon="book-open" href="/ro/guide/performance-results">
+
+</Card>
+
+<Card title="Deployment" icon="book-open" href="/ro/guide/deployment">
+
+</Card>
+
+<Card title="Fișiere de traduceri" icon="book-open" href="/ro/guide/translations">
+
+</Card>
+
+</CardGroup>

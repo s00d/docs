@@ -1,0 +1,261 @@
+---
+title: "Penyetelan performa"
+description: "Pengaturan yang memengaruhi memori, ukuran payload, dan caching, serta cara mengukur apa yang dikirim aplikasi Anda."
+---
+
+Nilai default sudah disetel untuk aplikasi pada umumnya: satu payload JSON per halaman dan locale, terjemahan tidak dimasukkan ke HTML, dan cache yang dibatasi di server. Halaman ini mencantumkan beberapa pengaturan yang layak diubah ketika katalog berukuran besar, server memiliki keterbatasan memori, atau payload berasal dari host lain. Untuk angka hasil pengukuran dibandingkan dengan `@nuxtjs/i18n` dan Nuxt biasa, lihat [Benchmark](/id/guide/performance-results).
+
+## Apa yang sudah dilakukan oleh default {#what-the-defaults-already-do}
+
+- **Satu payload per halaman.** Build menggabungkan kunci root, halaman, dan locale fallback ke dalam `/_locales/<page>/<locale>/data.json`, sehingga sebuah halaman memuat satu file dan `$t` hanya berupa satu lookup.
+- **Tidak ada kamus di HTML.** SSR menyimpan terjemahan di memori server; browser mengambil payload alih-alih mem-parsing-nya dari `__NUXT_DATA__`.
+- **Cache browser.** `?v=` hanya berubah ketika terjemahan berubah, sehingga browser mempertahankan payload-nya di setiap deploy yang tidak menyentuhnya. Salinan statis di host dianggap segar selama 60 detik dan divalidasi ulang setelahnya: pemuatan berulang menunggu satu `304`. Rute server menjawab dengan `immutable` selama satu tahun ([Deployment](/id/guide/deployment#cache-headers-and-datebuild)).
+- **Memori server yang dibatasi.** Secara default server menyimpan paling banyak 1000 payload di cache dan membuang yang paling lama tidak digunakan.
+
+## Memisahkan terjemahan per halaman {#split-translations-by-page}
+
+Kunci yang digunakan di satu halaman sebaiknya ditempatkan di `locales/pages/<page>/<locale>.json`, bukan di file root: kunci root menjadi bagian dari payload setiap halaman. Lihat [File terjemahan](/id/guide/translations).
+
+Dua pengaturan mengubah pemisahan ini:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    // pages that show the same keys share one payload: /de/products/123 loads the products payload
+    routesLocaleLinks: { 'products-id': 'products' },
+    // or: no page files at all, every page loads only the root dictionary
+    // disablePageLocales: true,
+  },
+})
+```
+
+[`routesLocaleLinks`](/id/api/module-options#routeslocalelinks) mengurangi payload duplikat untuk rute yang saling terkait. [`disablePageLocales`](/id/api/module-options#disablepagelocales) cocok untuk aplikasi kecil yang lebih sederhana dengan satu kamus per locale.
+
+## Cache server {#server-caches}
+
+| Pengaturan | Default | Efek |
+| --- | --- | --- |
+| [`cacheMaxSize`](/id/api/module-options#cachemaxsize) | `0` | Jumlah entri maksimum di cache payload. `0` = tanpa batas di browser, 1000 di server. |
+| [`cacheTtl`](/id/api/module-options#cachettl) | `0` | Detik sebelum entri cache dimuat ulang. `0` = tidak pernah; tetapkan nilainya ketika payload berasal dari `apiBaseServerHost` dan berubah tanpa redeploy. |
+| `serverTranslationPreload` | `false` | Memuat payload `index` di middleware Nitro untuk setiap permintaan halaman, sehingga helper server dan halaman beranda menggunakannya kembali. |
+
+Turunkan `cacheMaxSize` pada instance kecil dengan banyak halaman × locale. Terjemahan yang diedit secara lokal tidak pernah memerlukan TTL: mode dev membaca file secara langsung, dan payload produksi hanya berubah saat deploy.
+
+## Memori pada server Node {#memory-on-a-node-server}
+
+Di bawah beban yang stabil, server Node dapat berada di sekitar 12 kali ukuran live heap-nya dan tetap di sana. Pada stress test dengan 100 ribu kunci per halaman, live heap sebesar 90 MB berjalan di sekitar 1,1 GB RSS. Ini bukan kebocoran memori. Setelah satu siklus GC yang terlalu besar, V8 menaikkan batas heap-nya dan menyimpan halaman memori yang telah dibebaskan di pool untuk digunakan kembali selama beban berlangsung. Sekitar 8 detik setelah beban berhenti, pool dikosongkan dan RSS turun ke sekitar 160 MB. `global.gc()` tidak mengembalikan memori ini. Nuxt biasa tanpa modul ini berperilaku sama, sebanding dengan heap-nya yang lebih kecil.
+
+Hal ini mengurangi ruang cadangan: dengan batas memori di bawah level tersebut dan tanpa batas heap, proses dapat dihentikan paksa. Tetapkan batas yang sesuai dengan limit Anda dan jauh di atas live heap:
+
+```bash
+NODE_OPTIONS=--max-old-space-size=512 node .output/server/index.mjs
+```
+
+| 100 ribu kunci, 12 locale, beban 5 hingga 30 menit | Default | `--max-old-space-size=512` |
+| --- | --- | --- |
+| RSS di bawah beban | sekitar 1.150 MB | 254-287 MB |
+| Permintaan per detik | 624 | 517-572 |
+
+Jadi, batas tersebut menukar 8 hingga 10 % throughput dengan memori. Katalog berukuran biasa memiliki heap yang lebih kecil dan lonjakan yang lebih kecil. Pengujian ini dijalankan di macOS dengan Node 22, bukan di dalam container.
+
+## Waktu parsing dan `dir` {#parse-time-and-dir}
+
+`dir: 'auto'` pada sebuah locale membuat browser menentukan arah teks dari konten saat mem-parsing. Di Chromium, DOMContentLoaded pada 20.000 elemen sekitar 1,1 dtk dengan `dir="auto"` dan 0,1 dtk tanpanya, dan pada 5.000 elemen sekitar 130 ms dibandingkan 45 ms. Biarkan `dir` tidak diatur atau tetapkan ke `ltr` atau `rtl` ([Arah teks](/id/guide/seo#text-direction)).
+
+## Cache bersama untuk beberapa instance {#shared-cache-for-several-instances}
+
+Dengan beberapa instance dari satu build, [`cacheStorage`](/id/api/module-options#other) memberi mereka satu cache kamus di storage Nitro mana pun, pada koneksi yang dikonfigurasi aplikasi Anda di `nitro.storage`. Modul tidak menambahkan konektor maupun dependensi.
+
+**Ini adalah cache, bukan sumber.** Terjemahan berasal dari payload yang disematkan atau payload publik, atau dari `apiBaseServerHost`. Hanya data yang berasal dari sumber yang ditulis, dan kunci membawa identitas build, sehingga store yang Anda isi secara manual tidak akan dibaca. Untuk menyajikan terjemahan dari KV atau database, tempatkan rute kecil yang membacanya di `apiBaseServerHost`.
+
+**Kapan ini membantu.** Hanya dengan `apiBaseServerHost` jarak jauh. Tiga instance yang menelusuri 39 kamus membuat 117 permintaan ke host tanpa opsi ini dan 48 dengan opsi ini. Dengan file di disk, hit dari store tidak lebih cepat daripada file, dan lintasan pertama atas 12 halaman memerlukan 280-296 ms tanpa opsi ini dan 308-325 ms dengan Redis yang sudah terisi, jadi biarkan tidak diatur. Pada preset yang menyematkan kamus, opsi ini tidak melakukan apa pun tanpa host, dan build akan memberi tahu hal tersebut.
+
+Kamus dingin, satu klien, satu penelusuran masing-masing, jadi angkanya kasar, dan sebagian besar adalah jarak ke host:
+
+| Store | Dari host | Dari store |
+| --- | --- | --- |
+| Cloudflare KV | sekitar 300 ms | sekitar 110 ms |
+| D1 | sekitar 230 ms | sekitar 115 ms |
+| Deno KV | sekitar 430 ms | sekitar 100 ms |
+| Upstash, Vercel serverless | sekitar 445 ms | sekitar 245 ms |
+| Upstash, Vercel Edge | sekitar 505 ms | sekitar 235 ms |
+
+### Redis {#redis}
+
+Memerlukan `ioredis` di proyek Anda.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      redis: { driver: 'redis', url: process.env.REDIS_URL },
+    },
+  },
+  i18n: {
+    cacheStorage: 'redis', // the mount name
+    apiBaseServerHost: 'https://translations.internal',
+    cacheTtl: 300,
+  },
+})
+```
+
+### Upstash di Vercel dan Vercel Edge {#upstash-on-vercel-and-vercel-edge}
+
+Gunakan driver `upstash` di keduanya: driver ini berkomunikasi melalui REST, sedangkan driver `redis` memerlukan TCP. Driver ini memerlukan `@upstash/redis` di proyek Anda, dan membaca `UPSTASH_REDIS_REST_URL` serta `UPSTASH_REDIS_REST_TOKEN` dari environment.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      upstash: { driver: 'upstash' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'upstash',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+### Cloudflare KV {#cloudflare-kv}
+
+Ikat sebuah namespace ke Worker sebagai `I18N_KV` (`kv_namespaces` di konfigurasi wrangler-nya).
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      kv: { driver: 'cloudflare-kv-binding', binding: 'I18N_KV' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'kv',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+Host yang merupakan Worker lain di akun yang sama memerlukan compatibility flag `global_fetch_strictly_public`, jika tidak, fetch tidak akan mencapainya.
+
+### Cloudflare D1 {#cloudflare-d1}
+
+`nitro.storage` tidak dapat menampung objek database, sehingga plugin Nitro yang me-mount driver. Mount diperiksa pada penggunaan pertama, jadi itu sudah cukup awal. Ikat database sebagai `I18N_DB` (`d1_databases`) dan pastikan `unstorage` ada di proyek Anda.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    experimental: { database: true },
+    database: {
+      default: { connector: 'cloudflare-d1', options: { bindingName: 'I18N_DB' } },
+    },
+  },
+  i18n: {
+    cacheStorage: 'd1',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+```ts
+// server/plugins/i18n-storage.ts
+import dbDriver from 'unstorage/drivers/db0'
+
+export default defineNitroPlugin(() => {
+  useStorage().mount('d1', dbDriver({ database: useDatabase() }))
+})
+```
+
+Driver `db0` ditandai sebagai eksperimental dan mengabaikan TTL: baris dari build lama tetap ada sampai Anda menghapusnya.
+
+### Deno KV {#deno-kv}
+
+Di Deno Deploy, sediakan database (`deno deploy database provision <name> --kind denokv`), tetapkan ke aplikasi (`deno deploy database assign`), lalu gunakan driver:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      kv: { driver: 'deno-kv' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'kv',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+### Cara kerjanya {#how-it-behaves}
+
+Sebuah kamus dicari di cache milik instance itu sendiri, lalu di storage bersama, lalu di sumbernya. Cache milik instance tetap ada, karena `$t` bersifat sinkron dan memerlukan pohon di memori: ini memisahkan siapa yang mengambil dari siapa yang menyajikan, bukan menghemat memori.
+
+- **Siapa yang mengambil.** Dengan host jarak jauh, satu fetch dari backend per kamus, bukan satu per instance. Instance yang mengalami miss pada saat bersamaan masing-masing mengambilnya, karena tidak ada lock.
+- **Halaman tanpa kamusnya sendiri** tidak disimpan, sehingga nama halaman karangan tidak dapat menambah kunci. Setiap instance mengambil halaman seperti itu dari host satu kali, dan di Workers, tempat isolate datang dan pergi, hal ini menjadi aliran permintaan yang terus-menerus.
+- **Host sedang down.** Halaman dengan kamus yang tersimpan tetap berfungsi. Halaman tanpa kamus dirender dari kamus root yang tersimpan, dengan kuncinya sendiri dalam bentuk mentah, dengan [`503` yang tidak disimpan oleh cache](/id/guide/deployment#when-a-dictionary-cannot-be-read), dan `/_locales` menjawab `503` untuk halaman tersebut sampai host kembali. `useTranslationServerMiddleware` menjawab dengan kunci untuk kamus yang tidak dapat dibacanya.
+- **Host** adalah `NUXT_I18N_APP_BASE_SERVER_HOST` saat runtime, atau jika tidak ada, `apiBaseServerHost` dari build, sama seperti tanpa opsi ini. Pada preset yang menyematkan kamus (Cloudflare, Vercel, Netlify, lihat [Deployment](/id/guide/deployment#serverless-and-edge)) layer ini hanya berlaku jika ada host: data sudah ada di bundle, dan salinan di KV akan menjadi pembacaan jaringan untuk sesuatu yang sudah ada di memori.
+- **Kunci** berbentuk `i18n-micro:<buildId>~<dateBuild>~<fallbackLocale>~<host>:<locale>:<page>`, sehingga dua build dalam rolling deploy tidak pernah saling membaca, begitu pula dua backend dari satu artefak. Setiap instance harus berasal dari satu build (satu artefak, atau [`buildId`](https://nuxt.com/docs/api/nuxt-config#buildid) Nuxt yang dipatok); instance yang di-build secara terpisah tidak akan berbagi. Dengan `buildId` yang dipatok dan `dateBuild: 0`, dua build yang berbeda memang berbagi kunci. Hanya locale yang diaktifkan yang dicari, dan nama halaman lebih dari 200 karakter melewati layer ini.
+- **Apa yang disimpan.** Sebuah kamus dibandingkan dengan kamus root (`__root`) sebelum ditulis, dan hanya dimasukkan jika memuat setiap kunci root dan berbeda dari root. Jadi, halaman karangan yang dijawab dengan root tidak menambah kunci, begitu pula body error 200 pada sebuah halaman. Setiap instance membaca halaman seperti itu dari sumber satu kali. Host harus menjawab halaman yang tidak dikenal dengan root, objek kosong, atau 404, dan menyajikan `__root`. Host tanpa `__root`, atau host yang menyajikan halaman tanpa kunci root, tidak membagikan apa pun. Jika host menjawab `__root` itu sendiri dengan error yang formatnya valid, error tersebut akan disimpan: gunakan `cacheTtl` yang singkat jika backend dapat melakukannya.
+- **Kedaluwarsa.** Entri kedaluwarsa `cacheTtl` detik setelah ditulis, atau setelah satu hari ketika `cacheTtl` bernilai `0`, sehingga kunci dari build lama tidak menumpuk. Sebuah nilai dapat bertahan di cache milik instance selama `cacheTtl` berikutnya, dan di cache chunk render satu kali lagi: perubahan backend akan terlihat dalam tiga kali `cacheTtl`. Driver tanpa kedaluwarsa (`fs`) menyimpan kunci lama sampai Anda menghapusnya.
+- **Ketika storage gagal**, halaman tidak ikut gagal. Pembacaan boleh memakan waktu 1 detik, yang mencakup handshake koneksi dan kunci Cloudflare KV yang dingin di lokasi tersebut. Setelah kegagalan, batasnya menjadi 250 ms sampai store menjawab lagi. Tiga kegagalan berturut-turut menutup layer selama 5 detik. Selama layer tertutup, dan selama pembacaan baru saja gagal, tidak ada yang ditulis. Penulisan yang gagal tidak menutup apa pun, sehingga replika read-only tetap melayani pembacaan. Store yang jawabannya memakan waktu lebih lama dari batas ini dianggap gagal: dihitung sebagai miss, dan kamus diambil dari sumbernya. Dengan ioredis, hal itu dimulai sekitar 400 ms per perintah, karena handshake-nya memerlukan tiga kali round trip. Modul mencatat satu peringatan per menit; ioredis mencetak error-nya sendiri di samping itu. Nilai yang bukan kamus dihitung sebagai miss dan ditimpa. Nama mount yang tidak dikenal memberi peringatan sekali pada penggunaan pertama; aplikasi kemudian berjalan tanpa layer ini.
+- **Ketika sumber gagal**, tidak ada yang menyimpan kegagalan tersebut. Fetch yang gagal atau file yang tidak dapat dibaca tidak masuk ke cache mana pun, baik cache ini maupun cache milik instance, dan permintaan berikutnya membaca lagi. Lihat [Deployment](/id/guide/deployment#when-a-dictionary-cannot-be-read).
+- **Nonaktif di dev dan saat prerender**, yang membaca file-nya sendiri dan tidak boleh bergantung pada Redis produksi Anda.
+- **Invalidasi.** Tidak ada pemanggilan purge: build baru menggunakan kunci baru. Untuk menyegarkan build yang sedang berjalan seketika, hapus kunci `i18n-micro:` dari storage dan restart instance. `clearCache` dan HMR hanya menyentuh state proses.
+- Perubahan runtime (`$mergeTranslations`, `$defineI18nRoute`) tetap berada di render atau browser yang membuatnya dan tidak pernah ditulis ke storage.
+
+## Ukuran payload {#payload-size}
+
+Build memberi peringatan ketika output payload melewati `translationPayloads.warnFileCount` (500 file) atau `warnSizeBytes` (10 MB). Jika itu terjadi:
+
+- pindahkan kunci khusus halaman keluar dari file root;
+- tautkan rute yang menampilkan kunci yang sama (`routesLocaleLinks`);
+- di serverless atau Edge, gunakan `translationPayloads.mode: 'source'` agar bundle server menyematkan sumber yang ringkas alih-alih setiap halaman × locale ([Deployment](/id/guide/deployment#serverless-and-edge)). Build Edge akan memberi peringatan sendiri jika melewati batas platform ([Batas bundle](/id/guide/deployment#bundle-limits-on-edge));
+- aktifkan `nitro.compressPublicAssets` untuk salinan `.gz` / `.br` dari payload statis.
+
+## Pengukuran {#measuring}
+
+Repositori ini melacak apa yang dikirim playground dengan `pnpm run budget:payload`; angka saat ini:
+
+Diukur pada `playground` di `/`, `/de`:
+
+| Pengukuran | Ukuran |
+| --- | --- |
+| Sumber terjemahan di disk | 7.8 MB |
+| Disajikan sebagai file payload terpisah | 23.9 MB |
+| `__NUXT_DATA__` inline terbesar | 0.4 KB |
+| Aset klien | 624.4 KB |
+
+Playground adalah bangku uji dengan kamus hasil generate hingga 100 ribu kunci, jadi angka ini bukan angka yang dapat diharapkan dari aplikasi
+nyata — angka ini adalah titik tetap untuk dijadikan pembanding. Budget akan gagal ketika angkanya tumbuh secara tak terduga,
+dan dengan cara itulah perubahan tidak disengaja pada isi payload dapat terdeteksi.
+
+Jalankan sendiri rangkaian benchmark dengan `pnpm test:performance`; cara kerjanya dijelaskan di [metodologi benchmark](https://s00d.github.io/nuxt-i18n-micro/contributing/performance-methodology).
+
+## Terkait {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Benchmark" icon="book-open" href="/id/guide/performance-results">
+
+</Card>
+
+<Card title="Deployment" icon="book-open" href="/id/guide/deployment">
+
+</Card>
+
+<Card title="File terjemahan" icon="book-open" href="/id/guide/translations">
+
+</Card>
+
+</CardGroup>

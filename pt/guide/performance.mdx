@@ -1,0 +1,261 @@
+---
+title: "Otimização do desempenho"
+description: "As definições que alteram a memória, o tamanho dos payloads e a cache, e como medir o que a sua aplicação entrega."
+---
+
+As predefinições estão afinadas para uma aplicação típica: um payload JSON por página e locale, traduções fora do HTML e caches limitadas no servidor. Esta página lista as poucas definições que vale a pena alterar quando um catálogo é grande, o servidor tem memória limitada ou os payloads vêm de outro host. Para números medidos face ao `@nuxtjs/i18n` e ao Nuxt simples, consulte [Benchmarks](/pt/guide/performance-results).
+
+## O que as predefinições já fazem {#what-the-defaults-already-do}
+
+- **Um payload por página.** A build funde as chaves raiz, de página e do locale de fallback em `/_locales/<page>/<locale>/data.json`, pelo que uma página carrega um único ficheiro e `$t` é uma única pesquisa.
+- **Nenhum dicionário no HTML.** O SSR mantém as traduções na memória do servidor; o browser obtém o payload em vez de o analisar a partir de `__NUXT_DATA__`.
+- **Cache do browser.** `?v=` só muda quando as traduções mudam, por isso um browser mantém os seus payloads entre deploys que não lhes tocaram. A cópia estática de um host é considerada atual durante 60 segundos e é revalidada depois disso: um carregamento repetido espera por um `304`. A rota do servidor responde `immutable` durante um ano ([Deploy](/pt/guide/deployment#cache-headers-and-datebuild)).
+- **Memória do servidor limitada.** Por predefinição, o servidor guarda em cache no máximo 1000 payloads e descarta os usados menos recentemente.
+
+## Dividir as traduções por página {#split-translations-by-page}
+
+As chaves usadas numa única página pertencem a `locales/pages/<page>/<locale>.json`, e não aos ficheiros raiz: as chaves raiz fazem parte do payload de todas as páginas. Consulte [Ficheiros de tradução](/pt/guide/translations).
+
+Duas definições alteram esta divisão:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    // pages that show the same keys share one payload: /de/products/123 loads the products payload
+    routesLocaleLinks: { 'products-id': 'products' },
+    // or: no page files at all, every page loads only the root dictionary
+    // disablePageLocales: true,
+  },
+})
+```
+
+[`routesLocaleLinks`](/pt/api/module-options#routeslocalelinks) elimina payloads duplicados para rotas relacionadas. [`disablePageLocales`](/pt/api/module-options#disablepagelocales) é adequado para aplicações pequenas em que um dicionário por locale é mais simples.
+
+## Caches do servidor {#server-caches}
+
+| Definição | Predefinição | Efeito |
+| --- | --- | --- |
+| [`cacheMaxSize`](/pt/api/module-options#cachemaxsize) | `0` | Número máximo de entradas nas caches de payloads. `0` = sem limite no browser, 1000 no servidor. |
+| [`cacheTtl`](/pt/api/module-options#cachettl) | `0` | Segundos até uma entrada em cache ser recarregada. `0` = nunca; defina-o quando os payloads vêm de `apiBaseServerHost` e mudam sem um novo deploy. |
+| `serverTranslationPreload` | `false` | Carrega o payload `index` no middleware Nitro em cada pedido de página, para que os helpers do servidor e a página inicial o reutilizem. |
+
+Reduza `cacheMaxSize` numa instância pequena com muitas páginas × locales. As traduções editadas localmente nunca precisam de TTL: em desenvolvimento os ficheiros são lidos em direto, e os payloads de produção só mudam com um deploy.
+
+## Memória num servidor Node {#memory-on-a-node-server}
+
+Sob carga constante, um servidor Node pode estabilizar em cerca de 12 vezes o seu heap ativo e manter-se aí. Num teste de stress com 100 mil chaves por página, um heap ativo de 90 MB funcionou com cerca de 1,1 GB de RSS. Não se trata de uma fuga de memória. Após um ciclo de GC sobredimensionado, o V8 aumenta o seu limite de heap e mantém as páginas libertadas num pool para reutilização enquanto a carga durar. Cerca de 8 segundos depois de a carga parar, o pool esvazia-se e o RSS desce para cerca de 160 MB. `global.gc()` não devolve esta memória. O Nuxt simples sem o módulo faz o mesmo, à escala do seu heap mais pequeno.
+
+Isto custa margem: com um limite de memória abaixo desse nível e sem limite de heap, o processo pode ser terminado. Defina um limite que caiba no seu limite de memória e fique bem acima do heap ativo:
+
+```bash
+NODE_OPTIONS=--max-old-space-size=512 node .output/server/index.mjs
+```
+
+| 100 mil chaves, 12 locales, 5 a 30 minutos de carga | Predefinição | `--max-old-space-size=512` |
+| --- | --- | --- |
+| RSS sob carga | cerca de 1150 MB | 254-287 MB |
+| Pedidos por segundo | 624 | 517-572 |
+
+Assim, o limite troca 8 a 10 % do débito pela memória. Um catálogo de tamanho normal tem um heap menor e um degrau menor. Estas execuções foram feitas em macOS com Node 22, não num contentor.
+
+## Tempo de análise e `dir` {#parse-time-and-dir}
+
+`dir: 'auto'` num locale obriga o browser a deduzir a direção a partir do conteúdo enquanto analisa. No Chromium, o DOMContentLoaded com 20 000 elementos demorou cerca de 1,1 s com `dir="auto"` e 0,1 s sem ele, e com 5000 elementos cerca de 130 ms contra 45 ms. Deixe `dir` por definir ou defina-o como `ltr` ou `rtl` ([Direção do texto](/pt/guide/seo#text-direction)).
+
+## Cache partilhada para várias instâncias {#shared-cache-for-several-instances}
+
+Com várias instâncias de uma mesma build, [`cacheStorage`](/pt/api/module-options#other) dá-lhes uma única cache de dicionários em qualquer armazenamento Nitro, na ligação que a sua aplicação configura em `nitro.storage`. O módulo não acrescenta nenhum conector nem dependência.
+
+**É uma cache, não uma fonte.** As traduções vêm dos payloads incorporados ou públicos, ou de `apiBaseServerHost`. Só é escrito o que veio da fonte, e as chaves incluem a build, pelo que um armazenamento preenchido à mão não é lido. Para servir traduções a partir de KV ou de uma base de dados, coloque em `apiBaseServerHost` uma pequena rota que as leia.
+
+**Quando ajuda.** Apenas com um `apiBaseServerHost` remoto. Três instâncias a percorrer 39 dicionários fizeram 117 pedidos ao host sem ela e 48 com ela. Com ficheiros em disco, um acerto no armazenamento não é mais rápido do que o ficheiro, e uma primeira passagem por 12 páginas demorou 280-296 ms sem a opção e 308-325 ms com um Redis preenchido, por isso deixe-a por definir. Num preset que incorpora os dicionários, não faz nada sem um host, e a build indica-o.
+
+Um dicionário a frio, um cliente, uma passagem cada, portanto valores aproximados, e a maior parte é a distância até ao host:
+
+| Armazenamento | A partir do host | A partir do armazenamento |
+| --- | --- | --- |
+| Cloudflare KV | cerca de 300 ms | cerca de 110 ms |
+| D1 | cerca de 230 ms | cerca de 115 ms |
+| Deno KV | cerca de 430 ms | cerca de 100 ms |
+| Upstash, Vercel serverless | cerca de 445 ms | cerca de 245 ms |
+| Upstash, Vercel Edge | cerca de 505 ms | cerca de 235 ms |
+
+### Redis {#redis}
+
+Requer `ioredis` no seu projeto.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      redis: { driver: 'redis', url: process.env.REDIS_URL },
+    },
+  },
+  i18n: {
+    cacheStorage: 'redis', // the mount name
+    apiBaseServerHost: 'https://translations.internal',
+    cacheTtl: 300,
+  },
+})
+```
+
+### Upstash no Vercel e no Vercel Edge {#upstash-on-vercel-and-vercel-edge}
+
+Utilize o driver `upstash` em ambos: comunica por REST, enquanto o driver `redis` precisa de TCP. Requer `@upstash/redis` no seu projeto e lê `UPSTASH_REDIS_REST_URL` e `UPSTASH_REDIS_REST_TOKEN` do ambiente.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      upstash: { driver: 'upstash' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'upstash',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+### Cloudflare KV {#cloudflare-kv}
+
+Associe um namespace ao Worker como `I18N_KV` (`kv_namespaces` na respetiva configuração wrangler).
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      kv: { driver: 'cloudflare-kv-binding', binding: 'I18N_KV' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'kv',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+Um host que seja outro Worker na mesma conta precisa da flag de compatibilidade `global_fetch_strictly_public`, caso contrário o fetch não o alcança.
+
+### Cloudflare D1 {#cloudflare-d1}
+
+`nitro.storage` não pode conter um objeto de base de dados, por isso é um plugin Nitro que monta o driver. A montagem é verificada na primeira utilização, pelo que isso é suficientemente cedo. Associe a base de dados como `I18N_DB` (`d1_databases`) e tenha `unstorage` no seu projeto.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    experimental: { database: true },
+    database: {
+      default: { connector: 'cloudflare-d1', options: { bindingName: 'I18N_DB' } },
+    },
+  },
+  i18n: {
+    cacheStorage: 'd1',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+```ts
+// server/plugins/i18n-storage.ts
+import dbDriver from 'unstorage/drivers/db0'
+
+export default defineNitroPlugin(() => {
+  useStorage().mount('d1', dbDriver({ database: useDatabase() }))
+})
+```
+
+O driver `db0` está marcado como experimental e ignora o TTL: as linhas de builds antigas permanecem até as apagar.
+
+### Deno KV {#deno-kv}
+
+No Deno Deploy, provisione uma base de dados (`deno deploy database provision <name> --kind denokv`), atribua-a à aplicação (`deno deploy database assign`) e utilize o driver:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      kv: { driver: 'deno-kv' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'kv',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+### Como se comporta {#how-it-behaves}
+
+Um dicionário é procurado na cache própria da instância, depois no armazenamento partilhado e depois na sua fonte. A cache própria da instância mantém-se, porque `$t` é síncrono e precisa da árvore em memória: isto separa quem obtém de quem serve, não poupa memória.
+
+- **Quem obtém.** Com um host remoto, um único fetch ao backend por dicionário em vez de um por instância. As instâncias que falham a cache no mesmo momento obtêm-no cada uma, porque não há bloqueio.
+- **As páginas sem dicionário próprio** não são armazenadas, para que nomes de página inventados não possam acrescentar chaves. Cada instância obtém uma dessas páginas do host uma vez e, nos Workers, onde os isolates surgem e desaparecem, isso traduz-se num fluxo constante.
+- **O host está em baixo.** As páginas com um dicionário armazenado funcionam. Uma página sem nenhum é apresentada a partir do dicionário raiz armazenado, com as suas próprias chaves em bruto, com [um `503` que nenhuma cache guarda](/pt/guide/deployment#when-a-dictionary-cannot-be-read), e `/_locales` responde `503` para ela até o host voltar. `useTranslationServerMiddleware` responde com as chaves para um dicionário que não consegue ler.
+- **O host** é `NUXT_I18N_APP_BASE_SERVER_HOST` em runtime ou, caso contrário, `apiBaseServerHost` da build, tal como sem a opção. Num preset que incorpora os dicionários (Cloudflare, Vercel, Netlify, consulte [Deploy](/pt/guide/deployment#serverless-and-edge)), a camada só se aplica com um host: os dados já estão no bundle, e uma cópia em KV seria uma leitura de rede para o que a memória já contém.
+- **As chaves** são `i18n-micro:<buildId>~<dateBuild>~<fallbackLocale>~<host>:<locale>:<page>`, pelo que duas builds num deploy gradual nunca leem as chaves uma da outra, nem dois backends de um mesmo artefacto. Cada instância tem de vir de uma única build (um artefacto, ou um [`buildId`](https://nuxt.com/docs/api/nuxt-config#buildid) do Nuxt fixado); instâncias construídas separadamente simplesmente não partilham. Com um `buildId` fixado e `dateBuild: 0`, duas builds diferentes partilham de facto as chaves. Só são procurados os locales ativos, e os nomes de página com mais de 200 caracteres ignoram a camada.
+- **O que é armazenado.** Um dicionário é comparado com o raiz (`__root`) antes de ser escrito, e só entra quando contém todas as chaves raiz e difere do raiz. Assim, uma página inventada respondida com o raiz não acrescenta nenhuma chave, nem um corpo de erro com 200 numa página. Cada instância lê uma página dessas a partir da fonte uma vez. Um host tem de responder a páginas desconhecidas com o raiz, um objeto vazio ou um 404, e servir `__root`. Um host sem `__root`, ou que sirva páginas sem as chaves raiz, não partilha nada. Se o host responder ao próprio `__root` com um erro bem formado, este é armazenado: mantenha `cacheTtl` curto quando o backend o puder fazer.
+- **Expiração.** Uma entrada expira `cacheTtl` segundos depois de ter sido escrita, ou ao fim de um dia quando `cacheTtl` é `0`, para que as chaves de builds antigas não se acumulem. Um valor pode permanecer na cache própria de uma instância durante mais um `cacheTtl`, e na cache de chunks da renderização durante mais um: as alterações no backend aparecem no prazo de três vezes `cacheTtl`. Os drivers sem expiração (`fs`) mantêm as chaves antigas até as remover.
+- **Quando o armazenamento falha**, a página não falha. Uma leitura pode demorar 1 segundo, o que cobre um handshake de ligação e uma chave do Cloudflare KV que está fria nessa localização. Após uma falha, o limite passa a 250 ms até o armazenamento voltar a responder. Três falhas seguidas fecham a camada durante 5 segundos. Enquanto está fechada, e logo após uma leitura falhada, nada é escrito. Uma escrita falhada não fecha nada, pelo que uma réplica só de leitura continua a servir leituras. Um armazenamento cujas respostas demorem mais do que estes limites conta como falha: uma falha de cache, e o dicionário vem da sua fonte. Com ioredis isso começa perto dos 400 ms por comando, porque o seu handshake demora três viagens de ida e volta. O módulo regista um aviso por minuto; o ioredis imprime os seus próprios erros para além disso. Um valor que não seja um dicionário conta como falha de cache e é substituído. Um nome de montagem desconhecido emite um aviso uma vez na primeira utilização; a aplicação passa então a funcionar sem a camada.
+- **Quando a fonte falha**, nada guarda a falha. Um fetch falhado ou um ficheiro ilegível não chega a nenhuma cache, nem a esta nem à da própria instância, e o pedido seguinte volta a ler. Consulte [Deploy](/pt/guide/deployment#when-a-dictionary-cannot-be-read).
+- **Desativada em desenvolvimento e no prerender**, que leem os seus ficheiros e não devem precisar do seu Redis de produção.
+- **Invalidação.** Não há chamada de purga: uma nova build usa novas chaves. Para atualizar de imediato uma build em execução, remova as chaves `i18n-micro:` do armazenamento e reinicie as instâncias. `clearCache` e o HMR só afetam o estado do processo.
+- As alterações em runtime (`$mergeTranslations`, `$defineI18nRoute`) ficam na renderização ou no browser que as fez e nunca são escritas no armazenamento.
+
+## Tamanho dos payloads {#payload-size}
+
+A build emite um aviso quando o output de payloads ultrapassa `translationPayloads.warnFileCount` (500 ficheiros) ou `warnSizeBytes` (10 MB). Quando isso acontecer:
+
+- mova as chaves exclusivas de páginas para fora dos ficheiros raiz;
+- ligue as rotas que mostram as mesmas chaves (`routesLocaleLinks`);
+- em serverless ou Edge, utilize `translationPayloads.mode: 'source'` para que o bundle do servidor incorpore fontes compactas em vez de cada página × locale ([Deploy](/pt/guide/deployment#serverless-and-edge)). Uma build Edge emite por si só um aviso acima do limite da plataforma ([Limites do bundle](/pt/guide/deployment#bundle-limits-on-edge));
+- ative `nitro.compressPublicAssets` para obter cópias `.gz` / `.br` dos payloads estáticos.
+
+## Medição {#measuring}
+
+O repositório acompanha o que o playground entrega com `pnpm run budget:payload`; os números atuais:
+
+Medido no `playground` em `/`, `/de`:
+
+| Medição | Tamanho |
+| --- | --- |
+| Fontes de tradução no disco | 7.8 MB |
+| Servido como ficheiros de payload separados | 23.9 MB |
+| Maior `__NUXT_DATA__` inline | 0.4 KB |
+| Recursos do cliente | 624.4 KB |
+
+O playground é uma bancada de testes com dicionários gerados de até 100 mil chaves, pelo que estes não são valores a esperar de uma aplicação
+real — são um ponto fixo para comparar. O orçamento falha quando crescem inesperadamente,
+e é assim que se deteta uma alteração acidental ao que o payload transporta.
+
+Execute você mesmo o conjunto de benchmarks com `pnpm test:performance`; o funcionamento está descrito na [metodologia dos benchmarks](https://s00d.github.io/nuxt-i18n-micro/contributing/performance-methodology).
+
+## Relacionado {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Benchmarks" icon="book-open" href="/pt/guide/performance-results">
+
+</Card>
+
+<Card title="Deploy" icon="book-open" href="/pt/guide/deployment">
+
+</Card>
+
+<Card title="Ficheiros de tradução" icon="book-open" href="/pt/guide/translations">
+
+</Card>
+
+</CardGroup>

@@ -1,0 +1,66 @@
+---
+title: "v3.24.0 — Node SSR z `public/`, bez Rollup `raw:`"
+description: "Poznámky k vydání: v3.24.0 — Node SSR z public/, bez Rollup raw:"
+---
+
+**Datum**: 2026-07-30
+
+**Verze**: `v3.24.0`
+
+![Vydání v3.24.0](/images/3.24.0.png)
+
+Produkční sestavení pro Node již nevkládají payloady překladů jako Nitro `serverAssets` / Rollup `raw:` (několik GB RSS při sestavení u velkých katalogů). SSR čte stejný strom `/{apiBaseUrl}/{page}/{locale}/data.json`, který stahuje klient — z `public/` přes `readFile`. Edge si ponechává vkládání přes Nitro a měl by upřednostnit `mode: 'source'`.
+
+## Co je nového? {#what’s-new}
+
+### Node: SSR z `public/<apiBaseUrl>` {#node-ssr-from-public/&lt;apibaseurl&gt;}
+
+- Presety pro Node, které servírují `public/` z disku, **neregistrují** Nitro `serverAssets`.
+- Payloady se kopírují do `public/<apiBaseUrl>` (výchozí `_locales`) jako `{page}/{locale}/data.json`.
+- SSR je načítá přes `#i18n-internal/payload-source` → `readFile` (produkční cesta vedle `.output/server`).
+- `translationPayloads.serverAssets: true` stále znamená „lokální SSR“ a **vynutí** onu veřejnou kopii, i když je `publicAssets` false.
+
+Playground (oproti předchozímu vkládání přes `serverAssets`): ~**1,25 GB** / ~6–7 s / `raw`=0 oproti ~**3 GB** / ~13 s / ~170 raw chunků.
+
+### Edge: `serverAssets` jen v případě potřeby {#edge-serverassets-only-when-needed}
+
+- Edge (`nitro.node === false`) stále vkládá přes Nitro `serverAssets` (`assets:i18n`) se stejným rozložením jako `mode`.
+- Edge **nevynucuje** veřejnou kopii — pro CDN/statický hosting nastavte `publicAssets: true`.
+- Varuje při kombinaci Edge + `mode: 'premerged'` (u velkých katalogů upřednostněte `mode: 'source'`).
+
+### `publicDir` odpovídá klientským URL {#publicdir-aligns-with-client-urls}
+
+- `translationPayloads.publicDir` má výchozí hodnotu **`apiBaseUrl`** (nikoli `translationDir`).
+- Předsloučený veřejný/Edge strom je `{page}/{locale}/data.json`, což odpovídá `$fetch('/_locales/...')`.
+- Výchozí hodnoty modulu již nenastavují vnořené `publicAssets: true` (hluboké slučování v Nuxtu vynucovalo veřejnou kopii i pro `mode: 'source'`).
+
+Viz [Možnosti modulu — `translationPayloads`](/cs/api/module-options#translationpayloads), [Nasazení — serverless a Edge](/cs/guide/deployment#serverless-and-edge) a [Architektura cache a úložiště](https://s00d.github.io/nuxt-i18n-micro/v3/api/i18n-cache-api).
+
+## Změny narušující kompatibilitu {#breaking-changes}
+
+- **Žádné slovníky v SSR HTML payloadu Nuxtu.** `payload.data['i18n-ssr-chunks']`, `setSsrChunk` a `seedFromSsrChunks` jsou **odstraněny**. Stejné výchozí chování jako u `@nuxtjs/i18n` (`experimental.preload: false`): server drží překlady v paměti pro SSR; klient načítá `/{apiBaseUrl}/.../data.json` během inicializace pluginu (`await switchContext`).
+- **`prerenderRoutes` má výchozí hodnotu `false`.** Zapněte ho jen tehdy, pokud potřebujete, aby Nitro zhmotnil routy handlerů, když `publicAssets` strom ještě nezapsal (předsloučené `publicAssets` již vytváří `{page}/{locale}/data.json`).
+- **Výchozí hodnota `publicDir` je `apiBaseUrl`**, nikoli `translationDir`. Statický výstup se přesouvá např. z `public/locales/...` do `public/_locales/{page}/{locale}/data.json`, pokud `publicDir` nenastavíte explicitně.
+- **Rozložení předsloučeného úložiště** je nyní `{page}/{locale}/data.json` (dříve `pages/{page}/{locale}.json`). Cokoli, co četlo klíče Nitro/úložiště nebo kopírovalo stromy podle starého tvaru, je nutné aktualizovat.
+- **Na Node již `serverAssets: true` neznamená vkládání přes Nitro** — znamená lokální SSR přes veřejnou kopii. Skutečné vkládání přes Rollup `raw:` zůstává pouze pro Edge.
+
+## Migrace {#migration}
+
+1. Odstraňte veškerý kód, který četl `payload.data['i18n-ssr-chunks']` nebo volal `seedFromSsrChunks` / `setSsrChunk`.
+2. Pro čistě statické hostingy: ponechte výchozí premerged + `publicAssets` (soubory skončí na `/_locales/.../data.json`), nebo nastavte `prerenderRoutes: true` / hostujte payloady na CDN.
+3. Pro Cloudflare / jiný Edge: u velkých katalogů nastavte `translationPayloads: { mode: 'source' }`; `publicAssets: true` přidejte jen tehdy, pokud potřebujete statickou/CDN kopii.
+4. Pokud jste spoléhali na payloady v `public/<translationDir>`, nastavte `translationPayloads.publicDir` nebo nasměrujte nástroje na `public/<apiBaseUrl>`.
+
+## Oprava: přeskočení zakázaných locale v předsloučených veřejných payloadech {#fix-skip-disabled-locales-in-premerged-public-payloads}
+
+`preMergeLocales` nyní zapisuje `{page}/{locale}/data.json` pouze pro locale předaná do slučování (při sestavení se vynechá `locale.disabled: true`). Dříve se do `public/` kopírovalo každé JSON locale na disku, takže statický server Nitro servíroval zakázaná locale se stavem 200 a obcházel handler. Runtime `disabledLocales` stále nedokáže zrušit publikaci již sestavených souborů — použijte `locale.disabled` při sestavení, když je zapnuté `publicAssets` / veřejná kopie pro Node SSR.
+
+## Proč je to důležité {#why-it-matters}
+
+- Sestavení pro Node zůstávají štíhlá: žádný nárůst o několik GB kvůli Rollup `raw:` z katalogů překladů.
+- Veřejné soubory a klientské URL pro `$fetch` sdílejí jedno rozložení cest — statický hosting funguje bez zvláštního přemapování.
+- Edge stále může vkládat kompaktní payloady `source` bez vynucení duplicitního veřejného stromu.
+
+Úplný changelog bude zveřejněn s vydáním na [GitHubu](https://github.com/s00d/nuxt-i18n-micro/blob/main/CHANGELOG.md).
+
+---

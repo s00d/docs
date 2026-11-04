@@ -1,0 +1,259 @@
+---
+title: "パフォーマンスチューニング"
+description: "メモリー、ペイロードサイズ、キャッシュに影響する設定と、アプリが配信するものを計測する方法。"
+---
+
+デフォルトは一般的なアプリ向けに調整されています。ページとロケールごとに 1 つの JSON ペイロード、HTML に含めない翻訳、サーバー上でサイズが制限されたキャッシュです。このページでは、カタログが大きい場合、サーバーのメモリーが限られている場合、またはペイロードが別のホストから提供される場合に変更する価値のある、いくつかの設定を紹介します。`@nuxtjs/i18n` や素の Nuxt との計測値については、[ベンチマーク](/jp/guide/performance-results)を参照してください。
+
+## デフォルトですでに行われていること {#what-the-defaults-already-do}
+
+- **ページごとに 1 つのペイロード。** ビルド時にルート、ページ、フォールバックロケールのキーが `/_locales/<page>/<locale>/data.json` にマージされるため、ページは 1 つのファイルを読み込むだけで済み、`$t` は 1 回の参照で完了します。
+- **HTML に辞書を含めない。** SSR は翻訳をサーバーのメモリーに保持し、ブラウザーは `__NUXT_DATA__` から解析する代わりにペイロードを取得します。
+- **ブラウザーキャッシュ。** `?v=` は翻訳が変わったときにのみ変化するため、翻訳に触れないデプロイの間、ブラウザーはペイロードを保持し続けます。ホストの静的コピーは 60 秒間新鮮とみなされ、その後は再検証されます。再読み込みでは `304` を 1 回待つだけです。サーバールートは 1 年間の `immutable` で応答します（[デプロイ](/jp/guide/deployment#cache-headers-and-datebuild)）。
+- **サーバーメモリーの制限。** サーバーはデフォルトで最大 1000 個のペイロードをキャッシュし、最も長く使われていないものから破棄します。
+
+## ページごとに翻訳を分割する {#split-translations-by-page}
+
+1 つのページで使われるキーは、ルートファイルではなく `locales/pages/<page>/<locale>.json` に置きます。ルートキーはすべてのページのペイロードに含まれるためです。[翻訳ファイル](/jp/guide/translations)を参照してください。
+
+この分割を変える設定が 2 つあります:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    // pages that show the same keys share one payload: /de/products/123 loads the products payload
+    routesLocaleLinks: { 'products-id': 'products' },
+    // or: no page files at all, every page loads only the root dictionary
+    // disablePageLocales: true,
+  },
+})
+```
+
+[`routesLocaleLinks`](/jp/api/module-options#routeslocalelinks) は、関連するルートの重複したペイロードを削減します。[`disablePageLocales`](/jp/api/module-options#disablepagelocales) は、ロケールごとに 1 つの辞書のほうがシンプルな小規模アプリに適しています。
+
+## サーバーキャッシュ {#server-caches}
+
+| 設定 | デフォルト | 効果 |
+| --- | --- | --- |
+| [`cacheMaxSize`](/jp/api/module-options#cachemaxsize) | `0` | ペイロードキャッシュの最大エントリー数。`0` = ブラウザーでは無制限、サーバーでは 1000。 |
+| [`cacheTtl`](/jp/api/module-options#cachettl) | `0` | キャッシュされたエントリーが再読み込みされるまでの秒数。`0` = 再読み込みしない。ペイロードが `apiBaseServerHost` から提供され、再デプロイなしで変わる場合に設定します。 |
+| `serverTranslationPreload` | `false` | すべてのページリクエストで Nitro ミドルウェア内で `index` ペイロードを読み込み、サーバーヘルパーとホームページで再利用します。 |
+
+ページ数 × ロケール数が多い小さなインスタンスでは、`cacheMaxSize` を下げてください。ローカルで編集される翻訳には TTL は不要です。開発時はファイルをライブで読み込み、本番のペイロードはデプロイ時にのみ変わります。
+
+## Node サーバーでのメモリー {#memory-on-a-node-server}
+
+安定した負荷の下では、Node サーバーはライブヒープの約 12 倍のメモリーを使い、その状態が続くことがあります。ページあたり 10 万キーのストレステストでは、90 MB のライブヒープが約 1.1 GB の RSS で動作しました。これはリークではありません。一度サイズの大きな GC サイクルが発生すると V8 はヒープの上限を引き上げ、負荷が続く間は解放されたページを再利用のためにプールに保持します。負荷が止まってから約 8 秒後にプールが空になり、RSS は約 160 MB に下がります。`global.gc()` ではこのメモリーは返されません。モジュールなしの素の Nuxt でも、より小さなヒープに比例して同じことが起こります。
+
+これは余裕を消費します。メモリー上限がそのレベルより低く、ヒープの上限がない場合、プロセスが強制終了される可能性があります。上限に収まり、ライブヒープより十分に大きい値を設定してください:
+
+```bash
+NODE_OPTIONS=--max-old-space-size=512 node .output/server/index.mjs
+```
+
+| 10 万キー、12 ロケール、5〜30 分の負荷 | デフォルト | `--max-old-space-size=512` |
+| --- | --- | --- |
+| 負荷時の RSS | 約 1,150 MB | 254〜287 MB |
+| 1 秒あたりのリクエスト数 | 624 | 517〜572 |
+
+つまり、上限を設けることでスループットの 8〜10 % と引き換えにメモリーを節約できます。一般的なサイズのカタログでは、ヒープも増加幅も小さくなります。これらの計測はコンテナではなく、macOS 上の Node 22 で行いました。
+
+## 解析時間と `dir` {#parse-time-and-dir}
+
+ロケールに `dir: 'auto'` を指定すると、ブラウザーは解析中にコンテンツから方向を判断します。Chromium では、要素数 20,000 の場合の DOMContentLoaded は `dir="auto"` ありで約 1.1 秒、なしで 0.1 秒、要素数 5,000 の場合は約 130 ms 対 45 ms でした。`dir` は未設定のままにするか、`ltr` または `rtl` に設定してください（[テキストの方向](/jp/guide/seo#text-direction)）。
+
+## 複数インスタンスでの共有キャッシュ {#shared-cache-for-several-instances}
+
+1 つのビルドから複数のインスタンスを起動する場合、[`cacheStorage`](/jp/api/module-options#other) を使うと、アプリが `nitro.storage` で設定した接続上で、任意の Nitro ストレージに 1 つの辞書キャッシュを共有できます。モジュールはコネクターも依存関係も追加しません。
+
+**これはキャッシュであり、ソースではありません。** 翻訳は埋め込みまたはパブリックのペイロード、あるいは `apiBaseServerHost` から取得されます。ソースから取得されたものだけが書き込まれ、キーにはビルドが含まれるため、手動で埋めたストアは読み込まれません。KV やデータベースから翻訳を配信するには、それを読み取る小さなルートを `apiBaseServerHost` に置いてください。
+
+**役立つ場面。** リモートの `apiBaseServerHost` がある場合のみです。3 つのインスタンスが 39 個の辞書を巡回したところ、このオプションなしではホストへのリクエストが 117 回、ありでは 48 回でした。ディスク上のファイルの場合、ストアのヒットはファイルより速くならず、12 ページの初回巡回はオプションなしで 280〜296 ms、データが入った Redis ありで 308〜325 ms だったため、未設定のままにしてください。辞書を埋め込むプリセットでは、ホストがなければ何もせず、ビルド時にその旨が表示されます。
+
+コールドな辞書、1 クライアント、各 1 回の巡回なので大まかな値であり、その大部分はホストまでの距離です:
+
+| ストア | ホストから | ストアから |
+| --- | --- | --- |
+| Cloudflare KV | 約 300 ms | 約 110 ms |
+| D1 | 約 230 ms | 約 115 ms |
+| Deno KV | 約 430 ms | 約 100 ms |
+| Upstash、Vercel サーバーレス | 約 445 ms | 約 245 ms |
+| Upstash、Vercel Edge | 約 505 ms | 約 235 ms |
+
+### Redis {#redis}
+
+プロジェクトに `ioredis` が必要です。
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      redis: { driver: 'redis', url: process.env.REDIS_URL },
+    },
+  },
+  i18n: {
+    cacheStorage: 'redis', // the mount name
+    apiBaseServerHost: 'https://translations.internal',
+    cacheTtl: 300,
+  },
+})
+```
+
+### Vercel と Vercel Edge での Upstash {#upstash-on-vercel-and-vercel-edge}
+
+どちらでも `upstash` ドライバーを使用してください。`redis` ドライバーは TCP を必要としますが、こちらは REST で通信します。プロジェクトに `@upstash/redis` が必要で、環境変数から `UPSTASH_REDIS_REST_URL` と `UPSTASH_REDIS_REST_TOKEN` を読み取ります。
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      upstash: { driver: 'upstash' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'upstash',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+### Cloudflare KV {#cloudflare-kv}
+
+名前空間を `I18N_KV` として Worker にバインドします（wrangler 設定の `kv_namespaces`）。
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      kv: { driver: 'cloudflare-kv-binding', binding: 'I18N_KV' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'kv',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+ホストが同じアカウント上の別の Worker である場合は、`global_fetch_strictly_public` 互換性フラグが必要です。そうしないと fetch が到達しません。
+
+### Cloudflare D1 {#cloudflare-d1}
+
+`nitro.storage` はデータベースオブジェクトを保持できないため、Nitro プラグインでドライバーをマウントします。マウントは最初の使用時にチェックされるため、それで十分間に合います。データベースを `I18N_DB` としてバインドし（`d1_databases`）、プロジェクトに `unstorage` を追加してください。
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    experimental: { database: true },
+    database: {
+      default: { connector: 'cloudflare-d1', options: { bindingName: 'I18N_DB' } },
+    },
+  },
+  i18n: {
+    cacheStorage: 'd1',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+```ts
+// server/plugins/i18n-storage.ts
+import dbDriver from 'unstorage/drivers/db0'
+
+export default defineNitroPlugin(() => {
+  useStorage().mount('d1', dbDriver({ database: useDatabase() }))
+})
+```
+
+`db0` ドライバーは実験的とされており、TTL を無視します。古いビルドの行は削除するまで残ります。
+
+### Deno KV {#deno-kv}
+
+Deno Deploy では、データベースをプロビジョニングし（`deno deploy database provision <name> --kind denokv`）、アプリに割り当て（`deno deploy database assign`）、ドライバーを使用します:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      kv: { driver: 'deno-kv' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'kv',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+### 動作の仕組み {#how-it-behaves}
+
+辞書は、まずインスタンス自身のキャッシュ、次に共有ストレージ、最後にソースで検索されます。`$t` は同期的でツリーをメモリーに必要とするため、インスタンス自身のキャッシュは残ります。これは取得する側と配信する側を分離するものであり、メモリーを節約するものではありません。
+
+- **取得する側。** リモートホストの場合、インスタンスごとに 1 回ではなく、辞書ごとにバックエンドから 1 回取得します。ロックがないため、同時にミスしたインスタンスはそれぞれ取得します。
+- **独自の辞書を持たないページ**は保存されないため、でっち上げのページ名でキーが増えることはありません。各インスタンスはそのようなページをホストから 1 回取得します。isolate が生成と破棄を繰り返す Workers では、これが絶え間なく少しずつ発生します。
+- **ホストがダウンしている場合。** 辞書が保存されているページは機能します。保存されていないページは、保存されたルート辞書からレンダリングされ、独自のキーは生のまま表示され、[どのキャッシュにも保持されない `503`](/jp/guide/deployment#when-a-dictionary-cannot-be-read) が返されます。ホストが復旧するまで、`/_locales` はそのページに対して `503` を返します。`useTranslationServerMiddleware` は、読み取れない辞書についてはキーを返します。
+- **ホスト**は、ランタイムの `NUXT_I18N_APP_BASE_SERVER_HOST`、それがなければビルド時の `apiBaseServerHost` で、オプションを使用しない場合と同じです。辞書を埋め込むプリセット（Cloudflare、Vercel、Netlify。[デプロイ](/jp/guide/deployment#serverless-and-edge)を参照）では、このレイヤーはホストがある場合にのみ適用されます。データはすでにバンドル内にあり、KV のコピーはメモリーにあるものをネットワーク越しに読むことになるためです。
+- **キー**は `i18n-micro:<buildId>~<dateBuild>~<fallbackLocale>~<host>:<locale>:<page>` であるため、ローリングデプロイ中の 2 つのビルドが互いのキーを読むことはなく、1 つのアーティファクトの 2 つのバックエンドも同様です。各インスタンスは 1 つのビルド（1 つのアーティファクト、または固定された Nuxt の [`buildId`](https://nuxt.com/docs/api/nuxt-config#buildid)）から作られている必要があります。別々にビルドされたインスタンスは単に共有しません。`buildId` を固定し `dateBuild: 0` にすると、2 つの異なるビルドがキーを共有します。有効なロケールのみが検索され、200 文字を超えるページ名はこのレイヤーをスキップします。
+- **保存されるもの。** 辞書は書き込まれる前にルート辞書（`__root`）と比較され、すべてのルートキーを保持し、かつルートと異なる場合にのみ保存されます。そのため、ルートで応答されたでっち上げのページはキーを追加せず、ページに対する 200 のエラーボディも同様です。各インスタンスはそのようなページをソースから 1 回読み込みます。ホストは未知のページに対してルート、空のオブジェクト、または 404 で応答し、`__root` を配信する必要があります。`__root` のないホストや、ルートキーを含まないページを配信するホストでは何も共有されません。ホストが `__root` 自体に対して正しい形式のエラーで応答した場合、それが保存されます。バックエンドがそうする可能性がある場合は、`cacheTtl` を短くしてください。
+- **有効期限。** エントリーは書き込みから `cacheTtl` 秒後、または `cacheTtl` が `0` の場合は 1 日後に期限切れになるため、古いビルドのキーが溜まり続けることはありません。値はインスタンス自身のキャッシュにさらに `cacheTtl` の間、レンダリングのチャンクキャッシュにもう 1 回分残ることがあります。バックエンドの変更は `cacheTtl` の 3 倍以内に反映されます。有効期限のないドライバー（`fs`）は、削除するまで古いキーを保持します。
+- **ストレージが失敗しても**ページは失敗しません。読み取りには 1 秒かかることがあり、これは接続のハンドシェイクや、その場所でコールドな Cloudflare KV のキーをカバーします。失敗後は、ストアが再び応答するまで制限は 250 ms になります。3 回連続で失敗すると、レイヤーは 5 秒間閉じられます。閉じている間と、読み取りが失敗した直後は何も書き込まれません。書き込みの失敗では何も閉じられないため、読み取り専用のレプリカは読み取りの提供を続けます。応答がこれらの制限より長くかかるストアは失敗とみなされ、ミスとして扱われ、辞書はソースから取得されます。ioredis では、ハンドシェイクに 3 往復かかるため、コマンドあたり 400 ms 付近から始まります。モジュールは 1 分に 1 回警告をログに出力します。ioredis はそれとは別に独自のエラーを出力します。辞書でない値はミスとみなされ、上書きされます。未知のマウント名は最初の使用時に 1 回警告し、その後アプリはこのレイヤーなしで動作します。
+- **ソースが失敗した場合**、その失敗は何にも保持されません。失敗した fetch や読み取れないファイルは、このキャッシュにもインスタンス自身のキャッシュにも到達せず、次のリクエストで再度読み込まれます。[デプロイ](/jp/guide/deployment#when-a-dictionary-cannot-be-read)を参照してください。
+- **開発時とプリレンダリング時は無効**です。これらはファイルを読み込むため、本番の Redis を必要としてはなりません。
+- **無効化。** パージの呼び出しはありません。新しいビルドは新しいキーを使用します。実行中のビルドをすぐに更新するには、ストレージから `i18n-micro:` キーを削除し、インスタンスを再起動します。`clearCache` と HMR はプロセスの状態にのみ影響します。
+- ランタイムの変更（`$mergeTranslations`、`$defineI18nRoute`）は、それを行ったレンダリングまたはブラウザー内にとどまり、ストレージに書き込まれることはありません。
+
+## ペイロードサイズ {#payload-size}
+
+ペイロードの出力が `translationPayloads.warnFileCount`（500 ファイル）または `warnSizeBytes`（10 MB）を超えると、ビルド時に警告が出ます。その場合は:
+
+- ページ専用のキーをルートファイルから移動します
+- 同じキーを表示するルートをリンクします（`routesLocaleLinks`）
+- サーバーレスや Edge では、`translationPayloads.mode: 'source'` を使用して、サーバーバンドルにすべてのページ × ロケールではなくコンパクトなソースを埋め込みます（[デプロイ](/jp/guide/deployment#serverless-and-edge)）。Edge のビルドは、プラットフォームの上限を超えると独自に警告を出します（[バンドルの上限](/jp/guide/deployment#bundle-limits-on-edge)）
+- 静的ペイロードの `.gz` / `.br` コピーのために `nitro.compressPublicAssets` を有効にします
+
+## 計測 {#measuring}
+
+リポジトリでは、playground が配信する内容を `pnpm run budget:payload` で追跡しています。現在の値は次のとおりです:
+
+`playground` の `/`、`/de` で計測:
+
+| 計測項目 | サイズ |
+| --- | --- |
+| ディスク上の翻訳ソース | 7.8 MB |
+| 個別のペイロードファイルとして配信 | 23.9 MB |
+| 最大のインライン `__NUXT_DATA__` | 0.4 KB |
+| クライアントアセット | 624.4 KB |
+
+playground は最大 10 万キーの生成された辞書を持つテストベンチであるため、これらは実際のアプリケーションで想定される値ではなく、比較のための固定点です。値が予期せず増えるとバジェットが失敗し、それによってペイロードの内容に対する意図しない変更に気付くことができます。
+
+ベンチマークスイートは `pnpm test:performance` で自分で実行できます。仕組みについては[ベンチマークの方法論](https://s00d.github.io/nuxt-i18n-micro/contributing/performance-methodology)を参照してください。
+
+## 関連 {#related}
+
+<CardGroup cols={2}>
+
+<Card title="ベンチマーク" icon="book-open" href="/jp/guide/performance-results">
+
+</Card>
+
+<Card title="デプロイ" icon="book-open" href="/jp/guide/deployment">
+
+</Card>
+
+<Card title="翻訳ファイル" icon="book-open" href="/jp/guide/translations">
+
+</Card>
+
+</CardGroup>

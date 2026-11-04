@@ -139,80 +139,80 @@ Source files (filesystem walk): 80. Target languages: 37. All target files missi
 - [x] group 1 / vi
 - [x] group 1 / jp
 - [x] group 1 / ja-jp
-- [ ] group 2 / ru
-- [ ] group 2 / ar
-- [ ] group 2 / pt-BR
-- [ ] group 2 / fr-CA
-- [ ] group 2 / ca
-- [ ] group 2 / cn
-- [ ] group 2 / zh
-- [ ] group 2 / da
-- [ ] group 2 / cs
-- [ ] group 2 / nl
-- [ ] group 2 / fi
-- [ ] group 2 / fr
-- [ ] group 2 / de
-- [ ] group 2 / he
-- [ ] group 2 / hi
-- [ ] group 2 / hu
-- [ ] group 2 / id
-- [ ] group 2 / it
-- [ ] group 2 / ja
-- [ ] group 2 / ko
-- [ ] group 2 / lv
-- [ ] group 2 / no
-- [ ] group 2 / pl
-- [ ] group 2 / pt
-- [ ] group 2 / ro
-- [ ] group 2 / zh-CN
-- [ ] group 2 / es
-- [ ] group 2 / sv
-- [ ] group 2 / tr
-- [ ] group 2 / zh-Hant
-- [ ] group 2 / zh-Hans
-- [ ] group 2 / zh-TW
-- [ ] group 2 / uk
-- [ ] group 2 / uz
-- [ ] group 2 / vi
-- [ ] group 2 / jp
-- [ ] group 2 / ja-jp
-- [ ] group 3 / ru
-- [ ] group 3 / ar
-- [ ] group 3 / pt-BR
-- [ ] group 3 / fr-CA
-- [ ] group 3 / ca
-- [ ] group 3 / cn
-- [ ] group 3 / zh
-- [ ] group 3 / da
-- [ ] group 3 / cs
-- [ ] group 3 / nl
-- [ ] group 3 / fi
-- [ ] group 3 / fr
-- [ ] group 3 / de
-- [ ] group 3 / he
-- [ ] group 3 / hi
+- [x] group 2 / ru
+- [x] group 2 / ar
+- [x] group 2 / pt-BR
+- [x] group 2 / fr-CA
+- [x] group 2 / ca
+- [x] group 2 / cn
+- [x] group 2 / zh
+- [x] group 2 / da
+- [x] group 2 / cs
+- [x] group 2 / nl
+- [x] group 2 / fi
+- [x] group 2 / fr
+- [x] group 2 / de
+- [x] group 2 / he
+- [x] group 2 / hi
+- [x] group 2 / hu
+- [x] group 2 / id
+- [x] group 2 / it
+- [x] group 2 / ja
+- [x] group 2 / ko
+- [x] group 2 / lv
+- [x] group 2 / no
+- [x] group 2 / pl
+- [x] group 2 / pt
+- [x] group 2 / ro
+- [x] group 2 / zh-CN
+- [x] group 2 / es
+- [x] group 2 / sv
+- [x] group 2 / tr
+- [x] group 2 / zh-Hant
+- [x] group 2 / zh-Hans
+- [x] group 2 / zh-TW
+- [x] group 2 / uk
+- [x] group 2 / uz
+- [x] group 2 / vi
+- [x] group 2 / jp
+- [x] group 2 / ja-jp
+- [x] group 3 / ru
+- [x] group 3 / ar
+- [x] group 3 / pt-BR
+- [x] group 3 / fr-CA
+- [x] group 3 / ca
+- [x] group 3 / cn
+- [x] group 3 / zh
+- [x] group 3 / da
+- [x] group 3 / cs
+- [x] group 3 / nl
+- [x] group 3 / fi
+- [x] group 3 / fr
+- [x] group 3 / de
+- [x] group 3 / he
+- [x] group 3 / hi
 - [ ] group 3 / hu
-- [ ] group 3 / id
-- [ ] group 3 / it
-- [ ] group 3 / ja
-- [ ] group 3 / ko
-- [ ] group 3 / lv
-- [ ] group 3 / no
-- [ ] group 3 / pl
-- [ ] group 3 / pt
-- [ ] group 3 / ro
-- [ ] group 3 / zh-CN
-- [ ] group 3 / es
-- [ ] group 3 / sv
-- [ ] group 3 / tr
-- [ ] group 3 / zh-Hant
-- [ ] group 3 / zh-Hans
-- [ ] group 3 / zh-TW
-- [ ] group 3 / uk
-- [ ] group 3 / uz
-- [ ] group 3 / vi
-- [ ] group 3 / jp
-- [ ] group 3 / ja-jp
+- [x] group 3 / id
+- [x] group 3 / it
+- [x] group 3 / ja
+- [x] group 3 / ko
+- [x] group 3 / lv
+- [x] group 3 / no
+- [x] group 3 / pl
+- [x] group 3 / pt
+- [x] group 3 / ro
+- [x] group 3 / zh-CN
+- [x] group 3 / es
+- [x] group 3 / sv
+- [x] group 3 / tr
+- [x] group 3 / zh-Hant
+- [x] group 3 / zh-Hans
+- [x] group 3 / zh-TW
+- [x] group 3 / uk
+- [x] group 3 / uz
+- [x] group 3 / vi
+- [x] group 3 / jp
+- [x] group 3 / ja-jp
 - [ ] group 4 / ru
 - [ ] group 4 / ar
 - [ ] group 4 / pt-BR

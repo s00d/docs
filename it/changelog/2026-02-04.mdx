@@ -1,0 +1,115 @@
+---
+title: "v3.0.0 — Ottimizzazione delle prestazioni, pacchetti Route & Path Strategy"
+description: "Note di rilascio: v3.0.0 — Ottimizzazione delle prestazioni, pacchetti Route & Path Strategy"
+---
+
+**Data**: 2026-02-04
+
+**Versione**: `v3.0.0`
+
+![Rilascio v3.0.0](/images/3.0.0.png)
+
+Annunciamo la **v3.0.0** con una **profonda revisione architetturale**: riscrittura completa del sistema di archiviazione delle traduzioni per le massime prestazioni, generazione delle route e logica dei percorsi a runtime ora separate in pacchetti dedicati, e un flusso di reindirizzamento riprogettato per una maggiore affidabilità e compatibilità con il Serverless.
+
+## Novità {#what’s-new}
+
+### Ottimizzazione delle prestazioni — Nuova architettura di archiviazione delle traduzioni {#performance-optimization-—-new-translation-storage-architecture}
+
+Il sistema di caricamento e caching delle traduzioni è stato completamente riscritto per le massime prestazioni:
+
+- **Classe TranslationStorage centralizzata** — Una nuova classe `TranslationStorage` (`src/runtime/utils/storage.ts`) fornisce uno storage unificato per client e server. Usa `globalThis` con `Symbol.for` per garantire un vero singleton nell'intero processo Node.js, evitando la duplicazione della cache tra moduli inclusi nel bundle.
+
+- **Funzione `$t()` ottimizzata (tFast)** — La funzione di traduzione esegue una ricerca diretta su un unico dizionario attivo:
+  1. Tutte le traduzioni (root + specifiche della pagina + fallback) vengono pre-unite in fase di build in un unico file per pagina
+  2. Nella navigazione con lo stesso locale, le traduzioni della nuova pagina vengono unite cumulativamente nel dizionario attivo (evita lo sfarfallio delle chiavi durante le animazioni di transizione)
+  3. Supporta chiavi annidate (`key.subkey.subsubkey`) con una risoluzione dei percorsi ottimizzata
+  4. Nessuna ricerca in Map né calcolo di locale/route a ogni chiamata — usa un contesto precalcolato
+
+- **Iniezione lato server tramite `window.__I18N__`** — Le traduzioni caricate durante l'SSR vengono iniettate nell'HTML come tag script. Al caricamento iniziale il client legge direttamente da `window.__I18N__`, evitando fetch duplicati.
+
+- **Cache locale dei chunk nel plugin** — Il plugin mantiene una Map locale `loadedChunks` che memorizza tutti i chunk di traduzione caricati. Una volta caricate, le traduzioni non vengono mai richieste di nuovo durante il ciclo di vita della pagina.
+
+- **Pre-unione in fase di build** — Un passaggio `preMergeLocales` in `module.ts` unisce tutti i layer, le catene di locale di fallback e le traduzioni di livello root in ogni file di pagina in fase di build. Il server-loader legge semplicemente un unico file precompilato — nessuna unione a runtime necessaria.
+
+**Miglioramenti delle prestazioni:**
+
+- Allocazione di memoria ridotta per richiesta (nessuna ricreazione di oggetti a ogni chiamata di `$t()`)
+- Minore pressione sul garbage collector
+- Tempi di risposta più rapidi sotto carico
+- Andamento stabile dell'uso della memoria (niente grafici "a salti")
+
+### Pacchetti Route & Path Strategy {#route-&-path-strategy-packages}
+
+- **@i18n-micro/route-strategy** — Generazione delle route in fase di build: estende le pagine Nuxt con route localizzate, gestisce alias, route annidate e percorsi personalizzati per strategia. Unico punto di ingresso: `new RouteGenerator(options)` e `extendPages(pages)`. Le strategie (`no_prefix`, `prefix`, `prefix_except_default`, `prefix_and_default`) sono implementate come classi separate e selezionate tramite una factory.
+- **@i18n-micro/path-strategy** — Gestione di percorsi e locale a runtime: fornisce `PathStrategy` per costruire percorsi localizzati, risolvere i reindirizzamenti e cambiare locale. Export per sottopercorso con tree-shaking (`/prefix`, `/no-prefix`, ecc.), così nel bundle finisce solo la strategia selezionata. Usa funzioni pure per la risoluzione delle route e flag di contesto precalcolati per ridurre al minimo le allocazioni.
+- **Struttura dei pacchetti organizzata** — Logica delle route in `@i18n-micro/route-strategy` con `core/`, `strategies/`. Path strategy in `@i18n-micro/path-strategy` con una struttura `src/` piatta: `types.ts`, `path.ts`, `resolver.ts`, `helpers.ts` e `strategies/`.
+- **Comportamento coerente** — Gestione degli alias, unione dei percorsi padre–figlio, `globalLocaleRoutes` / `filesLocaleRoutes` / `routeLocales` personalizzati e garanzie di immutabilità sono coperti da una suite di test dedicata.
+
+### Revisione dell'architettura dei reindirizzamenti {#redirect-architecture-overhaul}
+
+- **Middleware server** — I reindirizzamenti e la gestione dei 404 vengono eseguiti nel middleware Nitro (`i18n.global.ts`). Questo viene eseguito prima del render di Nuxt, quindi i reindirizzamenti da `/` a `/<locale>/` avvengono senza un lampo di errore quando è presente un cookie di locale.
+- **Plugin client (lato client)** — Un plugin solo client (`06.client-redirect.client.ts`) viene eseguito dopo l'idratazione e gestisce i reindirizzamenti quando `useI18nLocale()` o il cookie impostano un locale non predefinito. Nitro viene eseguito prima di Nuxt, quindi il server non può vedere le modifiche a cookie/stato fatte dai plugin utente; il plugin client copre questo caso.
+- **Nessun componente di fallback** — Il componente di fallback `locale-redirect.vue` e l'opzione `fallbackRedirectComponentPath` sono stati rimossi. La logica di reindirizzamento è interamente gestita dal middleware server e dal plugin client.
+- **Supporto dei percorsi personalizzati** — Percorsi come `/kontakt` per il tedesco (tramite `globalLocaleRoutes`) vengono correttamente riconosciuti come validi senza prefisso di locale, evitando 404 errati durante il prerender.
+- **Correzione di customRegexMatcher** — Quando si usa `customRegexMatcher`, il pattern ora corrisponde all'**intero** primo segmento del percorso (con le ancore `^` e `$`). Questo evita falsi 404 per route come `/locale-test`, dove il pattern `[a-z]{2}-[a-z]{2}` in precedenza corrispondeva a sottostringhe.
+- **Correzione di autoDetectPath** — L'opzione `autoDetectPath` ora confronta correttamente con il percorso URL originale, evitando reindirizzamenti indesiderati quando si naviga esplicitamente verso URL con prefisso di locale.
+
+### Composable useI18nLocale {#usei18nlocale-composable}
+
+- **Gestione centralizzata del locale** — Il nuovo composable `useI18nLocale()` sostituisce `useLocaleCookies` e fornisce un unico punto di accesso per stato del locale, cookie e utility di sincronizzazione.
+- **API** — `locale`, `localeCookie`, `hashCookie`, `getLocale()`, `getPreferredLocale()`, `setLocale()`, `syncLocale()`, `isValidLocale()`, `getEffectiveLocale()`, `resolveInitialLocale()`.
+- **Locale programmatico** — Usa `useI18nLocale().setLocale(locale)` nei plugin server invece di `useState('i18n-locale')` per una gestione del locale più pulita e centralizzata.
+
+### Rilevamento automatico personalizzato e configurazione {#custom-auto-detection-&-configuration}
+
+- **`getI18nConfig()`** — I plugin personalizzati (ad es. per il rilevamento del locale) dovrebbero usare `getI18nConfig()` da `#build/i18n.strategy.mjs` invece di `useRuntimeConfig().public.i18nConfig`. Questo fornisce accesso diretto alla configurazione i18n risolta (ad es. `localeCookie`) senza dipendere dalla runtime config.
+- **Nome del cookie** — Usa `getI18nConfig().localeCookie ?? 'user-locale'` quando implementi una logica di rilevamento personalizzata.
+
+### Pacchetti di integrazione semplificati {#simplified-integration-packages}
+
+Tutti i pacchetti di integrazione (`@i18n-micro/vue`, `@i18n-micro/astro`, `@i18n-micro/node`, `@i18n-micro/react`, `@i18n-micro/preact`, `@i18n-micro/solid`) sono stati semplificati e ottimizzati e condividono la stessa logica di traduzione di base.
+
+### Modifiche alla configurazione {#configuration-changes}
+
+- **`previousPageFallback` rimosso** — Questa opzione non è più necessaria. La nuova strategia di unione cumulativa mantiene automaticamente disponibili le traduzioni della pagina precedente durante le animazioni di transizione, per poi ripulirle tramite l'hook `page:transition:finish`.
+- **`hmr`** — Spostato da `experimental.hmr` a opzione di primo livello. Controlla l'HMR lato server per i file di traduzione (abilitato per impostazione predefinita in sviluppo).
+
+```typescript
+// Before (v2.x)
+export default defineNuxtConfig({
+  i18n: {
+    experimental: {
+      hmr: true,
+    },
+  },
+})
+
+// After (v3.0.0)
+export default defineNuxtConfig({
+  i18n: {
+    hmr: true,
+  },
+})
+```
+
+## Modifiche incompatibili {#breaking-changes}
+
+- **`fallbackRedirectComponentPath`** — Rimosso. Il modulo non usa più un componente di route di fallback per i reindirizzamenti. Se avevi configurato un percorso di componente personalizzato, rimuovilo dalla configurazione.
+- **`useLocaleCookies`** — Rimosso. Usa invece `useI18nLocale()`. Il nuovo composable fornisce `locale`, `localeCookie`, `hashCookie`, `setLocale()`, `syncLocale()` e altro.
+- **`experimental.i18nPreviousPageFallback` / `previousPageFallback`** — Rimosso del tutto. La strategia di unione cumulativa gestisce automaticamente lo sfarfallio durante le transizioni. Rimuovi questa opzione dalla configurazione.
+- **`experimental.hmr`** — Spostato in `hmr`. Aggiorna la configurazione se usavi questa opzione.
+- **Plugin personalizzati** — Se il tuo plugin personalizzato di rilevamento del locale usava `useRuntimeConfig().public.i18nConfig`, passa a `getI18nConfig()` da `#build/i18n.strategy.mjs`. Preferisci `useI18nLocale().setLocale()` a `useState('i18n-locale')`. Consulta [Rilevamento personalizzato della lingua](/it/guide/custom-auto-detect) per esempi aggiornati.
+- **Modifiche ai file interni** — `load-from-storage.ts` e `translation-loader.ts` sono stati rimossi e sostituiti da `storage.ts` e `server-loader.ts`. Se importavi direttamente da questi file (sconsigliato), aggiorna gli import.
+
+## Perché è importante {#why-it-matters}
+
+- **Prestazioni**: la cache singleton centralizzata elimina la creazione di oggetti per richiesta e riduce la pressione sul GC.
+- **Manutenibilità**: la logica di route e percorsi vive in pacchetti dedicati con confini e tipi chiari.
+- **Test**: il comportamento delle strategie e i casi limite vengono testati in isolamento.
+- **Affidabilità**: la separazione della logica di reindirizzamento tra server (Nitro) e client evita problemi di tempistica quando cookie/useState vengono impostati dai plugin utente.
+- **Pronto per il Serverless**: il plugin Nitro viene eseguito nello stesso contesto degli handler Nitro, compatibile con Edge/Workers.
+- **Documentazione**: il comportamento del routing è documentato nella [guida alla strategia](/it/guide/strategy) e nei pacchetti [path-strategy](https://github.com/s00d/nuxt-i18n-micro/tree/main/packages/path-strategy) e [route-strategy](https://github.com/s00d/nuxt-i18n-micro/tree/main/packages/route-strategy).
+
+Per le note di aggiornamento e l'elenco completo delle modifiche, consulta il [changelog](https://github.com/s00d/nuxt-i18n-micro/blob/main/CHANGELOG.md).
+
+---

@@ -1,0 +1,261 @@
+---
+title: "Performans ayarı"
+description: "Belleği, yük boyutunu ve önbelleklemeyi değiştiren ayarlar ve uygulamanızın ne gönderdiğini nasıl ölçeceğiniz."
+---
+
+Varsayılanlar tipik bir uygulama için ayarlanmıştır: sayfa ve locale başına bir JSON yükü, HTML dışında tutulan çeviriler ve sunucuda sınırlı önbellekler. Bu sayfa, bir katalog büyük olduğunda, sunucunun belleği kısıtlı olduğunda veya yükler başka bir sunucudan geldiğinde değiştirmeye değer birkaç ayarı listeler. `@nuxtjs/i18n` ve düz Nuxt ile karşılaştırmalı ölçüm sonuçları için bkz. [Kıyaslamalar](/tr/guide/performance-results).
+
+## Varsayılanların zaten yaptıkları {#what-the-defaults-already-do}
+
+- **Sayfa başına bir yük.** Derleme; kök, sayfa ve yedek locale anahtarlarını `/_locales/<page>/<locale>/data.json` içinde birleştirir; böylece bir sayfa tek bir dosya yükler ve `$t` tek bir aramadır.
+- **HTML'de sözlük yok.** SSR çevirileri sunucu belleğinde tutar; tarayıcı yükü `__NUXT_DATA__` içinden ayrıştırmak yerine getirir.
+- **Tarayıcı önbelleği.** `?v=` yalnızca çeviriler değiştiğinde değişir; bu yüzden tarayıcı, yüklerine dokunmayan dağıtımlar boyunca bunları korur. Bir barındırıcının statik kopyası 60 saniye boyunca tazedir ve sonrasında yeniden doğrulanır: tekrarlanan bir yükleme tek bir `304` bekler. Sunucu rotası bir yıl boyunca `immutable` yanıt verir ([Dağıtım](/tr/guide/deployment#cache-headers-and-datebuild)).
+- **Sınırlı sunucu belleği.** Sunucu varsayılan olarak en fazla 1000 yükü önbelleğe alır ve en uzun süredir kullanılmayanı atar.
+
+## Çevirileri sayfaya göre bölün {#split-translations-by-page}
+
+Tek bir sayfada kullanılan anahtarlar kök dosyalarda değil, `locales/pages/<page>/<locale>.json` içinde yer almalıdır: kök anahtarlar her sayfanın yükünün parçasıdır. Bkz. [Çeviri dosyaları](/tr/guide/translations).
+
+Bu bölünmeyi iki ayar değiştirir:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    // pages that show the same keys share one payload: /de/products/123 loads the products payload
+    routesLocaleLinks: { 'products-id': 'products' },
+    // or: no page files at all, every page loads only the root dictionary
+    // disablePageLocales: true,
+  },
+})
+```
+
+[`routesLocaleLinks`](/tr/api/module-options#routeslocalelinks), ilişkili rotalar için yinelenen yükleri azaltır. [`disablePageLocales`](/tr/api/module-options#disablepagelocales), locale başına tek bir sözlüğün daha basit olduğu küçük uygulamalara uygundur.
+
+## Sunucu önbellekleri {#server-caches}
+
+| Ayar | Varsayılan | Etki |
+| --- | --- | --- |
+| [`cacheMaxSize`](/tr/api/module-options#cachemaxsize) | `0` | Yük önbelleklerindeki en fazla girdi sayısı. `0` = tarayıcıda sınırsız, sunucuda 1000. |
+| [`cacheTtl`](/tr/api/module-options#cachettl) | `0` | Önbelleğe alınmış bir girdinin yeniden yüklenmesinden önceki saniye. `0` = asla; yükler `apiBaseServerHost` üzerinden geliyor ve yeniden dağıtım olmadan değişiyorsa ayarlayın. |
+| `serverTranslationPreload` | `false` | Her sayfa isteği için `index` yükünü Nitro ara katmanında yükler; böylece sunucu yardımcıları ve ana sayfa onu yeniden kullanır. |
+
+Çok sayıda sayfa × locale içeren küçük bir örnekte `cacheMaxSize` değerini düşürün. Yerel olarak düzenlenen çevirilerin hiçbir zaman TTL'ye ihtiyacı yoktur: geliştirme ortamı dosyaları canlı okur, üretim yükleri yalnızca bir dağıtımla değişir.
+
+## Node sunucusunda bellek {#memory-on-a-node-server}
+
+Sürekli yük altında bir Node sunucusu canlı heap'inin yaklaşık 12 katında oturabilir ve orada kalabilir. Sayfa başına 100 bin anahtarlık bir stres testinde, 90 MB'lık canlı heap yaklaşık 1.1 GB RSS ile çalıştı. Bu bir sızıntı değildir. Aşırı büyük bir GC döngüsünden sonra V8 heap sınırını yükseltir ve yük sürdükçe serbest bırakılan sayfaları yeniden kullanmak üzere bir havuzda tutar. Yük durduktan yaklaşık 8 saniye sonra havuz boşalır ve RSS yaklaşık 160 MB'a düşer. `global.gc()` bu belleği geri vermez. Modül olmadan düz Nuxt da daha küçük heap'iyle orantılı olarak aynısını yapar.
+
+Bunun bedeli pay alanıdır: bu seviyenin altında bir bellek sınırı ve heap tavanı olmadığında süreç sonlandırılabilir. Sınırınıza uyan ve canlı heap'in oldukça üzerinde olan bir tavan belirleyin:
+
+```bash
+NODE_OPTIONS=--max-old-space-size=512 node .output/server/index.mjs
+```
+
+| 100 bin anahtar, 12 locale, 5 ila 30 dakika yük | Varsayılan | `--max-old-space-size=512` |
+| --- | --- | --- |
+| Yük altında RSS | yaklaşık 1.150 MB | 254-287 MB |
+| Saniye başına istek | 624 | 517-572 |
+
+Yani tavan, bellek karşılığında verimin %8 ila 10'undan feragat eder. Sıradan boyuttaki bir katalogun daha küçük bir heap'i ve daha küçük bir artışı vardır. Bu çalıştırmalar bir konteynerde değil, Node 22 ile macOS üzerinde yapıldı.
+
+## Ayrıştırma süresi ve `dir` {#parse-time-and-dir}
+
+Bir locale üzerindeki `dir: 'auto'`, tarayıcının ayrıştırma sırasında yönü içerikten belirlemesini sağlar. Chromium'da 20.000 öğede DOMContentLoaded, `dir="auto"` ile yaklaşık 1.1 sn, onsuz 0.1 sn idi; 5.000 öğede ise yaklaşık 130 ms'ye karşı 45 ms. `dir` değerini ayarlamadan bırakın veya `ltr` ya da `rtl` olarak ayarlayın ([Metin yönü](/tr/guide/seo#text-direction)).
+
+## Birden fazla örnek için paylaşılan önbellek {#shared-cache-for-several-instances}
+
+Tek bir derlemenin birden fazla örneği olduğunda, [`cacheStorage`](/tr/api/module-options#other) onlara herhangi bir Nitro depolamasında, uygulamanızın `nitro.storage` içinde yapılandırdığı bağlantı üzerinde tek bir sözlük önbelleği sağlar. Modül hiçbir bağlayıcı ve bağımlılık eklemez.
+
+**Bu bir önbellektir, kaynak değil.** Çeviriler gömülü veya public yüklerden ya da `apiBaseServerHost` üzerinden gelir. Yalnızca kaynaktan gelenler yazılır ve anahtarlar derlemeyi taşır; bu nedenle elle doldurduğunuz bir depo okunmaz. Çevirileri KV'den veya bir veritabanından sunmak için `apiBaseServerHost` adresine onu okuyan küçük bir rota koyun.
+
+**Ne zaman yardımcı olur.** Yalnızca uzak bir `apiBaseServerHost` ile. 39 sözlüğü dolaşan üç örnek, bu olmadan sunucuya 117, bununla 48 istek yaptı. Diskteki dosyalarla bir depo isabeti dosyadan daha hızlı değildir ve 12 sayfa üzerinden ilk geçiş seçenek olmadan 280-296 ms, dolu bir Redis ile 308-325 ms sürdü; bu yüzden ayarlamadan bırakın. Sözlükleri gömen bir ön ayarda sunucu olmadan hiçbir şey yapmaz ve derleme bunu belirtir.
+
+Soğuk bir sözlük, tek istemci, her biri için tek bir dolaşma; dolayısıyla kaba değerler ve çoğu sunucuya olan mesafeden kaynaklanır:
+
+| Depo | Sunucudan | Depodan |
+| --- | --- | --- |
+| Cloudflare KV | yaklaşık 300 ms | yaklaşık 110 ms |
+| D1 | yaklaşık 230 ms | yaklaşık 115 ms |
+| Deno KV | yaklaşık 430 ms | yaklaşık 100 ms |
+| Upstash, Vercel serverless | yaklaşık 445 ms | yaklaşık 245 ms |
+| Upstash, Vercel Edge | yaklaşık 505 ms | yaklaşık 235 ms |
+
+### Redis {#redis}
+
+Projenizde `ioredis` gerektirir.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      redis: { driver: 'redis', url: process.env.REDIS_URL },
+    },
+  },
+  i18n: {
+    cacheStorage: 'redis', // the mount name
+    apiBaseServerHost: 'https://translations.internal',
+    cacheTtl: 300,
+  },
+})
+```
+
+### Vercel ve Vercel Edge üzerinde Upstash {#upstash-on-vercel-and-vercel-edge}
+
+Her ikisinde de `upstash` sürücüsünü kullanın: `redis` sürücüsü TCP gerektirirken bu sürücü REST ile iletişim kurar. Projenizde `@upstash/redis` gerektirir ve `UPSTASH_REDIS_REST_URL` ile `UPSTASH_REDIS_REST_TOKEN` değerlerini ortamdan okur.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      upstash: { driver: 'upstash' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'upstash',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+### Cloudflare KV {#cloudflare-kv}
+
+Worker'a `I18N_KV` olarak bir namespace bağlayın (wrangler yapılandırmasında `kv_namespaces`).
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      kv: { driver: 'cloudflare-kv-binding', binding: 'I18N_KV' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'kv',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+Aynı hesaptaki başka bir Worker olan bir sunucu, `global_fetch_strictly_public` uyumluluk bayrağına ihtiyaç duyar; aksi halde fetch ona ulaşmaz.
+
+### Cloudflare D1 {#cloudflare-d1}
+
+`nitro.storage` bir veritabanı nesnesi tutamaz, bu nedenle sürücüyü bir Nitro eklentisi bağlar. Bağlama ilk kullanımda kontrol edilir, bu yüzden bu yeterince erkendir. Veritabanını `I18N_DB` (`d1_databases`) olarak bağlayın ve projenizde `unstorage` bulunsun.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    experimental: { database: true },
+    database: {
+      default: { connector: 'cloudflare-d1', options: { bindingName: 'I18N_DB' } },
+    },
+  },
+  i18n: {
+    cacheStorage: 'd1',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+```ts
+// server/plugins/i18n-storage.ts
+import dbDriver from 'unstorage/drivers/db0'
+
+export default defineNitroPlugin(() => {
+  useStorage().mount('d1', dbDriver({ database: useDatabase() }))
+})
+```
+
+`db0` sürücüsü deneysel olarak işaretlidir ve TTL'yi yok sayar: eski derlemelerin satırları siz silene kadar kalır.
+
+### Deno KV {#deno-kv}
+
+Deno Deploy üzerinde bir veritabanı hazırlayın (`deno deploy database provision <name> --kind denokv`), onu uygulamaya atayın (`deno deploy database assign`) ve sürücüyü kullanın:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      kv: { driver: 'deno-kv' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'kv',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+### Nasıl davranır {#how-it-behaves}
+
+Bir sözlük önce örneğin kendi önbelleğinde, ardından paylaşılan depolamada, ardından kaynağında aranır. Örneğin kendi önbelleği kalır, çünkü `$t` senkrondur ve ağacın bellekte olmasına ihtiyaç duyar: bu, getireni sunandan ayırır; bellek tasarrufu sağlamaz.
+
+- **Kim getirir.** Uzak bir sunucuyla, örnek başına bir yerine sözlük başına backend'den bir getirme. Aynı anda ıskalayan örneklerin her biri onu getirir, çünkü kilit yoktur.
+- **Kendi sözlüğü olmayan sayfalar** saklanmaz; böylece uydurulmuş sayfa adları anahtar ekleyemez. Her örnek böyle bir sayfayı sunucudan bir kez getirir ve isolate'lerin gelip gittiği Workers üzerinde bu sürekli küçük bir akıştır.
+- **Sunucu çöktü.** Saklanmış bir sözlüğü olan sayfalar çalışır. Sözlüğü olmayan bir sayfa, saklanmış kök sözlükten, kendi anahtarları ham olarak ve [hiçbir önbelleğin tutmadığı bir `503`](/tr/guide/deployment#when-a-dictionary-cannot-be-read) ile oluşturulur ve `/_locales` sunucu geri gelene kadar onun için `503` yanıtı verir. `useTranslationServerMiddleware`, okuyamadığı bir sözlük için anahtarları döndürür.
+- **Sunucu**, çalışma zamanında `NUXT_I18N_APP_BASE_SERVER_HOST`, aksi halde derlemedeki `apiBaseServerHost` değeridir; seçenek olmadan olduğu gibi. Sözlükleri gömen bir ön ayarda (Cloudflare, Vercel, Netlify, bkz. [Dağıtım](/tr/guide/deployment#serverless-and-edge)) katman yalnızca bir sunucuyla uygulanır: veri zaten pakettedir ve KV'deki bir kopya, bellekte tutulan şey için bir ağ okuması olurdu.
+- **Anahtarlar** `i18n-micro:<buildId>~<dateBuild>~<fallbackLocale>~<host>:<locale>:<page>` biçimindedir; böylece kademeli bir dağıtımdaki iki derleme asla birbirini okumaz, tek bir yapıtın iki backend'i de okumaz. Her örnek tek bir derlemeden gelmelidir (tek bir yapıt veya sabitlenmiş bir Nuxt [`buildId`](https://nuxt.com/docs/api/nuxt-config#buildid)); ayrı derlenen örnekler basitçe paylaşmaz. Sabitlenmiş bir `buildId` ve `dateBuild: 0` ile iki farklı derleme anahtarları paylaşır. Yalnızca etkin locale'ler aranır ve 200 karakterden uzun sayfa adları katmanı atlar.
+- **Ne saklanır.** Bir sözlük yazılmadan önce kök sözlükle (`__root`) karşılaştırılır ve yalnızca tüm kök anahtarları içerdiğinde ve kökten farklı olduğunda eklenir. Böylece kök ile yanıtlanan uydurulmuş bir sayfa anahtar eklemez, bir sayfadaki 200 hata gövdesi de eklemez. Her örnek böyle bir sayfayı kaynaktan bir kez okur. Bir sunucu, bilinmeyen sayfaları kök, boş bir nesne veya 404 ile yanıtlamalı ve `__root` sunmalıdır. `__root` olmayan veya sayfaları kök anahtarlar olmadan sunan bir sunucu hiçbir şey paylaşmaz. Sunucu `__root` isteğinin kendisini iyi biçimlendirilmiş bir hatayla yanıtlarsa, bu saklanır: backend bunu yapabiliyorsa `cacheTtl` değerini kısa tutun.
+- **Süre dolumu.** Bir girdi yazıldıktan `cacheTtl` saniye sonra veya `cacheTtl` `0` olduğunda bir gün sonra sona erer; böylece eski derlemelerin anahtarları birikemez. Bir değer örneğin kendi önbelleğinde bir `cacheTtl` daha ve render'ın parça önbelleğinde bir tane daha kalabilir: backend değişiklikleri `cacheTtl` değerinin üç katı içinde görünür. Süre dolumu olmayan sürücüler (`fs`) eski anahtarları siz kaldırana kadar tutar.
+- **Depolama başarısız olduğunda** sayfa başarısız olmaz. Bir okuma 1 saniye sürebilir; bu, bir bağlantı el sıkışmasını ve o konumda soğuk olan bir Cloudflare KV anahtarını kapsar. Bir hatadan sonra sınır, depo tekrar yanıt verene kadar 250 ms'dir. Art arda üç hata katmanı 5 saniyeliğine kapatır. Kapalıyken ve bir okuma az önce başarısız olmuşken hiçbir şey yazılmaz. Başarısız bir yazma hiçbir şeyi kapatmaz; böylece salt okunur bir replika okumaları sunmaya devam eder. Yanıtları bu sınırlardan uzun süren bir depo başarısız sayılır: bir ıskalama olur ve sözlük kaynağından gelir. ioredis ile bu, el sıkışması üç gidiş-dönüş sürdüğü için komut başına 400 ms civarında başlar. Modül dakikada bir uyarı kaydeder; ioredis buna ek olarak kendi hatalarını yazdırır. Sözlük olmayan bir değer ıskalama sayılır ve üzerine yazılır. Bilinmeyen bir bağlama adı ilk kullanımda bir kez uyarır; uygulama ardından katman olmadan çalışır.
+- **Kaynak başarısız olduğunda** hiçbir şey hatayı tutmaz. Başarısız bir getirme veya okunamayan bir dosya hiçbir önbelleğe ulaşmaz, ne bu önbelleğe ne de örneğin kendisininkine; sonraki istek yeniden okur. Bkz. [Dağıtım](/tr/guide/deployment#when-a-dictionary-cannot-be-read).
+- **Geliştirme ortamında ve prerender sırasında kapalıdır**; bunlar kendi dosyalarını okur ve üretim Redis'inize ihtiyaç duymamalıdır.
+- **Geçersiz kılma.** Bir temizleme çağrısı yoktur: yeni bir derleme yeni anahtarlar kullanır. Çalışan bir derlemeyi hemen yenilemek için `i18n-micro:` anahtarlarını depolamadan kaldırın ve örnekleri yeniden başlatın. `clearCache` ve HMR yalnızca süreç durumuna dokunur.
+- Çalışma zamanı değişiklikleri (`$mergeTranslations`, `$defineI18nRoute`) onları yapan render'da veya tarayıcıda kalır ve asla depolamaya yazılmaz.
+
+## Yük boyutu {#payload-size}
+
+Yük çıktısı `translationPayloads.warnFileCount` (500 dosya) veya `warnSizeBytes` (10 MB) değerini aştığında derleme uyarır. Bu olduğunda:
+
+- yalnızca sayfaya özgü anahtarları kök dosyalardan çıkarın;
+- aynı anahtarları gösteren rotaları bağlayın (`routesLocaleLinks`);
+- serverless veya Edge üzerinde `translationPayloads.mode: 'source'` kullanın; böylece sunucu paketi her sayfa × locale yerine kompakt kaynakları gömer ([Dağıtım](/tr/guide/deployment#serverless-and-edge)). Bir Edge derlemesi platformun sınırı aşıldığında kendiliğinden uyarır ([Paket sınırları](/tr/guide/deployment#bundle-limits-on-edge));
+- statik yüklerin `.gz` / `.br` kopyaları için `nitro.compressPublicAssets` seçeneğini etkinleştirin.
+
+## Ölçüm {#measuring}
+
+Depo, playground'un ne gönderdiğini `pnpm run budget:payload` ile izler; güncel sayılar:
+
+`playground` üzerinde `/`, `/de` genelinde ölçülmüştür:
+
+| Ölçüm | Boyut |
+| --- | --- |
+| Diskteki çeviri kaynakları | 7.8 MB |
+| Ayrı yük dosyaları olarak sunulan | 23.9 MB |
+| En büyük satır içi `__NUXT_DATA__` | 0.4 KB |
+| İstemci varlıkları | 624.4 KB |
+
+Playground, 100 bin anahtara kadar üretilmiş sözlüklere sahip bir test tezgâhıdır; bu nedenle bunlar gerçek bir
+uygulamadan beklenecek rakamlar değildir — karşılaştırma yapılacak sabit bir noktadır. Beklenmedik şekilde büyüdüklerinde bütçe başarısız olur;
+yükün taşıdığı şeydeki yanlışlıkla yapılan bir değişiklik bu şekilde fark edilir.
+
+Kıyaslama paketini `pnpm test:performance` ile kendiniz çalıştırın; nasıl çalıştığı [kıyaslama metodolojisinde](https://s00d.github.io/nuxt-i18n-micro/contributing/performance-methodology) anlatılır.
+
+## İlgili {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Kıyaslamalar" icon="book-open" href="/tr/guide/performance-results">
+
+</Card>
+
+<Card title="Dağıtım" icon="book-open" href="/tr/guide/deployment">
+
+</Card>
+
+<Card title="Çeviri dosyaları" icon="book-open" href="/tr/guide/translations">
+
+</Card>
+
+</CardGroup>

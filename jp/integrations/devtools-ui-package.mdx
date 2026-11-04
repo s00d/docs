@@ -1,0 +1,134 @@
+---
+title: "DevTools UI"
+description: "Vite 開発サーバー用の翻訳エディターと、それを任意の @i18n-micro インスタンスに接続するブリッジ。"
+---
+
+`@i18n-micro/devtools-ui` は、Nuxt DevTools タブの翻訳エディターを、Vite プラグイン付きの Web コンポーネントとしてパッケージ化したものです。Vue、React、Preact、Solid、Astro のプロジェクトに追加すると、開発中に翻訳フォルダ内の JSON ファイルをブラウザから閲覧・編集できます。Nuxt アプリでは [Nuxt DevTools](/jp/guide/devtools) にすでに含まれています。
+
+![DevTools UI: ファイルツリーと、各キーの横にデフォルトロケールのテキストが表示されるエディター](/images/devtools/02-translations-editor-dark.webp)
+
+## インストール {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add -D @i18n-micro/devtools-ui
+```
+
+```bash npm
+npm install -D @i18n-micro/devtools-ui
+```
+
+```bash yarn
+yarn add -D @i18n-micro/devtools-ui
+```
+
+</CodeGroup>
+
+peer dependency はありません。
+
+## セットアップ {#setup}
+
+```ts
+// vite.config.ts
+import { defineConfig } from 'vite'
+import { i18nDevToolsPlugin } from '@i18n-micro/devtools-ui/vite'
+
+export default defineConfig({
+  plugins: [i18nDevToolsPlugin({ translationDir: 'src/locales' })],
+})
+```
+
+| オプション | デフォルト | 備考 |
+| --- | --- | --- |
+| `translationDir` | `'src/locales'` | JSON ファイルを含むフォルダ(Vite ルートからの相対パス)。 |
+| `base` | `'/__i18n_api'` | API エンドポイントのベースパス。 |
+| `injectButton` | `true` | Vite の `index.html` 変換を通じて配信されるページにフローティングボタンを追加します。Astro にはそのようなページがありません: 下記を参照してください。 |
+| `defaultLocale` | `translationDir` 内の最初のロケールファイル | `/config` で報告されます。 |
+| `fallbackLocale` | `defaultLocale` | `/config` で報告されます。 |
+
+プラグインは開発サーバーでのみ動作します(`apply: 'serve'`)。本番ビルドにはプラグイン由来のものは一切含まれません。ボタンは `/__i18n_devtools.html` を開き、このページはプラグインのエンドポイントを通じてファイルを読み込み・保存します:
+
+| エンドポイント | 動作 |
+| --- | --- |
+| `GET <base>/translations` | `translationDir` 配下のすべての辞書(相対パスごと) |
+| `POST <base>/save` | ボディは `{ file, content }`。`translationDir` 内の既存の `.json` を上書きし、それ以外は 403。ファイルを新規作成することはありません |
+| `GET <base>/config` | `{ defaultLocale, fallbackLocale, locales, translationDir }`。`locales` は `translationDir` のルートにあるファイルから取得されます |
+
+エンドポイントは devtools ページにのみ応答します: 別のオリジンやホストからのリクエストは `403` となり、`/save` は `application/json` のみを受け付けます(`415`)。ページは Vite の HMR ソケットを通じてファイルの変更を受け取ります。
+
+Astro では、プラグインの代わりにインテグレーションを追加します。これにより開発ツールバーにアプリが追加されます:
+
+```ts
+// astro.config.mjs
+import { defineConfig } from 'astro/config'
+import { i18nDevToolsIntegration } from '@i18n-micro/devtools-ui/vite'
+
+export default defineConfig({
+  integrations: [i18nDevToolsIntegration({ translationDir: 'src/locales' })],
+})
+```
+
+保存はファイルを書き込むだけです。Vite を通じて JSON をインポートしているアプリは HMR 経由で変更を受け取ります。実行中のインスタンスに編集を直接適用するには、ブリッジを使用してください。
+
+## 実行中のインスタンスへのブリッジ {#bridge-to-a-live-instance}
+
+エディターを独自のページに埋め込み、編集を実行中のインスタンスに即座に適用するには、アダプターからブリッジを作成し、`<i18n-devtools-ui>` 要素に渡します:
+
+```ts
+import { createBridge, register } from '@i18n-micro/devtools-ui'
+import { i18n, locales } from './i18n' // a runtime, React, Preact or Solid instance
+
+register() // defines <i18n-devtools-ui> once
+
+const bridge = createBridge({
+  adapter: {
+    getRouteCache: () => Object.fromEntries(i18n.storage.translations),
+    addTranslations: (locale, content, merge) => i18n.addTranslations(locale, content, merge),
+    addRouteTranslations: (locale, route, content, merge) => i18n.addRouteTranslations(locale, route, content, merge),
+    subscribe: (cb) => i18n.subscribe(cb),
+    getCurrentLocale: () => i18n.locale,
+  },
+  locales,
+  defaultLocale: 'en',
+  translationDir: 'src/locales',
+})
+
+const el = document.createElement('i18n-devtools-ui') as HTMLElement & { bridge: typeof bridge }
+el.bridge = bridge
+document.body.append(el)
+```
+
+`getRouteCache` は `locale:route`(`en:index`、`en:blog-post`)をキーとする辞書を返す必要があり、これは `i18n.storage.translations` が保持しているものです。Vue インスタンスの場合は `i18n.global.getRouteCache()` と `i18n.global.subscribeToChanges(cb)` を使用してください。
+
+`saveTranslation` はまずインスタンスを更新し、その後 `<base>/save` に POST します。エンドポイントがない場合(静的プレビュービルド)や開発サーバーに到達できない場合、編集は `localStorage` に保持されます。それ以外の保存エラーでは、以前の辞書が復元され、例外がスローされます。
+
+## API {#api}
+
+| エクスポート | エントリ |
+| --- | --- |
+| `i18nDevToolsPlugin(options)`, `i18nDevToolsIntegration(options)` | `@i18n-micro/devtools-ui/vite` |
+| `register()`, `I18nDevToolsElement` | `@i18n-micro/devtools-ui` |
+| `createBridge(options)`、型 `BridgeAdapter`, `CreateBridgeOptions` | `@i18n-micro/devtools-ui`(`/bridge/create` からも) |
+| 型 `I18nDevToolsBridge` | `@i18n-micro/devtools-ui`(`/bridge` からも) |
+| `createRpcClient`, `setupRpcHost` | `@i18n-micro/devtools-ui` |
+
+完全なシグネチャ: [パッケージリファレンス](/jp/api/packages/devtools-ui)。
+
+## 関連 {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Nuxt DevTools" icon="book-open" href="/jp/guide/devtools">
+
+Nuxt 内の同じエディター
+
+</Card>
+
+<Card title="フレームワーク" icon="book-open" href="/jp/integrations/overview">
+
+インスタンスとその `storage`
+
+</Card>
+
+</CardGroup>

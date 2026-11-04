@@ -1,0 +1,66 @@
+---
+title: "v3.24.0 — 从 `public/` 进行 Node SSR，不再使用 Rollup `raw:`"
+description: "发布说明：v3.24.0 — 从 public/ 进行 Node SSR，不再使用 Rollup raw:"
+---
+
+**日期**：2026-07-30
+
+**版本**：`v3.24.0`
+
+![v3.24.0 发布](/images/3.24.0.png)
+
+Node 生产构建不再将翻译载荷作为 Nitro `serverAssets` / Rollup `raw:` 嵌入（在大型目录上会导致数 GB 的构建 RSS）。SSR 读取与客户端获取的相同的 `/{apiBaseUrl}/{page}/{locale}/data.json` 树——通过 `readFile` 从 `public/` 读取。Edge 仍保留 Nitro 嵌入，并且应优先使用 `mode: 'source'`。
+
+## 有哪些新内容？ {#what’s-new}
+
+### Node：从 `public/<apiBaseUrl>` 进行 SSR {#node-ssr-from-public/&lt;apibaseurl&gt;}
+
+- 从磁盘提供 `public/` 的 Node 预设**不会**注册 Nitro `serverAssets`。
+- 载荷会以 `{page}/{locale}/data.json` 的形式复制到 `public/<apiBaseUrl>`（默认为 `_locales`）。
+- SSR 通过 `#i18n-internal/payload-source` → `readFile` 加载它们（生产路径位于 `.output/server` 旁边）。
+- `translationPayloads.serverAssets: true` 仍然表示“本地 SSR”，并且即使 `publicAssets` 为 false 也会**强制**生成该 public 副本。
+
+Playground（与之前的 `serverAssets` 嵌入相比）：约 **1.25 GB** / 约 6–7 秒 / `raw`=0，而之前约 **3 GB** / 约 13 秒 / 约 170 个 raw 块。
+
+### Edge：仅在需要时使用 `serverAssets` {#edge-serverassets-only-when-needed}
+
+- Edge（`nitro.node === false`）仍然通过 Nitro `serverAssets`（`assets:i18n`）进行嵌入，布局与 `mode` 相同。
+- Edge **不会**强制生成 public 副本——如需 CDN/静态托管，请设置 `publicAssets: true`。
+- 当 Edge 与 `mode: 'premerged'` 同时使用时会发出警告（对于大型目录，优先使用 `mode: 'source'`）。
+
+### `publicDir` 与客户端 URL 保持一致 {#publicdir-aligns-with-client-urls}
+
+- `translationPayloads.publicDir` 默认为 **`apiBaseUrl`**（而不是 `translationDir`）。
+- 预合并的 public/Edge 树为 `{page}/{locale}/data.json`，与 `$fetch('/_locales/...')` 匹配。
+- 模块默认值不再设置嵌套的 `publicAssets: true`（Nuxt 的深度合并曾导致即使在 `mode: 'source'` 下也强制生成 public 副本）。
+
+参见[模块选项 — `translationPayloads`](/zh/api/module-options#translationpayloads)、[部署 — Serverless 与 Edge](/zh/guide/deployment#serverless-and-edge) 以及[缓存与存储架构](https://s00d.github.io/nuxt-i18n-micro/v3/api/i18n-cache-api)。
+
+## 破坏性变更 {#breaking-changes}
+
+- **Nuxt SSR HTML 载荷中不再包含字典。** `payload.data['i18n-ssr-chunks']`、`setSsrChunk` 和 `seedFromSsrChunks` 已被**移除**。默认行为与 `@nuxtjs/i18n`（`experimental.preload: false`）相同：服务端在内存中保留翻译用于 SSR；客户端在插件初始化期间（`await switchContext`）加载 `/{apiBaseUrl}/.../data.json`。
+- **`prerenderRoutes` 默认为 `false`。** 仅当你需要 Nitro 在 `publicAssets` 尚未写入该树时生成处理器路由时才启用（预合并的 `publicAssets` 已经会输出 `{page}/{locale}/data.json`）。
+- **`publicDir` 默认为 `apiBaseUrl`**，而不是 `translationDir`。除非你显式设置 `publicDir`，否则静态输出会从例如 `public/locales/...` 移到 `public/_locales/{page}/{locale}/data.json`。
+- **预合并存储布局**现在为 `{page}/{locale}/data.json`（之前为 `pages/{page}/{locale}.json`）。任何按旧结构读取 Nitro/存储键或复制目录树的代码都必须更新。
+- **在 Node 上，`serverAssets: true` 不再表示 Nitro 嵌入**——它表示通过 public 副本进行本地 SSR。真正的 Rollup `raw:` 嵌入仅保留给 Edge。
+
+## 迁移 {#migration}
+
+1. 移除所有读取 `payload.data['i18n-ssr-chunks']` 或调用 `seedFromSsrChunks` / `setSsrChunk` 的代码。
+2. 对于纯静态托管：保留默认的预合并 + `publicAssets`（文件位于 `/_locales/.../data.json`），或设置 `prerenderRoutes: true` / 将载荷托管在 CDN 上。
+3. 对于 Cloudflare / 其他 Edge：在大型目录上设置 `translationPayloads: { mode: 'source' }`；仅当你需要静态/CDN 副本时才添加 `publicAssets: true`。
+4. 如果你依赖 `public/<translationDir>` 下的载荷，请设置 `translationPayloads.publicDir`，或将工具指向 `public/<apiBaseUrl>`。
+
+## 修复：在预合并的 public 载荷中跳过已禁用的 locale {#fix-skip-disabled-locales-in-premerged-public-payloads}
+
+`preMergeLocales` 现在只为传入合并的 locale 写入 `{page}/{locale}/data.json`（构建时设置了 `locale.disabled: true` 的会被省略）。之前磁盘上的每个 JSON locale 都会被复制到 `public/`，因此 Nitro 静态服务会以 200 返回已禁用的 locale 并绕过处理器。运行时的 `disabledLocales` 仍然无法撤销已构建文件的发布——当启用 `publicAssets` / Node public SSR 副本时，请在构建时使用 `locale.disabled`。
+
+## 为什么重要 {#why-it-matters}
+
+- Node 构建保持精简：翻译目录不再造成数 GB 的 Rollup `raw:` 峰值。
+- public 文件与客户端 `$fetch` URL 共享同一路径布局——静态托管无需特殊的重映射即可工作。
+- Edge 仍然可以嵌入紧凑的 `source` 载荷，而无需强制生成重复的 public 树。
+
+完整的变更日志将随版本发布在 [GitHub](https://github.com/s00d/nuxt-i18n-micro/blob/main/CHANGELOG.md) 上。
+
+---

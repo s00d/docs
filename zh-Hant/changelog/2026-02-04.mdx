@@ -1,0 +1,115 @@
+---
+title: "v3.0.0 — 效能最佳化、路由與路徑策略套件"
+description: "版本說明：v3.0.0 — 效能最佳化、路由與路徑策略套件"
+---
+
+**日期**：2026-02-04
+
+**版本**：`v3.0.0`
+
+![v3.0.0 release](/images/3.0.0.png)
+
+我們宣布推出 **v3.0.0**，帶來**重大的架構翻新**：為追求極致效能而完全重寫翻譯儲存系統，路由產生與執行階段路徑邏輯現已拆分為專屬套件，重新導向流程也經過重新設計，以提升可靠性與 Serverless 相容性。
+
+## 有什麼新功能？ {#what’s-new}
+
+### 效能最佳化 — 全新翻譯儲存架構 {#performance-optimization-—-new-translation-storage-architecture}
+
+翻譯載入與快取系統已完全重寫，以達到最佳效能：
+
+- **集中式 TranslationStorage 類別** — 全新的 `TranslationStorage` 類別（`src/runtime/utils/storage.ts`）為用戶端與伺服器提供統一的儲存空間。它使用 `globalThis` 搭配 `Symbol.for`，確保在整個 Node.js 程序中是真正的單例，避免在打包後的模組之間重複快取。
+
+- **最佳化的 `$t()` 函式（tFast）** — 翻譯函式直接在單一的作用中字典裡查找：
+  1. 所有翻譯（根層級 + 頁面專屬 + 備援）會在建置時預先合併為每個頁面一個檔案
+  2. 在相同語系內導覽時，新頁面的翻譯會累加合併到作用中字典（避免轉場動畫期間的鍵閃爍）
+  3. 支援巢狀鍵（`key.subkey.subsubkey`），並採用最佳化的路徑解析
+  4. 每次呼叫時不進行 Map 查找或語系／路由計算 — 使用預先計算的上下文
+
+- **透過 `window.__I18N__` 進行伺服器端注入** — SSR 期間載入的翻譯會以 script 標籤注入 HTML。用戶端在初次載入時直接從 `window.__I18N__` 讀取，避免重複請求。
+
+- **外掛中的本機區塊快取** — 外掛維護一個本機的 `loadedChunks` Map，儲存所有已載入的翻譯區塊。翻譯一經載入，在頁面生命週期內就不會再次請求。
+
+- **建置時預先合併** — `module.ts` 中的 `preMergeLocales` 步驟會在建置時將所有層、備援語系鏈與根層級翻譯合併到每個頁面檔案中。server-loader 只需讀取單一預先建置的檔案 — 不需要在執行階段合併。
+
+**效能提升：**
+
+- 減少每個請求的記憶體配置（每次呼叫 `$t()` 時不會重新建立物件）
+- 降低垃圾回收壓力
+- 在負載下回應更快
+- 穩定的記憶體使用模式（不再有「跳動」的圖表）
+
+### 路由與路徑策略套件 {#route-&-path-strategy-packages}
+
+- **@i18n-micro/route-strategy** — 建置時的路由產生：以在地化路由擴充 Nuxt 頁面，並依策略處理別名、巢狀路由與自訂路徑。單一進入點：`new RouteGenerator(options)` 與 `extendPages(pages)`。各策略（`no_prefix`、`prefix`、`prefix_except_default`、`prefix_and_default`）以獨立類別實作，並透過工廠選取。
+- **@i18n-micro/path-strategy** — 執行階段的路徑與語系處理：提供 `PathStrategy`，用於建構在地化路徑、解析重新導向與切換語系。支援 tree-shaking 的子路徑匯出（`/prefix`、`/no-prefix` 等），因此只會打包所選的策略。使用純函式進行路由解析，並以預先計算的上下文旗標將配置降到最低。
+- **結構化的套件配置** — 路由邏輯位於 `@i18n-micro/route-strategy`，包含 `core/`、`strategies/`。路徑策略位於 `@i18n-micro/path-strategy`，採用扁平的 `src/` 結構：`types.ts`、`path.ts`、`resolver.ts`、`helpers.ts` 與 `strategies/`。
+- **一致的行為** — 別名處理、父子路徑串接、自訂 `globalLocaleRoutes`／`filesLocaleRoutes`／`routeLocales`，以及不可變性保證，皆由專屬的測試套件涵蓋。
+
+### 重新導向架構翻新 {#redirect-architecture-overhaul}
+
+- **伺服器中介軟體** — 重新導向與 404 處理在 Nitro 中介軟體（`i18n.global.ts`）中執行。它在 Nuxt 渲染之前執行，因此當存在語系 cookie 時，從 `/` 到 `/<locale>/` 的重新導向不會出現錯誤閃爍。
+- **用戶端外掛（client-side）** — 僅限用戶端的外掛（`06.client-redirect.client.ts`）在 hydration 之後執行，並在 `useI18nLocale()` 或 cookie 設定非預設語系時處理重新導向。Nitro 在 Nuxt 之前執行，因此伺服器看不到使用者外掛對 cookie／狀態的變更；用戶端外掛涵蓋了這種情況。
+- **不再有備援元件** — `locale-redirect.vue` 備援元件與 `fallbackRedirectComponentPath` 選項已被移除。重新導向邏輯完全由伺服器中介軟體與用戶端外掛處理。
+- **自訂路徑支援** — 像德文的 `/kontakt`（透過 `globalLocaleRoutes`）這類路徑，即使沒有語系前綴也能正確識別為有效路徑，避免預先渲染時出現錯誤的 404。
+- **customRegexMatcher 修正** — 使用 `customRegexMatcher` 時，模式現在會比對**整個**第一個路徑片段（使用 `^` 與 `$` 錨點）。這可避免像 `/locale-test` 這類路由出現錯誤的 404，先前模式 `[a-z]{2}-[a-z]{2}` 會比對到子字串。
+- **autoDetectPath 修正** — `autoDetectPath` 選項現在會正確地與原始 URL 路徑比較，避免在明確導覽至帶有語系前綴的 URL 時發生不必要的重新導向。
+
+### useI18nLocale 組合式函式 {#usei18nlocale-composable}
+
+- **集中式語系管理** — 全新的 `useI18nLocale()` 組合式函式取代 `useLocaleCookies`，為語系狀態、cookie 與同步工具提供單一進入點。
+- **API** — `locale`、`localeCookie`、`hashCookie`、`getLocale()`、`getPreferredLocale()`、`setLocale()`、`syncLocale()`、`isValidLocale()`、`getEffectiveLocale()`、`resolveInitialLocale()`。
+- **以程式設定語系** — 在伺服器外掛中使用 `useI18nLocale().setLocale(locale)` 取代 `useState('i18n-locale')`，讓語系處理更簡潔、更集中。
+
+### 自訂自動偵測與設定 {#custom-auto-detection-&-configuration}
+
+- **`getI18nConfig()`** — 自訂外掛（例如用於語系偵測）應使用 `#build/i18n.strategy.mjs` 中的 `getI18nConfig()`，而非 `useRuntimeConfig().public.i18nConfig`。這可直接存取解析後的 i18n 設定（例如 `localeCookie`），不必依賴執行階段設定。
+- **Cookie 名稱** — 實作自訂偵測邏輯時，請使用 `getI18nConfig().localeCookie ?? 'user-locale'`。
+
+### 簡化的整合套件 {#simplified-integration-packages}
+
+所有整合套件（`@i18n-micro/vue`、`@i18n-micro/astro`、`@i18n-micro/node`、`@i18n-micro/react`、`@i18n-micro/preact`、`@i18n-micro/solid`）都已簡化並最佳化，共用相同的核心翻譯邏輯。
+
+### 設定變更 {#configuration-changes}
+
+- **移除 `previousPageFallback`** — 此選項已不再需要。新的累加合併策略會在轉場動畫期間自動保留前一頁的翻譯，然後透過 `page:transition:finish` hook 清除。
+- **`hmr`** — 從 `experimental.hmr` 移至頂層選項。控制翻譯檔案的伺服器端 HMR（開發環境中預設啟用）。
+
+```typescript
+// Before (v2.x)
+export default defineNuxtConfig({
+  i18n: {
+    experimental: {
+      hmr: true,
+    },
+  },
+})
+
+// After (v3.0.0)
+export default defineNuxtConfig({
+  i18n: {
+    hmr: true,
+  },
+})
+```
+
+## 破壞性變更 {#breaking-changes}
+
+- **`fallbackRedirectComponentPath`** — 已移除。模組不再使用備援路由元件進行重新導向。如果你設定了自訂元件路徑，請將其從設定中移除。
+- **`useLocaleCookies`** — 已移除。請改用 `useI18nLocale()`。新的組合式函式提供 `locale`、`localeCookie`、`hashCookie`、`setLocale()`、`syncLocale()` 等功能。
+- **`experimental.i18nPreviousPageFallback` / `previousPageFallback`** — 已完全移除。累加合併策略會自動處理轉場閃爍問題。請將此選項從設定中移除。
+- **`experimental.hmr`** — 已移至 `hmr`。如果你有使用此選項，請更新設定。
+- **自訂外掛** — 如果你的自訂語系偵測外掛使用了 `useRuntimeConfig().public.i18nConfig`，請改用 `#build/i18n.strategy.mjs` 中的 `getI18nConfig()`。建議使用 `useI18nLocale().setLocale()` 而非 `useState('i18n-locale')`。更新後的範例請參閱[自訂語言偵測](/zh-Hant/guide/custom-auto-detect)。
+- **內部檔案變更** — `load-from-storage.ts` 與 `translation-loader.ts` 已被移除，並由 `storage.ts` 與 `server-loader.ts` 取代。如果你直接從這些檔案匯入（不建議），請更新你的匯入。
+
+## 為什麼這很重要 {#why-it-matters}
+
+- **效能**：集中式單例快取消除了每個請求的物件建立，並降低 GC 壓力。
+- **可維護性**：路由與路徑邏輯位於具有明確邊界與型別的專屬套件中。
+- **測試**：策略行為與邊界情況皆獨立測試。
+- **可靠性**：將伺服器（Nitro）與用戶端的重新導向邏輯分開，可避免使用者外掛設定 cookie／useState 時的時序問題。
+- **支援 Serverless**：Nitro 外掛與 Nitro 處理常式在相同上下文中執行，相容於 Edge／Workers。
+- **文件**：路由行為記載於[策略指南](/zh-Hant/guide/strategy)，以及 [path-strategy](https://github.com/s00d/nuxt-i18n-micro/tree/main/packages/path-strategy) 與 [route-strategy](https://github.com/s00d/nuxt-i18n-micro/tree/main/packages/route-strategy) 套件中。
+
+升級說明與完整變更清單，請參閱 [changelog](https://github.com/s00d/nuxt-i18n-micro/blob/main/CHANGELOG.md)。
+
+---

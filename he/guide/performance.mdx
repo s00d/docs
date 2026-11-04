@@ -1,0 +1,261 @@
+---
+title: "כוונון ביצועים"
+description: "ההגדרות שמשנות את צריכת הזיכרון, גודל המטען והשמירה במטמון, וכיצד למדוד את מה שהאפליקציה שלכם שולחת."
+---
+
+ברירות המחדל מכוונות לאפליקציה טיפוסית: מטען JSON אחד לכל עמוד ושפה, תרגומים מחוץ ל-HTML, ומטמונים מוגבלים בשרת. עמוד זה מפרט את ההגדרות המעטות שכדאי לשנות כאשר הקטלוג גדול, השרת מוגבל בזיכרון, או שהמטענים מגיעים משרת אחר. למספרים מדודים מול `@nuxtjs/i18n` ו-Nuxt רגיל, ראו [מבחני ביצועים](/he/guide/performance-results).
+
+## מה ברירות המחדל כבר עושות {#what-the-defaults-already-do}
+
+- **מטען אחד לכל עמוד.** הבנייה ממזגת מפתחות של השורש, של העמוד ושל שפת הגיבוי אל `/_locales/<page>/<locale>/data.json`, כך שעמוד טוען קובץ אחד ו-`$t` הוא חיפוש יחיד.
+- **אין מילון ב-HTML.** ה-SSR שומר את התרגומים בזיכרון השרת; הדפדפן מביא את המטען במקום לפענח אותו מתוך `__NUXT_DATA__`.
+- **מטמון הדפדפן.** `?v=` משתנה רק כאשר התרגומים משתנים, כך שדפדפן שומר את המטענים שלו לאורך פריסות שלא נגעו בהם. העותק הסטטי של שרת אחסון נחשב טרי למשך 60 שניות ולאחר מכן עובר אימות מחדש: טעינה חוזרת ממתינה לתגובת `304` אחת. נתיב השרת עונה `immutable` לשנה ([פריסה](/he/guide/deployment#cache-headers-and-datebuild)).
+- **זיכרון שרת מוגבל.** השרת שומר במטמון לכל היותר 1000 מטענים כברירת מחדל ומשליך את אלה שהשימוש בהם היה המוקדם ביותר.
+
+## פיצול תרגומים לפי עמוד {#split-translations-by-page}
+
+מפתחות שמשמשים בעמוד אחד שייכים ל-`locales/pages/<page>/<locale>.json`, ולא לקובצי השורש: מפתחות השורש הם חלק מהמטען של כל עמוד. ראו [קובצי תרגום](/he/guide/translations).
+
+שתי הגדרות משנות את הפיצול הזה:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    // pages that show the same keys share one payload: /de/products/123 loads the products payload
+    routesLocaleLinks: { 'products-id': 'products' },
+    // or: no page files at all, every page loads only the root dictionary
+    // disablePageLocales: true,
+  },
+})
+```
+
+[`routesLocaleLinks`](/he/api/module-options#routeslocalelinks) מצמצם מטענים כפולים עבור נתיבים קשורים. [`disablePageLocales`](/he/api/module-options#disablepagelocales) מתאים לאפליקציות קטנות שבהן מילון אחד לכל שפה פשוט יותר.
+
+## מטמוני שרת {#server-caches}
+
+| הגדרה | ברירת מחדל | השפעה |
+| --- | --- | --- |
+| [`cacheMaxSize`](/he/api/module-options#cachemaxsize) | `0` | מספר הרשומות המרבי במטמוני המטענים. `0` = ללא הגבלה בדפדפן, 1000 בשרת. |
+| [`cacheTtl`](/he/api/module-options#cachettl) | `0` | מספר השניות לפני שרשומה במטמון נטענת מחדש. `0` = לעולם לא; הגדירו זאת כאשר המטענים מגיעים מ-`apiBaseServerHost` ומשתנים ללא פריסה מחדש. |
+| `serverTranslationPreload` | `false` | טעינת המטען `index` ב-middleware של Nitro עבור כל בקשת עמוד, כך שפונקציות העזר של השרת ועמוד הבית משתמשים בו שוב. |
+
+הקטינו את `cacheMaxSize` במופע קטן עם עמודים × שפות רבים. תרגומים שנערכים מקומית לעולם אינם צריכים TTL: סביבת הפיתוח קוראת קבצים בזמן אמת, ומטעני הייצור משתנים רק עם פריסה.
+
+## זיכרון בשרת Node {#memory-on-a-node-server}
+
+תחת עומס קבוע, שרת Node יכול לעמוד על כ-12 פעמים גודל ה-heap החי שלו ולהישאר שם. במבחן עומס של 100k מפתחות לכל עמוד, heap חי של 90 MB רץ עם כ-1.1 GB של RSS. זו אינה דליפה. אחרי מחזור GC חריג אחד V8 מעלה את מגבלת ה-heap שלו, ושומר את הדפים המשוחררים במאגר לשימוש חוזר כל עוד העומס נמשך. כ-8 שניות לאחר שהעומס נפסק המאגר מתרוקן וה-RSS יורד לכ-160 MB. `global.gc()` אינו משחרר את הזיכרון הזה. Nuxt רגיל ללא המודול מתנהג באותו אופן, בקנה מידה של ה-heap הקטן יותר שלו.
+
+זה גוזל מרווח: עם מגבלת זיכרון מתחת לרמה זו וללא תקרת heap, התהליך עלול להיהרג. הגדירו תקרה שמתאימה למגבלה שלכם ונמצאת הרבה מעל ה-heap החי:
+
+```bash
+NODE_OPTIONS=--max-old-space-size=512 node .output/server/index.mjs
+```
+
+| 100k מפתחות, 12 שפות, 5 עד 30 דקות עומס | ברירת מחדל | `--max-old-space-size=512` |
+| --- | --- | --- |
+| RSS תחת עומס | כ-1,150 MB | 254-287 MB |
+| בקשות לשנייה | 624 | 517-572 |
+
+כך שהתקרה מחליפה 8 עד 10% מהתפוקה תמורת הזיכרון. לקטלוג בגודל רגיל יש heap קטן יותר וקפיצה קטנה יותר. ההרצות האלה בוצעו ב-macOS עם Node 22, לא בתוך קונטיינר.
+
+## זמן פענוח ו-`dir` {#parse-time-and-dir}
+
+`dir: 'auto'` בשפה גורם לדפדפן לחשב את הכיווניות מהתוכן בזמן הפענוח. ב-Chromium, DOMContentLoaded עם 20,000 אלמנטים היה כ-1.1 שניות עם `dir="auto"` ו-0.1 שניות בלעדיו, ועם 5,000 אלמנטים כ-130 ms לעומת 45 ms. השאירו את `dir` לא מוגדר או הגדירו אותו ל-`ltr` או `rtl` ([כיווניות טקסט](/he/guide/seo#text-direction)).
+
+## מטמון משותף לכמה מופעים {#shared-cache-for-several-instances}
+
+עם כמה מופעים של אותה בנייה, [`cacheStorage`](/he/api/module-options#other) נותן להם מטמון מילונים אחד בכל אחסון של Nitro, על החיבור שהאפליקציה שלכם מגדירה ב-`nitro.storage`. המודול אינו מוסיף מחבר ואינו מוסיף תלות.
+
+**זהו מטמון, לא מקור.** התרגומים מגיעים מהמטענים המוטמעים או הציבוריים, או מ-`apiBaseServerHost`. רק מה שהגיע מהמקור נכתב, והמפתחות כוללים את הבנייה, כך שמאגר שאתם ממלאים ידנית אינו נקרא. כדי להגיש תרגומים מ-KV או ממסד נתונים, הציבו ב-`apiBaseServerHost` נתיב קטן שקורא ממנו.
+
+**מתי זה עוזר.** רק עם `apiBaseServerHost` מרוחק. שלושה מופעים שעברו על 39 מילונים ביצעו 117 בקשות לשרת בלעדיו ו-48 איתו. עם קבצים בדיסק, פגיעה במאגר אינה מהירה יותר מהקובץ, ומעבר ראשון על 12 עמודים לקח 280-296 ms ללא האפשרות ו-308-325 ms עם Redis מלא, ולכן השאירו אותה לא מוגדרת. בהגדרה (preset) שמטמיעה מילונים היא לא עושה דבר ללא שרת, והבנייה מציינת זאת.
+
+מילון קר, לקוח אחד, מעבר אחד לכל אחד, כך שהנתונים גסים, ורובם הוא המרחק לשרת:
+
+| מאגר | מהשרת | מהמאגר |
+| --- | --- | --- |
+| Cloudflare KV | כ-300 ms | כ-110 ms |
+| D1 | כ-230 ms | כ-115 ms |
+| Deno KV | כ-430 ms | כ-100 ms |
+| Upstash, Vercel serverless | כ-445 ms | כ-245 ms |
+| Upstash, Vercel Edge | כ-505 ms | כ-235 ms |
+
+### Redis {#redis}
+
+דורש את `ioredis` בפרויקט שלכם.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      redis: { driver: 'redis', url: process.env.REDIS_URL },
+    },
+  },
+  i18n: {
+    cacheStorage: 'redis', // the mount name
+    apiBaseServerHost: 'https://translations.internal',
+    cacheTtl: 300,
+  },
+})
+```
+
+### Upstash ב-Vercel וב-Vercel Edge {#upstash-on-vercel-and-vercel-edge}
+
+השתמשו בדרייבר `upstash` בשניהם: הוא מתקשר ב-REST, בעוד שהדרייבר `redis` דורש TCP. הוא דורש את `@upstash/redis` בפרויקט שלכם, וקורא את `UPSTASH_REDIS_REST_URL` ואת `UPSTASH_REDIS_REST_TOKEN` מהסביבה.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      upstash: { driver: 'upstash' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'upstash',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+### Cloudflare KV {#cloudflare-kv}
+
+קשרו namespace ל-Worker בשם `I18N_KV` (`kv_namespaces` בתצורת ה-wrangler שלו).
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      kv: { driver: 'cloudflare-kv-binding', binding: 'I18N_KV' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'kv',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+שרת שהוא Worker אחר באותו חשבון דורש את דגל התאימות `global_fetch_strictly_public`, אחרת הבקשה לא מגיעה אליו.
+
+### Cloudflare D1 {#cloudflare-d1}
+
+`nitro.storage` אינו יכול להכיל אובייקט מסד נתונים, ולכן תוסף Nitro מעגן את הדרייבר. העיגון נבדק בשימוש הראשון, כך שזה מוקדם מספיק. קשרו את מסד הנתונים בשם `I18N_DB` (`d1_databases`) והוסיפו את `unstorage` לפרויקט שלכם.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    experimental: { database: true },
+    database: {
+      default: { connector: 'cloudflare-d1', options: { bindingName: 'I18N_DB' } },
+    },
+  },
+  i18n: {
+    cacheStorage: 'd1',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+```ts
+// server/plugins/i18n-storage.ts
+import dbDriver from 'unstorage/drivers/db0'
+
+export default defineNitroPlugin(() => {
+  useStorage().mount('d1', dbDriver({ database: useDatabase() }))
+})
+```
+
+הדרייבר `db0` מסומן כניסיוני ומתעלם מה-TTL: שורות של בניות ישנות נשארות עד שתמחקו אותן.
+
+### Deno KV {#deno-kv}
+
+ב-Deno Deploy, הקצו מסד נתונים (`deno deploy database provision <name> --kind denokv`), שייכו אותו לאפליקציה (`deno deploy database assign`), והשתמשו בדרייבר:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      kv: { driver: 'deno-kv' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'kv',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+### איך זה מתנהג {#how-it-behaves}
+
+מילון מחופש תחילה במטמון של המופע עצמו, אחר כך באחסון המשותף, ולבסוף במקור שלו. המטמון של המופע עצמו נשאר, מכיוון ש-`$t` הוא סינכרוני וזקוק לעץ בזיכרון: זה מפריד בין מי שמביא לבין מי שמגיש, זה לא חוסך זיכרון.
+
+- **מי מביא.** עם שרת מרוחק, בקשה אחת מה-backend לכל מילון במקום אחת לכל מופע. מופעים שמחטיאים באותו רגע מביאים אותו כל אחד בנפרד, כי אין נעילה.
+- **עמודים ללא מילון משלהם** אינם נשמרים, כדי ששמות עמודים מומצאים לא יוכלו להוסיף מפתחות. כל מופע מביא עמוד כזה מהשרת פעם אחת, וב-Workers, שבהם isolates באים והולכים, זהו טפטוף קבוע.
+- **השרת לא זמין.** עמודים עם מילון שמור עובדים. עמוד ללא מילון מוצג מתוך מילון השורש השמור, כשהמפתחות שלו גולמיים, עם [`503` שאף מטמון לא שומר](/he/guide/deployment#when-a-dictionary-cannot-be-read), ו-`/_locales` עונה `503` עבורו עד שהשרת חוזר. `useTranslationServerMiddleware` מחזיר מפתחות עבור מילון שאינו יכול לקרוא.
+- **השרת** הוא `NUXT_I18N_APP_BASE_SERVER_HOST` בזמן ריצה, או אחרת `apiBaseServerHost` מהבנייה, בדיוק כמו ללא האפשרות. בהגדרה שמטמיעה מילונים (Cloudflare, Vercel, Netlify, ראו [פריסה](/he/guide/deployment#serverless-and-edge)) השכבה חלה רק עם שרת: הנתונים כבר נמצאים ב-bundle, ועותק ב-KV היה קריאת רשת עבור מה שהזיכרון כבר מחזיק.
+- **המפתחות** הם `i18n-micro:<buildId>~<dateBuild>~<fallbackLocale>~<host>:<locale>:<page>`, כך ששתי בניות בפריסה מתגלגלת לעולם אינן קוראות זו את זו, וגם לא שני backends של אותו ארטיפקט. כל מופע חייב להגיע מבנייה אחת (ארטיפקט אחד, או [`buildId`](https://nuxt.com/docs/api/nuxt-config#buildid) מקובע של Nuxt); מופעים שנבנו בנפרד פשוט אינם משתפים. עם `buildId` מקובע ו-`dateBuild: 0`, שתי בניות שונות כן משתפות מפתחות. רק שפות מופעלות מחופשות, ושמות עמודים של יותר מ-200 תווים מדלגים על השכבה.
+- **מה נשמר.** מילון מושווה למילון השורש (`__root`) לפני שהוא נכתב, ונכנס רק כאשר הוא מכיל את כל מפתחות השורש ושונה מהשורש. כך עמוד מומצא שנענה עם השורש אינו מוסיף מפתח, וגם לא גוף שגיאה עם 200 בעמוד. כל מופע קורא עמוד כזה מהמקור פעם אחת. שרת חייב לענות לעמודים לא מוכרים עם השורש, אובייקט ריק או 404, ולהגיש את `__root`. שרת ללא `__root`, או כזה שמגיש עמודים ללא מפתחות השורש, אינו משתף דבר. אם השרת עונה ל-`__root` עצמו עם שגיאה בנויה היטב, היא נשמרת: השאירו את `cacheTtl` קצר כאשר ה-backend עלול לעשות זאת.
+- **תפוגה.** רשומה פגה `cacheTtl` שניות לאחר שנכתבה, או לאחר יום אחד כאשר `cacheTtl` הוא `0`, כך שמפתחות של בניות ישנות אינם יכולים להצטבר. ערך יכול להישאר במטמון של המופע עצמו למשך `cacheTtl` נוסף, ובמטמון המקטעים של הרינדור לעוד אחד: שינויי backend מופיעים תוך שלוש פעמים `cacheTtl`. דרייברים ללא תפוגה (`fs`) שומרים מפתחות ישנים עד שתסירו אותם.
+- **כאשר האחסון נכשל** העמוד לא נכשל. קריאה יכולה לקחת שנייה אחת, מה שמכסה לחיצת יד של חיבור ומפתח Cloudflare KV שקר באותו מיקום. לאחר כישלון המגבלה היא 250 ms עד שהמאגר עונה שוב. שלושה כישלונות ברצף סוגרים את השכבה ל-5 שניות. בזמן שהיא סגורה, ובזמן שקריאה זה עתה נכשלה, דבר אינו נכתב. כתיבה שנכשלה אינה סוגרת דבר, כך שהעתק לקריאה בלבד ממשיך להגיש קריאות. מאגר שתשובותיו לוקחות יותר מהמגבלות האלה נחשב כנכשל: החטאה, והמילון מגיע מהמקור שלו. עם ioredis זה מתחיל בסביבות 400 ms לפקודה, כי לחיצת היד שלו לוקחת שלושה סבבים. המודול רושם אזהרה אחת לדקה; ioredis מדפיס שגיאות משלו בנוסף לכך. ערך שאינו מילון נחשב כהחטאה ונדרס. שם עיגון לא מוכר מזהיר פעם אחת בשימוש הראשון; האפליקציה רצה אז ללא השכבה.
+- **כאשר המקור נכשל** דבר אינו שומר את הכישלון. בקשה שנכשלה או קובץ שאינו קריא אינם מגיעים לאף מטמון, לא לזה ולא לזה של המופע עצמו, והבקשה הבאה קוראת שוב. ראו [פריסה](/he/guide/deployment#when-a-dictionary-cannot-be-read).
+- **כבוי בסביבת פיתוח וב-prerender**, שקוראים את הקבצים שלהם ואסור שיזדקקו ל-Redis של הייצור שלכם.
+- **פסילה.** אין קריאת ניקוי: בנייה חדשה משתמשת במפתחות חדשים. כדי לרענן בנייה רצה מיד, הסירו את מפתחות `i18n-micro:` מהאחסון והפעילו מחדש את המופעים. `clearCache` ו-HMR נוגעים רק במצב התהליך.
+- שינויים בזמן ריצה (`$mergeTranslations`, `$defineI18nRoute`) נשארים ברינדור או בדפדפן שביצע אותם ולעולם אינם נכתבים לאחסון.
+
+## גודל המטען {#payload-size}
+
+הבנייה מזהירה כאשר פלט המטענים עובר את `translationPayloads.warnFileCount` (500 קבצים) או את `warnSizeBytes` (10 MB). כאשר זה קורה:
+
+- העבירו מפתחות של עמוד בודד מחוץ לקובצי השורש;
+- קשרו נתיבים שמציגים את אותם מפתחות (`routesLocaleLinks`);
+- ב-serverless או ב-Edge, השתמשו ב-`translationPayloads.mode: 'source'` כדי שה-bundle של השרת יטמיע מקורות קומפקטיים במקום כל עמוד × שפה ([פריסה](/he/guide/deployment#serverless-and-edge)). בניית Edge מזהירה בעצמה מעבר למגבלת הפלטפורמה ([מגבלות bundle](/he/guide/deployment#bundle-limits-on-edge));
+- הפעילו את `nitro.compressPublicAssets` לקבלת עותקי `.gz` / `.br` של המטענים הסטטיים.
+
+## מדידה {#measuring}
+
+המאגר עוקב אחרי מה שה-playground שולח באמצעות `pnpm run budget:payload`; המספרים הנוכחיים:
+
+נמדד על `playground` עבור `/`, `/de`:
+
+| מדידה | גודל |
+| --- | --- |
+| מקורות תרגום בדיסק | 7.8 MB |
+| מוגש כקובצי מטען נפרדים | 23.9 MB |
+| `__NUXT_DATA__` המוטמע הגדול ביותר | 0.4 KB |
+| נכסי לקוח | 624.4 KB |
+
+ה-playground הוא ספסל בדיקות עם מילונים שנוצרו אוטומטית של עד 100k מפתחות, כך שאלה אינם נתונים שיש לצפות להם מאפליקציה
+אמיתית — הם נקודת ייחוס קבועה למדידה. התקציב נכשל כאשר הם גדלים באופן בלתי צפוי,
+וכך מתגלה שינוי מקרי במה שהמטען נושא.
+
+הריצו את חבילת מבחני הביצועים בעצמכם עם `pnpm test:performance`; אופן פעולתה מתואר ב[מתודולוגיית מבחני הביצועים](https://s00d.github.io/nuxt-i18n-micro/contributing/performance-methodology).
+
+## קשור {#related}
+
+<CardGroup cols={2}>
+
+<Card title="מבחני ביצועים" icon="book-open" href="/he/guide/performance-results">
+
+</Card>
+
+<Card title="פריסה" icon="book-open" href="/he/guide/deployment">
+
+</Card>
+
+<Card title="קובצי תרגום" icon="book-open" href="/he/guide/translations">
+
+</Card>
+
+</CardGroup>

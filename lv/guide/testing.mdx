@@ -1,0 +1,147 @@
+---
+title: "Lietotnes testēšana"
+description: "Veiciet vienībtestus komponentiem, kas izmanto $t, ar @i18n-micro/test-utils un Vitest, un pārbaudiet lokalizētās lapas no gala līdz galam."
+---
+
+Komponentiem, kas izsauc `useI18n()`, vienībtestos ir vajadzīga i18n instance. `@i18n-micro/test-utils` sniedz viltotu `useI18n()` ar īstu tulkošanas, daudzskaitļa un formatēšanas loģiku, tāpēc varat montēt komponentu ar savām vārdnīcām un bez Nuxt servera. Maršrutēšanai un pāradresācijām palaidiet īsto moduli no gala līdz galam ar `@nuxt/test-utils`.
+
+Šī lapa ir par jūsu lietotnes testēšanu. Kā šis repozitorijs testē pašu moduli, ir aprakstīts lapā [Testing the module](https://s00d.github.io/nuxt-i18n-micro/contributing/testing).
+
+## Instalēšana {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add -D @i18n-micro/test-utils @nuxt/test-utils vitest @vue/test-utils happy-dom
+```
+
+```bash npm
+npm install -D @i18n-micro/test-utils @nuxt/test-utils vitest @vue/test-utils happy-dom
+```
+
+</CodeGroup>
+
+## useI18n imitēšana {#mock-usei18n}
+
+```ts
+// tests/unit-setup.ts
+import { setupNuxtI18nMock } from '@i18n-micro/test-utils'
+import { mockNuxtImport } from '@nuxt/test-utils/runtime'
+import { beforeEach, vi } from 'vitest'
+
+export const { i18n, useI18n, setTranslationsFromJson } = setupNuxtI18nMock({
+  spy: vi.fn, // every method becomes a vi.fn, so you can assert calls
+  beforeEach, // reset state and reseed `translations` before each test
+  translations: { welcome: 'Welcome' },
+})
+
+mockNuxtImport('useI18n', () => useI18n)
+```
+
+```ts
+// vitest.config.ts
+import { defineVitestConfig } from '@nuxt/test-utils/config'
+
+export default defineVitestConfig({
+  test: {
+    environment: 'nuxt',
+    setupFiles: ['./tests/unit-setup.ts'],
+  },
+})
+```
+
+Paturiet `mockNuxtImport` iestatīšanas failā: `@nuxt/test-utils` tas ir jātransformē. `setupNuxtI18nMock` izmanto privātu tulkojumu kešatmiņu, tāpēc paralēli testu faili nekoplieto stāvokli.
+
+## Testa rakstīšana {#write-a-test}
+
+```vue
+<!-- components/Greeting.vue -->
+<script setup lang="ts">
+const { $t } = useI18n()
+</script>
+
+<template>
+  <p>{{ $t('welcome') }}</p>
+</template>
+```
+
+```ts
+// tests/greeting.spec.ts
+import { mountSuspended } from '@nuxt/test-utils/runtime'
+import { expect, it } from 'vitest'
+import Greeting from '~/components/Greeting.vue'
+import de from '~/locales/de.json'
+import { i18n, setTranslationsFromJson } from './unit-setup'
+
+it('renders the German greeting', async () => {
+  await setTranslationsFromJson('de', de)
+  i18n.setLocale('de')
+
+  const wrapper = await mountSuspended(Greeting)
+  expect(wrapper.text()).toBe('Willkommen') // de.json: { "welcome": "Willkommen" }
+})
+```
+
+Viltojums atklāj tās pašas metodes kā īstais `useI18n()` (`$t`, `$tc`, `$tn`, `$td`, `$has`, `$localePath`, …, ar un bez `$`), kā arī iestatītājus testiem: `setLocale`, `setLocales`, `setDefaultLocale`, `setRouteName`, `setTranslationsFromJson`, `loadPageTranslations`, `mergeTranslations`, `setMissingHandler`.
+
+`$localePath` un `$switchLocalePath` ir aizstājēji, kas pievieno ceļam prefiksu atbilstoši opcijai `strategy` (bez īsta maršrutētāja). Īstas saites un pāradresācijas testējiet no gala līdz galam.
+
+## Zemāka līmeņa palīgfunkcijas {#lower-level-helpers}
+
+| Palīgfunkcija | Izmantojiet to |
+| --- | --- |
+| `createIsolatedFakeI18n(options)` | Izolētam viltojumam bez Nuxt `useI18n` savienojuma, piem., vienkāršam `@vue/test-utils` `mount` ar `global.mocks`. |
+| `createFakeI18n(options)` | Viltojumam uz koplietotās moduļa kešatmiņas (izsauciet `resetI18n()` blokā `beforeEach`) vai izolētam ar `isolated: true`. |
+| `createI18nTestContext(options)` | Kontekstam, kas ir abu pamatā, ja jums vajag vairākus viltojumus. |
+| `t`, `tc`, `ts`, `tn`, `td`, `tdr`, `has` | Tiešiem izsaukumiem koplietotajā kontekstā vienkāršu funkciju testēšanai. |
+
+Imitācija ir `BaseI18n`: `t`, `tc`, `tn`, `td`, `tdr` un `has` ir īstās funkcijas uz īstām vārdnīcām, tāpēc tests redz to, ko rāda lietotne.
+
+Iepriekš minētās rūpnīcas palīgfunkcijas pieņem `locale`, `defaultLocale`, `locales`, `routeName`, `strategy`, `translations` un `messages` (vārdnīcas katrai lokalizācijai). Pilns piemēra projekts atrodas [`packages/test-utils/example`](https://github.com/s00d/nuxt-i18n-micro/tree/main/packages/test-utils/example).
+
+## Testi no gala līdz galam {#end-to-end-tests}
+
+Maršrutēšanai, pāradresācijām, SEO tagiem un datu ielādei ir vajadzīgs īstais modulis. Palaidiet savu lietotni ar `@nuxt/test-utils/e2e`:
+
+```ts
+// tests/e2e/locales.test.ts
+import { $fetch, fetch, setup } from '@nuxt/test-utils/e2e'
+import { describe, expect, it } from 'vitest'
+
+describe('locales', async () => {
+  await setup({ server: true })
+
+  it('serves the German page', async () => {
+    expect(await $fetch('/de')).toContain('lang="de-DE"')
+  })
+
+  it('redirects / for a German browser', async () => {
+    const res = await fetch('/', { headers: { 'accept-language': 'de' }, redirect: 'manual' })
+    expect(res.headers.get('location')).toBe('/de')
+  })
+})
+```
+
+Otrais tests pieņem `prefix` (vai `prefix_except_default` ar citu noklusējuma lokalizāciju); lai uzzinātu, kad `/` pāradresē, skatiet [Lokalizācijas noteikšana](/lv/guide/locale-detection).
+
+## Saistītās lapas {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Moduļa testēšana" icon="code-pull-request" href="https://s00d.github.io/nuxt-i18n-micro/contributing/testing">
+
+</Card>
+
+<Card title="useI18n" icon="brackets-curly" href="/lv/composables/useI18n">
+
+</Card>
+
+<Card title="Lokalizācijas noteikšana" icon="book-open" href="/lv/guide/locale-detection">
+
+</Card>
+
+<Card title="Storybook" icon="book-open" href="/lv/guide/storybook">
+
+</Card>
+
+</CardGroup>

@@ -1,0 +1,134 @@
+---
+title: "DevTools UI"
+description: "Trình chỉnh sửa bản dịch cho dev server của Vite, cùng một bridge kết nối nó với bất kỳ instance @i18n-micro nào."
+---
+
+`@i18n-micro/devtools-ui` là trình chỉnh sửa bản dịch từ tab Nuxt DevTools, được đóng gói thành một web component kèm plugin Vite. Thêm nó vào một dự án Vue, React, Preact, Solid hoặc Astro để duyệt và chỉnh sửa các tệp JSON trong thư mục bản dịch ngay từ trình duyệt trong quá trình phát triển. Các ứng dụng Nuxt đã có sẵn nó trong [Nuxt DevTools](/vi/guide/devtools).
+
+![DevTools UI: cây tệp và trình chỉnh sửa với văn bản của locale mặc định bên cạnh mỗi key](/images/devtools/02-translations-editor-dark.webp)
+
+## Cài đặt {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add -D @i18n-micro/devtools-ui
+```
+
+```bash npm
+npm install -D @i18n-micro/devtools-ui
+```
+
+```bash yarn
+yarn add -D @i18n-micro/devtools-ui
+```
+
+</CodeGroup>
+
+Không có peer dependency.
+
+## Thiết lập {#setup}
+
+```ts
+// vite.config.ts
+import { defineConfig } from 'vite'
+import { i18nDevToolsPlugin } from '@i18n-micro/devtools-ui/vite'
+
+export default defineConfig({
+  plugins: [i18nDevToolsPlugin({ translationDir: 'src/locales' })],
+})
+```
+
+| Tùy chọn | Mặc định | Ghi chú |
+| --- | --- | --- |
+| `translationDir` | `'src/locales'` | Thư mục chứa các tệp JSON, tương đối với thư mục gốc của Vite. |
+| `base` | `'/__i18n_api'` | Đường dẫn cơ sở của các endpoint API. |
+| `injectButton` | `true` | Thêm một nút nổi vào các trang được phục vụ qua phép biến đổi `index.html` của Vite. Astro không có những trang như vậy: xem bên dưới. |
+| `defaultLocale` | tệp locale đầu tiên trong `translationDir` | Được trả về bởi `/config`. |
+| `fallbackLocale` | `defaultLocale` | Được trả về bởi `/config`. |
+
+Plugin chỉ chạy trên dev server (`apply: 'serve'`); bản build production không chứa gì từ nó. Nút này mở `/__i18n_devtools.html`, trang đọc và lưu tệp thông qua các endpoint của plugin:
+
+| Endpoint | Chức năng |
+| --- | --- |
+| `GET <base>/translations` | mọi từ điển trong `translationDir`, theo đường dẫn tương đối |
+| `POST <base>/save` | body `{ file, content }`; ghi đè một tệp `.json` đã tồn tại trong `translationDir`, trả về 403 cho mọi thứ khác. Nó không bao giờ tạo tệp mới |
+| `GET <base>/config` | `{ defaultLocale, fallbackLocale, locales, translationDir }`; `locales` lấy từ các tệp gốc trong `translationDir` |
+
+Các endpoint chỉ phản hồi trang devtools: một yêu cầu từ origin hoặc host khác sẽ nhận `403`, và `/save` chỉ chấp nhận `application/json` (`415`). Trang nhận thông báo về thay đổi tệp qua socket HMR của Vite.
+
+Trong Astro, hãy thêm integration thay vì plugin. Nó thêm một ứng dụng vào thanh công cụ dev:
+
+```ts
+// astro.config.mjs
+import { defineConfig } from 'astro/config'
+import { i18nDevToolsIntegration } from '@i18n-micro/devtools-ui/vite'
+
+export default defineConfig({
+  integrations: [i18nDevToolsIntegration({ translationDir: 'src/locales' })],
+})
+```
+
+Việc lưu chỉ ghi tệp. Một ứng dụng import JSON qua Vite sẽ nhận được thay đổi thông qua HMR; để các chỉnh sửa được áp dụng trực tiếp vào instance đang chạy, hãy dùng một bridge.
+
+## Bridge tới một instance đang chạy {#bridge-to-a-live-instance}
+
+Để nhúng trình chỉnh sửa vào trang của riêng bạn và áp dụng chỉnh sửa ngay lập tức vào instance đang chạy, hãy tạo một bridge từ một adapter và truyền nó cho phần tử `<i18n-devtools-ui>`:
+
+```ts
+import { createBridge, register } from '@i18n-micro/devtools-ui'
+import { i18n, locales } from './i18n' // a runtime, React, Preact or Solid instance
+
+register() // defines <i18n-devtools-ui> once
+
+const bridge = createBridge({
+  adapter: {
+    getRouteCache: () => Object.fromEntries(i18n.storage.translations),
+    addTranslations: (locale, content, merge) => i18n.addTranslations(locale, content, merge),
+    addRouteTranslations: (locale, route, content, merge) => i18n.addRouteTranslations(locale, route, content, merge),
+    subscribe: (cb) => i18n.subscribe(cb),
+    getCurrentLocale: () => i18n.locale,
+  },
+  locales,
+  defaultLocale: 'en',
+  translationDir: 'src/locales',
+})
+
+const el = document.createElement('i18n-devtools-ui') as HTMLElement & { bridge: typeof bridge }
+el.bridge = bridge
+document.body.append(el)
+```
+
+`getRouteCache` phải trả về các từ điển với key dạng `locale:route` (`en:index`, `en:blog-post`), đúng với những gì `i18n.storage.translations` chứa. Với một instance Vue, hãy dùng `i18n.global.getRouteCache()` và `i18n.global.subscribeToChanges(cb)`.
+
+`saveTranslation` cập nhật instance trước, sau đó POST tới `<base>/save`. Khi không có endpoint (một bản build xem trước tĩnh) hoặc không thể kết nối tới dev server, chỉnh sửa được giữ trong `localStorage`; mọi lỗi lưu khác sẽ khôi phục từ điển trước đó và ném lỗi.
+
+## API {#api}
+
+| Export | Điểm vào |
+| --- | --- |
+| `i18nDevToolsPlugin(options)`, `i18nDevToolsIntegration(options)` | `@i18n-micro/devtools-ui/vite` |
+| `register()`, `I18nDevToolsElement` | `@i18n-micro/devtools-ui` |
+| `createBridge(options)`, kiểu `BridgeAdapter`, `CreateBridgeOptions` | `@i18n-micro/devtools-ui` (cũng có ở `/bridge/create`) |
+| kiểu `I18nDevToolsBridge` | `@i18n-micro/devtools-ui` (cũng có ở `/bridge`) |
+| `createRpcClient`, `setupRpcHost` | `@i18n-micro/devtools-ui` |
+
+Chữ ký đầy đủ: [tài liệu tham khảo gói](/vi/api/packages/devtools-ui).
+
+## Liên quan {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Nuxt DevTools" icon="book-open" href="/vi/guide/devtools">
+
+Cùng trình chỉnh sửa đó bên trong Nuxt
+
+</Card>
+
+<Card title="Framework" icon="book-open" href="/vi/integrations/overview">
+
+Instance và `storage` của nó
+
+</Card>
+
+</CardGroup>

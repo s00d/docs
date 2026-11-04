@@ -1,0 +1,115 @@
+---
+title: "v3.0.0 — veiktspējas optimizācija, maršrutu un ceļu stratēģiju pakotnes"
+description: "Laidiena piezīmes: v3.0.0 — veiktspējas optimizācija, maršrutu un ceļu stratēģiju pakotnes"
+---
+
+**Datums**: 2026-02-04
+
+**Versija**: `v3.0.0`
+
+![v3.0.0 laidiens](/images/3.0.0.png)
+
+Mēs paziņojam par **v3.0.0** ar **būtisku arhitektūras pārveidi**: tulkojumu krātuves sistēma ir pilnībā pārrakstīta maksimālai veiktspējai, maršrutu ģenerēšana un izpildlaika ceļu loģika tagad ir sadalīta atsevišķās pakotnēs, un pāradresācijas plūsma ir pārveidota labākai uzticamībai un Serverless saderībai.
+
+## Kas jauns? {#what’s-new}
+
+### Veiktspējas optimizācija — jauna tulkojumu krātuves arhitektūra {#performance-optimization-—-new-translation-storage-architecture}
+
+Tulkojumu ielādes un kešošanas sistēma ir pilnībā pārrakstīta maksimālai veiktspējai:
+
+- **Centralizēta TranslationStorage klase** — Jauna `TranslationStorage` klase (`src/runtime/utils/storage.ts`) nodrošina vienotu krātuvi gan klientam, gan serverim. Izmanto `globalThis` ar `Symbol.for`, lai garantētu īstu singletonu visā Node.js procesā, novēršot kešatmiņas dublēšanos starp saiņotajiem moduļiem.
+
+- **Optimizēta `$t()` funkcija (tFast)** — Tulkošanas funkcija izmanto tiešu meklēšanu vienā aktīvajā vārdnīcā:
+  1. Visi tulkojumi (saknes + lapai specifiskie + rezerves) būvēšanas laikā tiek iepriekš apvienoti vienā failā katrai lapai
+  2. Navigējot tās pašas lokalizācijas ietvaros, jaunās lapas tulkojumi tiek kumulatīvi apvienoti ar aktīvo vārdnīcu (novērš atslēgu mirgošanu pārejas animāciju laikā)
+  3. Atbalsta ligzdotas atslēgas (`key.subkey.subsubkey`) ar optimizētu ceļa atrisināšanu
+  4. Katrā izsaukumā nav Map meklēšanas vai lokalizācijas/maršruta aprēķinu — tiek izmantots iepriekš aprēķināts konteksts
+
+- **Servera puses ievietošana caur `window.__I18N__`** — SSR laikā ielādētie tulkojumi tiek ievietoti HTML kā script tags. Sākotnējās ielādes laikā klients lasa tieši no `window.__I18N__`, izvairoties no dubultiem pieprasījumiem.
+
+- **Lokāla fragmentu kešatmiņa spraudnī** — Spraudnis uztur lokālu `loadedChunks` Map, kurā tiek glabāti visi ielādētie tulkojumu fragmenti. Pēc ielādes tulkojumi lapas dzīves cikla laikā vairs netiek pieprasīti atkārtoti.
+
+- **Iepriekšēja apvienošana būvēšanas laikā** — `preMergeLocales` solis failā `module.ts` būvēšanas laikā apvieno visus slāņus, rezerves lokalizāciju ķēdes un saknes līmeņa tulkojumus katrā lapas failā. Servera ielādētājs vienkārši nolasa vienu iepriekš uzbūvētu failu — apvienošana izpildlaikā nav vajadzīga.
+
+**Veiktspējas uzlabojumi:**
+
+- Samazināta atmiņas piešķiršana katram pieprasījumam (objekti netiek veidoti no jauna katrā `$t()` izsaukumā)
+- Mazāka atkritumu savākšanas slodze
+- Ātrāki atbildes laiki zem slodzes
+- Stabils atmiņas lietojuma modelis (bez "lēkājošiem" grafikiem)
+
+### Maršrutu un ceļu stratēģiju pakotnes {#route-&-path-strategy-packages}
+
+- **@i18n-micro/route-strategy** — Maršrutu ģenerēšana būvēšanas laikā: paplašina Nuxt lapas ar lokalizētiem maršrutiem, apstrādā aizstājvārdus, ligzdotus maršrutus un pielāgotus ceļus katrai stratēģijai. Viens ieejas punkts: `new RouteGenerator(options)` un `extendPages(pages)`. Stratēģijas (`no_prefix`, `prefix`, `prefix_except_default`, `prefix_and_default`) ir realizētas kā atsevišķas klases un tiek izvēlētas ar fabrikas palīdzību.
+- **@i18n-micro/path-strategy** — Ceļu un lokalizāciju apstrāde izpildlaikā: nodrošina `PathStrategy` lokalizētu ceļu veidošanai, pāradresāciju atrisināšanai un lokalizācijas pārslēgšanai. Tree-shake atbalstoši apakšceļu eksporti (`/prefix`, `/no-prefix` u. c.), lai saiņotu tikai izvēlēto stratēģiju. Maršrutu atrisināšanai izmanto tīras funkcijas un iepriekš aprēķinātus konteksta karodziņus minimālai atmiņas piešķiršanai.
+- **Strukturēts pakotņu izkārtojums** — Maršrutu loģika atrodas `@i18n-micro/route-strategy` ar `core/`, `strategies/`. Ceļu stratēģija atrodas `@i18n-micro/path-strategy` ar plakanu `src/` struktūru: `types.ts`, `path.ts`, `resolver.ts`, `helpers.ts` un `strategies/`.
+- **Konsekventa uzvedība** — Aizstājvārdu apstrādi, vecāka–bērna ceļu savienošanu, pielāgotus `globalLocaleRoutes` / `filesLocaleRoutes` / `routeLocales` un nemainīguma garantijas aptver atsevišķs testu komplekts.
+
+### Pāradresācijas arhitektūras pārveide {#redirect-architecture-overhaul}
+
+- **Servera starpprogrammatūra** — Pāradresācijas un 404 apstrāde notiek Nitro starpprogrammatūrā (`i18n.global.ts`). Tā izpildās pirms Nuxt renderēšanas, tāpēc pāradresācijas no `/` uz `/<locale>/` notiek bez kļūdas uzplaiksnījuma, ja ir lokalizācijas sīkdatne.
+- **Klienta spraudnis (klienta pusē)** — Tikai klienta spraudnis (`06.client-redirect.client.ts`) darbojas pēc hidratācijas un apstrādā pāradresācijas, kad `useI18nLocale()` vai sīkdatne iestata lokalizāciju, kas nav noklusējuma. Nitro darbojas pirms Nuxt, tāpēc serveris neredz sīkdatņu/stāvokļa izmaiņas no lietotāja spraudņiem; klienta spraudnis aptver šo gadījumu.
+- **Nav rezerves komponenta** — Rezerves komponents `locale-redirect.vue` un opcija `fallbackRedirectComponentPath` ir noņemti. Pāradresācijas loģiku pilnībā apstrādā servera starpprogrammatūra un klienta spraudnis.
+- **Pielāgotu ceļu atbalsts** — Ceļi, piemēram, `/kontakt` vācu valodai (caur `globalLocaleRoutes`), tiek pareizi atpazīti kā derīgi bez lokalizācijas prefiksa, izvairoties no nepareiziem 404 iepriekšējās renderēšanas laikā.
+- **customRegexMatcher labojums** — Izmantojot `customRegexMatcher`, šablons tagad atbilst **visam** pirmajam ceļa segmentam (ar enkuriem `^` un `$`). Tas novērš kļūdainus 404 maršrutiem, piemēram, `/locale-test`, kad šablons `[a-z]{2}-[a-z]{2}` iepriekš atbilstu apakšvirknēm.
+- **autoDetectPath labojums** — Opcija `autoDetectPath` tagad pareizi salīdzina ar sākotnējo URL ceļu, novēršot nevēlamas pāradresācijas, apzināti navigējot uz URL ar lokalizācijas prefiksu.
+
+### useI18nLocale kompozīcijas funkcija {#usei18nlocale-composable}
+
+- **Centralizēta lokalizācijas pārvaldība** — Jaunā `useI18nLocale()` kompozīcijas funkcija aizstāj `useLocaleCookies` un nodrošina vienu ieejas punktu lokalizācijas stāvoklim, sīkdatnēm un sinhronizācijas utilītām.
+- **API** — `locale`, `localeCookie`, `hashCookie`, `getLocale()`, `getPreferredLocale()`, `setLocale()`, `syncLocale()`, `isValidLocale()`, `getEffectiveLocale()`, `resolveInitialLocale()`.
+- **Programmatiska lokalizācija** — Servera spraudņos izmantojiet `useI18nLocale().setLocale(locale)`, nevis `useState('i18n-locale')`, lai lokalizāciju apstrādātu tīrāk un centralizēti.
+
+### Pielāgota automātiskā noteikšana un konfigurācija {#custom-auto-detection-&-configuration}
+
+- **`getI18nConfig()`** — Pielāgotiem spraudņiem (piem., lokalizācijas noteikšanai) jāizmanto `getI18nConfig()` no `#build/i18n.strategy.mjs`, nevis `useRuntimeConfig().public.i18nConfig`. Tas nodrošina tiešu piekļuvi atrisinātajai i18n konfigurācijai (piem., `localeCookie`), nepaļaujoties uz izpildlaika konfigurāciju.
+- **Sīkdatnes nosaukums** — Īstenojot pielāgotu noteikšanas loģiku, izmantojiet `getI18nConfig().localeCookie ?? 'user-locale'`.
+
+### Vienkāršotas integrācijas pakotnes {#simplified-integration-packages}
+
+Visas integrācijas pakotnes (`@i18n-micro/vue`, `@i18n-micro/astro`, `@i18n-micro/node`, `@i18n-micro/react`, `@i18n-micro/preact`, `@i18n-micro/solid`) ir vienkāršotas un optimizētas, un tām ir kopīga tulkošanas pamatloģika.
+
+### Konfigurācijas izmaiņas {#configuration-changes}
+
+- **`previousPageFallback` noņemts** — Šī opcija vairs nav vajadzīga. Jaunā kumulatīvās apvienošanas stratēģija automātiski saglabā iepriekšējās lapas tulkojumus pieejamus pārejas animāciju laikā un pēc tam tos notīra ar āķi `page:transition:finish`.
+- **`hmr`** — Pārvietots no `experimental.hmr` uz augstākā līmeņa opciju. Kontrolē servera puses HMR tulkojumu failiem (izstrādes režīmā ieslēgts pēc noklusējuma).
+
+```typescript
+// Before (v2.x)
+export default defineNuxtConfig({
+  i18n: {
+    experimental: {
+      hmr: true,
+    },
+  },
+})
+
+// After (v3.0.0)
+export default defineNuxtConfig({
+  i18n: {
+    hmr: true,
+  },
+})
+```
+
+## Nesaderīgas izmaiņas {#breaking-changes}
+
+- **`fallbackRedirectComponentPath`** — Noņemts. Modulis vairs neizmanto rezerves maršruta komponentu pāradresācijām. Ja bijāt konfigurējuši pielāgota komponenta ceļu, noņemiet to no konfigurācijas.
+- **`useLocaleCookies`** — Noņemts. Tā vietā izmantojiet `useI18nLocale()`. Jaunā kompozīcijas funkcija nodrošina `locale`, `localeCookie`, `hashCookie`, `setLocale()`, `syncLocale()` un citus.
+- **`experimental.i18nPreviousPageFallback` / `previousPageFallback`** — Pilnībā noņemts. Kumulatīvās apvienošanas stratēģija automātiski novērš mirgošanu pāreju laikā. Noņemiet šo opciju no konfigurācijas.
+- **`experimental.hmr`** — Pārvietots uz `hmr`. Atjauniniet konfigurāciju, ja izmantojāt šo opciju.
+- **Pielāgoti spraudņi** — Ja jūsu pielāgotais lokalizācijas noteikšanas spraudnis izmantoja `useRuntimeConfig().public.i18nConfig`, pārejiet uz `getI18nConfig()` no `#build/i18n.strategy.mjs`. Dodiet priekšroku `useI18nLocale().setLocale()`, nevis `useState('i18n-locale')`. Atjauninātus piemērus skatiet sadaļā [Pielāgota valodas noteikšana](/lv/guide/custom-auto-detect).
+- **Iekšējo failu izmaiņas** — `load-from-storage.ts` un `translation-loader.ts` ir noņemti un aizstāti ar `storage.ts` un `server-loader.ts`. Ja importējāt tieši no šiem failiem (nav ieteicams), atjauniniet importus.
+
+## Kāpēc tas ir svarīgi {#why-it-matters}
+
+- **Veiktspēja**: Centralizēta singletona kešatmiņa novērš objektu veidošanu katram pieprasījumam un samazina GC slodzi.
+- **Uzturējamība**: Maršrutu un ceļu loģika atrodas atsevišķās pakotnēs ar skaidrām robežām un tipiem.
+- **Testēšana**: Stratēģiju uzvedība un robežgadījumi tiek testēti izolēti.
+- **Uzticamība**: Sadalīta servera (Nitro) un klienta pāradresācijas loģika novērš laika problēmas, kad sīkdatni/useState iestata lietotāja spraudņi.
+- **Gatavs Serverless**: Nitro spraudnis darbojas tajā pašā kontekstā kā Nitro apstrādātāji, saderīgs ar Edge/Workers.
+- **Dokumentācija**: Maršrutēšanas uzvedība ir dokumentēta [Stratēģiju ceļvedī](/lv/guide/strategy) un pakotnēs [path-strategy](https://github.com/s00d/nuxt-i18n-micro/tree/main/packages/path-strategy) un [route-strategy](https://github.com/s00d/nuxt-i18n-micro/tree/main/packages/route-strategy).
+
+Jaunināšanas piezīmes un pilnu izmaiņu sarakstu skatiet [izmaiņu žurnālā](https://github.com/s00d/nuxt-i18n-micro/blob/main/CHANGELOG.md).
+
+---

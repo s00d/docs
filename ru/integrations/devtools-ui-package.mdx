@@ -1,0 +1,134 @@
+---
+title: "DevTools UI"
+description: "Редактор переводов для dev-серверов Vite и мост, который подключает его к любому экземпляру @i18n-micro."
+---
+
+`@i18n-micro/devtools-ui` — это редактор переводов из вкладки Nuxt DevTools, упакованный как веб-компонент с плагином Vite. Добавьте его в проект на Vue, React, Preact, Solid или Astro, чтобы просматривать и редактировать JSON-файлы из папки переводов прямо в браузере во время разработки. В приложениях Nuxt он уже есть в [Nuxt DevTools](/ru/guide/devtools).
+
+![DevTools UI: дерево файлов и редактор с текстом локали по умолчанию рядом с каждым ключом](/images/devtools/02-translations-editor-dark.webp)
+
+## Установка {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add -D @i18n-micro/devtools-ui
+```
+
+```bash npm
+npm install -D @i18n-micro/devtools-ui
+```
+
+```bash yarn
+yarn add -D @i18n-micro/devtools-ui
+```
+
+</CodeGroup>
+
+Peer-зависимостей нет.
+
+## Настройка {#setup}
+
+```ts
+// vite.config.ts
+import { defineConfig } from 'vite'
+import { i18nDevToolsPlugin } from '@i18n-micro/devtools-ui/vite'
+
+export default defineConfig({
+  plugins: [i18nDevToolsPlugin({ translationDir: 'src/locales' })],
+})
+```
+
+| Опция | По умолчанию | Примечания |
+| --- | --- | --- |
+| `translationDir` | `'src/locales'` | Папка с JSON-файлами относительно корня Vite. |
+| `base` | `'/__i18n_api'` | Базовый путь эндпоинтов API. |
+| `injectButton` | `true` | Добавляет плавающую кнопку на страницы, которые проходят через преобразование `index.html` в Vite. В Astro таких страниц нет: см. ниже. |
+| `defaultLocale` | первый файл локали в `translationDir` | Возвращается эндпоинтом `/config`. |
+| `fallbackLocale` | `defaultLocale` | Возвращается эндпоинтом `/config`. |
+
+Плагин работает только на dev-сервере (`apply: 'serve'`); в продакшен-сборке от него ничего нет. Кнопка открывает `/__i18n_devtools.html`, который читает и сохраняет файлы через эндпоинты плагина:
+
+| Эндпоинт | Что делает |
+| --- | --- |
+| `GET <base>/translations` | все словари в `translationDir` по относительному пути |
+| `POST <base>/save` | тело `{ file, content }`; перезаписывает существующий `.json` внутри `translationDir`, для всего остального — 403. Новые файлы никогда не создаются |
+| `GET <base>/config` | `{ defaultLocale, fallbackLocale, locales, translationDir }`; `locales` берутся из корневых файлов в `translationDir` |
+
+Эндпоинты отвечают только странице devtools: запрос с другого origin или хоста получает `403`, а `/save` принимает только `application/json` (`415`). Страница узнаёт об изменениях файлов через HMR-сокет Vite.
+
+В Astro вместо плагина добавьте интеграцию. Она добавляет приложение в панель инструментов разработчика:
+
+```ts
+// astro.config.mjs
+import { defineConfig } from 'astro/config'
+import { i18nDevToolsIntegration } from '@i18n-micro/devtools-ui/vite'
+
+export default defineConfig({
+  integrations: [i18nDevToolsIntegration({ translationDir: 'src/locales' })],
+})
+```
+
+Сохранение только записывает файл. Приложение, которое импортирует JSON через Vite, получает его через HMR; чтобы правки применялись к работающему экземпляру напрямую, используйте мост.
+
+## Мост к работающему экземпляру {#bridge-to-a-live-instance}
+
+Чтобы встроить редактор в собственную страницу и сразу применять правки к работающему экземпляру, создайте мост из адаптера и передайте его элементу `<i18n-devtools-ui>`:
+
+```ts
+import { createBridge, register } from '@i18n-micro/devtools-ui'
+import { i18n, locales } from './i18n' // a runtime, React, Preact or Solid instance
+
+register() // defines <i18n-devtools-ui> once
+
+const bridge = createBridge({
+  adapter: {
+    getRouteCache: () => Object.fromEntries(i18n.storage.translations),
+    addTranslations: (locale, content, merge) => i18n.addTranslations(locale, content, merge),
+    addRouteTranslations: (locale, route, content, merge) => i18n.addRouteTranslations(locale, route, content, merge),
+    subscribe: (cb) => i18n.subscribe(cb),
+    getCurrentLocale: () => i18n.locale,
+  },
+  locales,
+  defaultLocale: 'en',
+  translationDir: 'src/locales',
+})
+
+const el = document.createElement('i18n-devtools-ui') as HTMLElement & { bridge: typeof bridge }
+el.bridge = bridge
+document.body.append(el)
+```
+
+`getRouteCache` должен возвращать словари с ключами вида `locale:route` (`en:index`, `en:blog-post`) — именно это хранится в `i18n.storage.translations`. Для экземпляра Vue используйте `i18n.global.getRouteCache()` и `i18n.global.subscribeToChanges(cb)`.
+
+`saveTranslation` сначала обновляет экземпляр, а затем отправляет POST на `<base>/save`. Если эндпоинта нет (статическая preview-сборка) или dev-сервер недоступен, правка сохраняется в `localStorage`; при любой другой ошибке сохранения восстанавливается предыдущий словарь и выбрасывается исключение.
+
+## API {#api}
+
+| Экспорт | Точка входа |
+| --- | --- |
+| `i18nDevToolsPlugin(options)`, `i18nDevToolsIntegration(options)` | `@i18n-micro/devtools-ui/vite` |
+| `register()`, `I18nDevToolsElement` | `@i18n-micro/devtools-ui` |
+| `createBridge(options)`, типы `BridgeAdapter`, `CreateBridgeOptions` | `@i18n-micro/devtools-ui` (также `/bridge/create`) |
+| тип `I18nDevToolsBridge` | `@i18n-micro/devtools-ui` (также `/bridge`) |
+| `createRpcClient`, `setupRpcHost` | `@i18n-micro/devtools-ui` |
+
+Полные сигнатуры: [справочник пакета](/ru/api/packages/devtools-ui).
+
+## Связанные материалы {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Nuxt DevTools" icon="book-open" href="/ru/guide/devtools">
+
+Тот же редактор внутри Nuxt
+
+</Card>
+
+<Card title="Фреймворки" icon="book-open" href="/ru/integrations/overview">
+
+Экземпляр и его `storage`
+
+</Card>
+
+</CardGroup>

@@ -1,0 +1,115 @@
+---
+title: "v3.0.0 — Ytelsesoptimalisering, pakker for rute- og stistrategi"
+description: "Utgivelsesnotater: v3.0.0 — Ytelsesoptimalisering, pakker for rute- og stistrategi"
+---
+
+**Dato**: 2026-02-04
+
+**Versjon**: `v3.0.0`
+
+![v3.0.0-utgivelse](/images/3.0.0.png)
+
+Vi lanserer **v3.0.0** med en **stor arkitekturell overhaling**: en fullstendig omskriving av lagringssystemet for oversettelser for maksimal ytelse, rutegenerering og stilogikk under kjøring er nå delt inn i egne pakker, og omdirigeringsflyten er redesignet for bedre pålitelighet og Serverless-kompatibilitet.
+
+## Hva er nytt? {#what’s-new}
+
+### Ytelsesoptimalisering — ny lagringsarkitektur for oversettelser {#performance-optimization-—-new-translation-storage-architecture}
+
+Systemet for lasting og hurtigbufring av oversettelser er skrevet fullstendig om for maksimal ytelse:
+
+- **Sentralisert TranslationStorage-klasse** — En ny `TranslationStorage`-klasse (`src/runtime/utils/storage.ts`) gir felles lagring for både klient og server. Bruker `globalThis` med `Symbol.for` for å garantere en ekte singleton på tvers av hele Node.js-prosessen, og hindrer duplisert hurtigbuffer på tvers av bundlede moduler.
+
+- **Optimalisert `$t()`-funksjon (tFast)** — Oversettelsesfunksjonen gjør et direkte oppslag i én enkelt aktiv ordbok:
+  1. Alle oversettelser (rot + sidespesifikke + reserve) flettes sammen på forhånd ved bygging til én fil per side
+  2. Ved navigering innenfor samme locale flettes oversettelsene for den nye siden kumulativt inn i den aktive ordboken (hindrer at nøkler flimrer under overgangsanimasjoner)
+  3. Støtter nestede nøkler (`key.subkey.subsubkey`) med optimalisert stioppløsning
+  4. Ingen Map-oppslag eller locale-/ruteberegninger ved hvert kall — bruker forhåndsberegnet kontekst
+
+- **Injeksjon på serversiden via `window.__I18N__`** — Oversettelser som lastes under SSR, injiseres i HTML-en som en script-tagg. Klienten leser direkte fra `window.__I18N__` ved første innlasting og unngår dupliserte hentinger.
+
+- **Lokal chunk-hurtigbuffer i plugin** — Pluginen har et lokalt `loadedChunks`-Map som lagrer alle innlastede oversettelses-chunks. Når de først er lastet, hentes oversettelser aldri på nytt i løpet av sidens levetid.
+
+- **Forhåndsfletting ved bygging** — Et `preMergeLocales`-steg i `module.ts` fletter alle lag, kjeder av reserve-locales og oversettelser på rotnivå inn i hver sidefil ved bygging. Server-loaderen leser bare én ferdigbygd fil — ingen fletting under kjøring.
+
+**Ytelsesforbedringer:**
+
+- Mindre minneallokering per forespørsel (ingen nyoppretting av objekter ved hvert `$t()`-kall)
+- Lavere press på søppelinnsamlingen
+- Raskere responstider under belastning
+- Stabilt minnebruksmønster (ingen "hoppende" grafer)
+
+### Pakker for rute- og stistrategi {#route-&-path-strategy-packages}
+
+- **@i18n-micro/route-strategy** — Rutegenerering ved bygging: utvider Nuxt-sider med lokaliserte ruter, håndterer aliaser, nestede ruter og egendefinerte stier per strategi. Ett enkelt inngangspunkt: `new RouteGenerator(options)` og `extendPages(pages)`. Strategiene (`no_prefix`, `prefix`, `prefix_except_default`, `prefix_and_default`) er implementert som separate klasser og velges via en fabrikk.
+- **@i18n-micro/path-strategy** — Håndtering av stier og locale under kjøring: tilbyr `PathStrategy` for å bygge lokaliserte stier, løse opp omdirigeringer og bytte locale. Tree-shakeable underbaneeksporter (`/prefix`, `/no-prefix` osv.), slik at bare den valgte strategien bundles. Bruker rene funksjoner for ruteoppløsning og forhåndsberegnede kontekstflagg for minimale allokeringer.
+- **Strukturert pakkeoppsett** — Rutelogikk i `@i18n-micro/route-strategy` med `core/`, `strategies/`. Stistrategi i `@i18n-micro/path-strategy` med en flat `src/`-struktur: `types.ts`, `path.ts`, `resolver.ts`, `helpers.ts` og `strategies/`.
+- **Konsekvent oppførsel** — Aliashåndtering, sammenføying av foreldre- og barnestier, egendefinerte `globalLocaleRoutes` / `filesLocaleRoutes` / `routeLocales` og garantier for uforanderlighet dekkes av en egen testsuite.
+
+### Overhaling av omdirigeringsarkitekturen {#redirect-architecture-overhaul}
+
+- **Server-middleware** — Omdirigeringer og 404-håndtering kjører i Nitro-middleware (`i18n.global.ts`). Dette kjøres før Nuxt rendrer, så omdirigeringer fra `/` til `/<locale>/` skjer uten feilblink når en locale-informasjonskapsel finnes.
+- **Klient-plugin (klientsiden)** — En plugin kun for klienten (`06.client-redirect.client.ts`) kjører etter hydrering og håndterer omdirigeringer når `useI18nLocale()` eller en informasjonskapsel setter et locale som ikke er standard. Nitro kjører før Nuxt, så serveren kan ikke se endringer i informasjonskapsler/tilstand fra brukerens plugins; klient-pluginen dekker dette tilfellet.
+- **Ingen reservekomponent** — Reservekomponenten `locale-redirect.vue` og alternativet `fallbackRedirectComponentPath` er fjernet. Omdirigeringslogikken håndteres fullt ut av server-middlewaren og klient-pluginen.
+- **Støtte for egendefinerte stier** — Stier som `/kontakt` for tysk (via `globalLocaleRoutes`) gjenkjennes riktig som gyldige uten locale-prefiks, slik at feilaktige 404-feil unngås under forhåndsrendering.
+- **Retting av customRegexMatcher** — Når `customRegexMatcher` brukes, samsvarer mønsteret nå med **hele** det første stisegmentet (med ankrene `^` og `$`). Dette hindrer falske 404-feil for ruter som `/locale-test`, der mønsteret `[a-z]{2}-[a-z]{2}` tidligere ville samsvart med delstrenger.
+- **Retting av autoDetectPath** — Alternativet `autoDetectPath` sammenligner nå riktig mot den opprinnelige URL-stien, og hindrer uønskede omdirigeringer når du eksplisitt navigerer til URL-er med locale-prefiks.
+
+### Composable useI18nLocale {#usei18nlocale-composable}
+
+- **Sentralisert locale-håndtering** — Den nye composable-en `useI18nLocale()` erstatter `useLocaleCookies` og gir ett enkelt inngangspunkt for locale-tilstand, informasjonskapsler og synkroniseringsverktøy.
+- **API** — `locale`, `localeCookie`, `hashCookie`, `getLocale()`, `getPreferredLocale()`, `setLocale()`, `syncLocale()`, `isValidLocale()`, `getEffectiveLocale()`, `resolveInitialLocale()`.
+- **Programmatisk locale** — Bruk `useI18nLocale().setLocale(locale)` i server-plugins i stedet for `useState('i18n-locale')` for ryddigere, sentralisert locale-håndtering.
+
+### Egendefinert automatisk gjenkjenning og konfigurasjon {#custom-auto-detection-&-configuration}
+
+- **`getI18nConfig()`** — Egendefinerte plugins (f.eks. for locale-gjenkjenning) bør bruke `getI18nConfig()` fra `#build/i18n.strategy.mjs` i stedet for `useRuntimeConfig().public.i18nConfig`. Dette gir direkte tilgang til den oppløste i18n-konfigurasjonen (f.eks. `localeCookie`) uten å være avhengig av runtime config.
+- **Navn på informasjonskapsel** — Bruk `getI18nConfig().localeCookie ?? 'user-locale'` når du implementerer egendefinert gjenkjenningslogikk.
+
+### Forenklede integrasjonspakker {#simplified-integration-packages}
+
+Alle integrasjonspakker (`@i18n-micro/vue`, `@i18n-micro/astro`, `@i18n-micro/node`, `@i18n-micro/react`, `@i18n-micro/preact`, `@i18n-micro/solid`) er forenklet og optimalisert, og deler den samme kjernelogikken for oversettelse.
+
+### Konfigurasjonsendringer {#configuration-changes}
+
+- **`previousPageFallback` fjernet** — Dette alternativet trengs ikke lenger. Den nye kumulative flettestrategien holder automatisk oversettelsene fra forrige side tilgjengelige under overgangsanimasjoner, og rydder dem deretter bort via kroken `page:transition:finish`.
+- **`hmr`** — Flyttet fra `experimental.hmr` til et alternativ på toppnivå. Styrer HMR på serversiden for oversettelsesfiler (aktivert som standard under utvikling).
+
+```typescript
+// Before (v2.x)
+export default defineNuxtConfig({
+  i18n: {
+    experimental: {
+      hmr: true,
+    },
+  },
+})
+
+// After (v3.0.0)
+export default defineNuxtConfig({
+  i18n: {
+    hmr: true,
+  },
+})
+```
+
+## Endringer som bryter bakoverkompatibilitet {#breaking-changes}
+
+- **`fallbackRedirectComponentPath`** — Fjernet. Modulen bruker ikke lenger en reserverutekomponent for omdirigeringer. Hvis du hadde konfigurert en egendefinert komponentsti, fjern den fra konfigurasjonen.
+- **`useLocaleCookies`** — Fjernet. Bruk `useI18nLocale()` i stedet. Den nye composable-en tilbyr `locale`, `localeCookie`, `hashCookie`, `setLocale()`, `syncLocale()` og mer.
+- **`experimental.i18nPreviousPageFallback` / `previousPageFallback`** — Fjernet helt. Den kumulative flettestrategien håndterer flimring under overganger automatisk. Fjern dette alternativet fra konfigurasjonen.
+- **`experimental.hmr`** — Flyttet til `hmr`. Oppdater konfigurasjonen hvis du brukte dette alternativet.
+- **Egendefinerte plugins** — Hvis den egendefinerte pluginen din for locale-gjenkjenning brukte `useRuntimeConfig().public.i18nConfig`, bytt til `getI18nConfig()` fra `#build/i18n.strategy.mjs`. Foretrekk `useI18nLocale().setLocale()` fremfor `useState('i18n-locale')`. Se [Egendefinert språkgjenkjenning](/no/guide/custom-auto-detect) for oppdaterte eksempler.
+- **Endringer i interne filer** — `load-from-storage.ts` og `translation-loader.ts` er fjernet og erstattet med `storage.ts` og `server-loader.ts`. Hvis du importerte direkte fra disse filene (ikke anbefalt), oppdater importene dine.
+
+## Hvorfor det betyr noe {#why-it-matters}
+
+- **Ytelse**: En sentralisert singleton-hurtigbuffer fjerner oppretting av objekter per forespørsel og reduserer GC-presset.
+- **Vedlikeholdbarhet**: Rute- og stilogikk ligger i egne pakker med tydelige grenser og typer.
+- **Testing**: Strategioppførsel og kanttilfeller testes isolert.
+- **Pålitelighet**: Atskilt omdirigeringslogikk for server (Nitro) og klient unngår tidsproblemer når cookie/useState settes av brukerens plugins.
+- **Klar for Serverless**: Nitro-pluginen kjører i samme kontekst som Nitro-handlere, kompatibel med Edge/Workers.
+- **Dokumentasjon**: Rutingoppførselen er dokumentert i [strategiveiledningen](/no/guide/strategy) og i pakkene [path-strategy](https://github.com/s00d/nuxt-i18n-micro/tree/main/packages/path-strategy) og [route-strategy](https://github.com/s00d/nuxt-i18n-micro/tree/main/packages/route-strategy).
+
+For oppgraderingsnotater og en fullstendig liste over endringer, se [endringsloggen](https://github.com/s00d/nuxt-i18n-micro/blob/main/CHANGELOG.md).
+
+---

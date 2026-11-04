@@ -1,0 +1,147 @@
+---
+title: "Sovelluksen testaaminen"
+description: "Yksikkötestaa $t-funktiota käyttäviä komponentteja @i18n-micro/test-utils-paketilla ja Vitestillä, ja tarkista lokalisoidut sivut päästä päähän."
+---
+
+Komponentit, jotka kutsuvat `useI18n()`-funktiota, tarvitsevat yksikkötesteissä i18n-instanssin. `@i18n-micro/test-utils` antaa sinulle valeversion `useI18n()`-funktiosta, jossa on aito käännös-, monikko- ja muotoilulogiikka, joten voit liittää komponentin omilla sanakirjoillasi ilman Nuxt-palvelinta. Reititystä ja uudelleenohjauksia varten aja oikeaa moduulia päästä päähän `@nuxt/test-utils`-paketilla.
+
+Tämä sivu käsittelee sovelluksesi testaamista. Se, miten tämä repositorio testaa itse moduulia, on kuvattu sivulla [Moduulin testaaminen](https://s00d.github.io/nuxt-i18n-micro/contributing/testing).
+
+## Asennus {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add -D @i18n-micro/test-utils @nuxt/test-utils vitest @vue/test-utils happy-dom
+```
+
+```bash npm
+npm install -D @i18n-micro/test-utils @nuxt/test-utils vitest @vue/test-utils happy-dom
+```
+
+</CodeGroup>
+
+## useI18n-funktion mockaaminen {#mock-usei18n}
+
+```ts
+// tests/unit-setup.ts
+import { setupNuxtI18nMock } from '@i18n-micro/test-utils'
+import { mockNuxtImport } from '@nuxt/test-utils/runtime'
+import { beforeEach, vi } from 'vitest'
+
+export const { i18n, useI18n, setTranslationsFromJson } = setupNuxtI18nMock({
+  spy: vi.fn, // every method becomes a vi.fn, so you can assert calls
+  beforeEach, // reset state and reseed `translations` before each test
+  translations: { welcome: 'Welcome' },
+})
+
+mockNuxtImport('useI18n', () => useI18n)
+```
+
+```ts
+// vitest.config.ts
+import { defineVitestConfig } from '@nuxt/test-utils/config'
+
+export default defineVitestConfig({
+  test: {
+    environment: 'nuxt',
+    setupFiles: ['./tests/unit-setup.ts'],
+  },
+})
+```
+
+Pidä `mockNuxtImport` asetustiedostossa: `@nuxt/test-utils` joutuu muuntamaan sen. `setupNuxtI18nMock` käyttää yksityistä käännösvälimuistia, joten rinnakkaiset testitiedostot eivät jaa tilaa.
+
+## Testin kirjoittaminen {#write-a-test}
+
+```vue
+<!-- components/Greeting.vue -->
+<script setup lang="ts">
+const { $t } = useI18n()
+</script>
+
+<template>
+  <p>{{ $t('welcome') }}</p>
+</template>
+```
+
+```ts
+// tests/greeting.spec.ts
+import { mountSuspended } from '@nuxt/test-utils/runtime'
+import { expect, it } from 'vitest'
+import Greeting from '~/components/Greeting.vue'
+import de from '~/locales/de.json'
+import { i18n, setTranslationsFromJson } from './unit-setup'
+
+it('renders the German greeting', async () => {
+  await setTranslationsFromJson('de', de)
+  i18n.setLocale('de')
+
+  const wrapper = await mountSuspended(Greeting)
+  expect(wrapper.text()).toBe('Willkommen') // de.json: { "welcome": "Willkommen" }
+})
+```
+
+Valeversio tarjoaa samat metodit kuin oikea `useI18n()` (`$t`, `$tc`, `$tn`, `$td`, `$has`, `$localePath`, …, `$`-merkin kanssa ja ilman) sekä testejä varten asettajat: `setLocale`, `setLocales`, `setDefaultLocale`, `setRouteName`, `setTranslationsFromJson`, `loadPageTranslations`, `mergeTranslations`, `setMissingHandler`.
+
+`$localePath` ja `$switchLocalePath` ovat tynkiä, jotka lisäävät polkuun etuliitteen `strategy`-asetuksen mukaan (ei oikeaa reititintä). Testaa oikeat linkit ja uudelleenohjaukset päästä päähän.
+
+## Matalamman tason apufunktiot {#lower-level-helpers}
+
+| Apufunktio | Käyttötarkoitus |
+| --- | --- |
+| `createIsolatedFakeI18n(options)` | Eristetty valeversio ilman Nuxtin `useI18n`-kytkentää, esim. tavalliseen `@vue/test-utils`-kirjaston `mount`-kutsuun `global.mocks`-asetuksen kanssa. |
+| `createFakeI18n(options)` | Valeversio jaetun moduulivälimuistin päällä (kutsu `resetI18n()` `beforeEach`-lohkossa) tai eristettynä asetuksella `isolated: true`. |
+| `createI18nTestContext(options)` | Molempien taustalla oleva konteksti, kun tarvitset useita valeversioita. |
+| `t`, `tc`, `ts`, `tn`, `td`, `tdr`, `has` | Suorat kutsut jaettuun kontekstiin tavallisten funktioiden testaamiseen. |
+
+Mock on `BaseI18n`: `t`, `tc`, `tn`, `td`, `tdr` ja `has` ovat aitoja, oikeiden sanakirjojen päällä, joten testi näkee saman kuin sovellus näyttää.
+
+Yllä olevat tehdasfunktiot hyväksyvät asetukset `locale`, `defaultLocale`, `locales`, `routeName`, `strategy`, `translations` ja `messages` (sanakirjat lokaalia kohden). Täydellinen esimerkkiprojekti löytyy hakemistosta [`packages/test-utils/example`](https://github.com/s00d/nuxt-i18n-micro/tree/main/packages/test-utils/example).
+
+## Päästä päähän -testit {#end-to-end-tests}
+
+Reititys, uudelleenohjaukset, SEO-tagit ja kuormien lataus tarvitsevat oikean moduulin. Käynnistä sovelluksesi `@nuxt/test-utils/e2e`-paketilla:
+
+```ts
+// tests/e2e/locales.test.ts
+import { $fetch, fetch, setup } from '@nuxt/test-utils/e2e'
+import { describe, expect, it } from 'vitest'
+
+describe('locales', async () => {
+  await setup({ server: true })
+
+  it('serves the German page', async () => {
+    expect(await $fetch('/de')).toContain('lang="de-DE"')
+  })
+
+  it('redirects / for a German browser', async () => {
+    const res = await fetch('/', { headers: { 'accept-language': 'de' }, redirect: 'manual' })
+    expect(res.headers.get('location')).toBe('/de')
+  })
+})
+```
+
+Toinen testi olettaa strategian `prefix` (tai `prefix_except_default` toisella oletuslokaalilla); katso [Lokaalin tunnistus](/fi/guide/locale-detection) siitä, milloin `/` ohjaa uudelleen.
+
+## Aiheeseen liittyvää {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Moduulin testaaminen" icon="code-pull-request" href="https://s00d.github.io/nuxt-i18n-micro/contributing/testing">
+
+</Card>
+
+<Card title="useI18n" icon="brackets-curly" href="/fi/composables/useI18n">
+
+</Card>
+
+<Card title="Lokaalin tunnistus" icon="book-open" href="/fi/guide/locale-detection">
+
+</Card>
+
+<Card title="Storybook" icon="book-open" href="/fi/guide/storybook">
+
+</Card>
+
+</CardGroup>
