@@ -1,0 +1,131 @@
+---
+title: "Node.js"
+description: "使用 @i18n-micro/node 從磁碟載入翻譯檔案，並在 Node.js 伺服器、腳本與 CLI 中進行翻譯。"
+---
+
+`@i18n-micro/node` 是 [runtime](/zh-TW/integrations/runtime-package) 實例加上一個從磁碟讀取翻譯資料夾的載入器。你可以在 Express 或 Fastify 伺服器、CLI、電子郵件或 PDF 產生器，或任何需要與 Nuxt app 使用相同 JSON 檔案的腳本中使用它。檔案只需載入一次，就能依每個請求進行翻譯，而不會在請求之間共用可變狀態。
+
+## 安裝 {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add @i18n-micro/node @i18n-micro/utils
+```
+
+```bash npm
+npm install @i18n-micro/node @i18n-micro/utils
+```
+
+```bash yarn
+yarn add @i18n-micro/node @i18n-micro/utils
+```
+
+</CodeGroup>
+
+沒有 peer dependencies；需要 Node.js `>=20`。只有使用下方的 `Accept-Language` 輔助函式時才需要 `@i18n-micro/utils`。
+
+## 設定 {#setup}
+
+載入器會讀取 [Nuxt 資料夾結構](/zh-TW/guide/translations)：`locales/en.json` 是根字典，`locales/pages/blog/post/en.json` 屬於路由 `blog-post`。
+
+```ts
+import { createI18n } from '@i18n-micro/node'
+
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', translationDir: './locales' })
+await i18n.loadTranslations()
+
+i18n.t('greeting', { name: 'Ada' }) // 'Hello, Ada!'
+i18n.t('title', undefined, undefined, 'blog-post') // from locales/pages/blog/post/en.json
+```
+
+選項與 runtime 相同（請參閱[實例](/zh-TW/integrations/overview#the-instance)），另外還有 `translationDir` 與 `disablePageLocales`（將 `pages/**` 檔案視為根字典）。`i18n.reload()` 會清除所有字典並重新讀取資料夾，適合在開發環境中搭配檔案監看器使用。
+
+`loadTranslations(dir, disablePageLocales?)` 也會單獨匯出，並回傳 `{ root, routes }`：
+
+```ts
+import { loadTranslations } from '@i18n-micro/node'
+
+const { root, routes } = await loadTranslations('./locales')
+// root:   { en: {...}, de: {...} }
+// routes: { 'blog-post': { en: {...}, de: {...} } }
+```
+
+## 每個請求 {#per-request}
+
+一個實例持有一個 locale 與一個路由。在請求處理函式中切換共用實例的 `i18n.locale`，會與同時進行的請求產生競爭條件。`run` 會給每個請求專屬的實例：
+
+```ts
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', translationDir: './locales' })
+await i18n.loadTranslations()
+
+// `() => next()`: `run` hands its callback the fork, and Express reads an argument of `next` as an error
+app.use((req, res, next) => i18n.run(pickLocale(req), () => next()))
+
+app.get('/', (req, res) => {
+  res.send(i18n.t('greeting')) // the request's locale, in everything it awaits
+})
+```
+
+在 `run` 內，共用實例會讀取並設定該請求的 locale 與路由（`AsyncLocalStorage`）；fork 會從目前的路由開始，而在 callback 中呼叫 `i18n.setRoute(...)` 會變更該請求的路由。callback 也會收到該請求的 fork：寫入 fork 的字典只留在該請求中，寫入共用實例的字典則會影響所有人。
+
+若沒有 `AsyncLocalStorage`，`i18n.fork(locale)` 會回傳同類型的實例，供你自行傳遞。
+
+`reload()` 會重新讀取目錄；在新字典載入完成之前，舊字典仍會回應。
+
+## 選擇 locale {#pick-the-locale}
+
+`detectLocaleFromAcceptLanguage(header, locales)` 會遵循 `q` 權重，並將 `de-DE` 對應到 `de` locale（以及將 `de` 對應到 `de-DE`）。沒有符合項目時會回傳 `null`。
+
+```ts
+import express from 'express'
+import { detectLocaleFromAcceptLanguage } from '@i18n-micro/utils/accept-language'
+
+const app = express()
+
+app.get('/hello', (req, res) => {
+  const locale = detectLocaleFromAcceptLanguage(req.headers['accept-language'], locales) ?? 'en'
+  const i18n = byLocale.get(locale)!
+  res.json({ message: i18n.t('greeting', { name: 'Ada' }) })
+})
+```
+
+若要同時處理 URL 前綴、cookie 與標頭，`@i18n-micro/utils/resolve-locale` 中的 `resolveLocale({ defaultLocale, validLocales, url, cookie, acceptLanguage, autoDetectLanguage: true })` 會套用模組的優先順序：URL，接著是 cookie，然後是 `Accept-Language`，最後是預設值。無效的值會被略過。
+
+在 Nuxt app 中，伺服器端不需要這個套件：請使用模組的[伺服器端翻譯](/zh-TW/guide/server-side-translations)。
+
+## API {#api}
+
+| 匯出 | 備註 |
+| --- | --- |
+| `createI18n(options)`, `I18n` | runtime 實例 + `translationDir`、`loadTranslations(dir?)`、`reload()` |
+| `loadTranslations(dir, disablePageLocales?)` | `{ root, routes }` |
+| `loadRootTranslations(dir, disablePageLocales?)` | 僅 `root` |
+| `FormatService`, `interpolate` | 來自 core |
+| 型別：`I18nOptions`, `LoadedTranslations`, `Translations`, `Locale`, `PluralFunc`, `Params` | |
+
+實例方法列於 [Runtime](/zh-TW/integrations/runtime-package#api)。完整簽章：[套件參考](/zh-TW/api/packages/node)。
+
+## 相關內容 {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Runtime" icon="book-open" href="/zh-TW/integrations/runtime-package">
+
+不含 `fs` 的實例
+
+</Card>
+
+<Card title="翻譯" icon="book-open" href="/zh-TW/guide/translations">
+
+資料夾結構
+
+</Card>
+
+<Card title="Locale 偵測" icon="book-open" href="/zh-TW/guide/locale-detection">
+
+Nuxt 模組中的優先順序
+
+</Card>
+
+</CardGroup>

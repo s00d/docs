@@ -1,0 +1,327 @@
+---
+title: "CLI"
+description: "Kontrollera översättningar i CI, hitta oanvända nycklar, fyll luckor via en översättningstjänst och utbyt filer med översättare från kommandoraden."
+---
+
+`@i18n-micro/cli` hanterar locale-filerna i ett Nuxt-projekt. Det läser `locales`, `defaultLocale`, `translationDir` och dina layers från `nuxt.config`, så det behöver ingen egen konfiguration.
+
+![En terminal som kör i18n-micro check, som listar en saknad, en odefinierad och fyra oanvända nycklar och misslyckas, sedan extract, som lägger till den odefinierade nyckeln, sedan clean --dryRun, som listar de fyra nycklar den skulle ta bort](/images/cli/demo.gif)
+
+| Kommando | Använd det för att |
+| --- | --- |
+| `check` | Låta ett bygge misslyckas vid allt som är fel med locale-filerna |
+| `translate` | Fylla saknade nycklar via en översättningstjänst |
+| `clean` | Ta bort nycklar som inget använder |
+| `rename` | Flytta en nyckel, eller ett helt namespace, överallt på en gång |
+
+```bash
+npm install -D @i18n-micro/cli
+npx i18n-micro --help
+```
+
+Kör det från appens rot, eller peka på den med `--cwd`. Varje flagga för varje kommando finns i [kommandoreferensen](/sv/api/cli).
+
+<Tip>
+
+**Flyttar du från nuxt-i18n-micro-cli?** `@i18n-micro/cli` ersätter det; binärerna `i18n-micro` och `i18n-micro-cli` finns kvar. Se [tabellen över gamla kommandon](#moving-from-nuxt-i18n-micro-cli).
+
+</Tip>
+
+## Använd det i CI {#use-it-in-ci}
+
+```bash
+i18n-micro check
+```
+
+`check` är spärren. Den rapporterar:
+
+| Kontroll | Betyder |
+| --- | --- |
+| `missing` | En nyckel från standard-locale saknas i en locale |
+| `empty` | Ett värde är `''`. Appen visar en tom text, inte reservvärdet |
+| `extra` | En locale har en nyckel som standard-locale inte har |
+| `placeholders` | `{name}` försvann eller lades till, eller en pluralform förlorade sina former |
+| `undefined` | Koden använder en nyckel som standard-locale inte har |
+| `unused` | Inget i projektet använder en nyckel |
+| `duplicates` | Samma text under olika nycklar. Avstängd som standard: ange `--duplicates` |
+
+- `--only missing,placeholders` kör vissa kontroller; en kontroll som nämns i `--only` och inte kunde köras misslyckas.
+- `--json` ger en rapport för verktyg.
+- `--ignore` hoppar över källfiler.
+- Medan nycklar beräknas vid runtime hoppas `unused` över och rapporten anger varför.
+
+Varje kommando avslutas med en av tre koder, så att en pipeline kan skilja ett problem med dina översättningar från ett problem med verktyget:
+
+| Avslutningskod | Betydelse |
+| --- | --- |
+| `0` | Inget att rapportera |
+| `1` | Fynd |
+| `2` | Kommandot kunde inte köras: ett användningsfel, en trasig fil, en misslyckad förfrågan |
+
+Andra kommandon som är värda ett CI-steg:
+
+```bash
+i18n-micro format --check      # fails if a file is not formatted
+i18n-micro lint                # stray spaces, empty values, your own regex rules
+i18n-micro stats --baseRef main
+```
+
+## Håll locales i takt {#keep-locales-in-step}
+
+| Kommando | Vad det gör |
+| --- | --- |
+| `extract` | Listar nycklar som koden använder som ännu saknar text. En standardtext, som i `$t('key', {}, 'Welcome')`, går till standard-locale. |
+| `sync` | Tar bort nycklar som standard-locale inte har. Prova `--dryRun` först. |
+| `clean` | Tar bort nycklar som inget använder. Prova `--dryRun` först. |
+| `search` | Hittar nycklar och värden, och visar var varje nyckel används. |
+| `stats` | Färdigställande per locale; `--baseRef main` jämför med en git-ref. |
+
+`sync` stannar på samma sätt som `clean` när den skulle ta bort en nyckel den inte kan bevisa är oanvänd, och även när standard-locale inte har något att jämföra med. Utan något att ta bort stannar den aldrig, så `$t(item.label)` ensamt är inget skäl för `--force`.
+
+<Note>
+
+`extract` och `sync` skriver aldrig `''` för en nyckel utan översättning. Nyckeln förblir frånvarande, så `fallbackLocale` gäller vid runtime och `check` rapporterar den. En tom sträng vore ett definierat värde och skulle visa en tom text.
+
+</Note>
+
+### Vad kommandona läser {#what-the-commands-read}
+
+`check`, `extract`, `sync`, `clean`, `search` och `rename` läser källkod i hela projektet, inte en fast lista med mappar:
+
+- **Läses:** mallar och skript via en parser, `.html` och Pug som text, varje layer, och mappar utanför roten som ett alias eller `components` pekar på.
+- **Hoppas över:** `node_modules`, byggutdata och locale-filerna. Lägg till dina egna med `--ignore 'legacy/**,*.stories.ts'`.
+- **Testkod** räknas som användning, så `clean` och `check --only unused` behåller en nyckel som bara ett test läser. Den lägger aldrig till en nyckel: `extract` hoppar över sådana nycklar, och `check` rapporterar dem inte som odefinierade.
+
+Testkod betyder rotmapparna `tests`, `test`, `__tests__`, `e2e`, `cypress` och `playwright`, plus `.spec`- och `.test`-filer i JavaScript och TypeScript (`.ts`, `.tsx`, `.mts`, `.js`, `.jsx`, `.mjs` och liknande) var som helst. Endast rotmapparna är undantagna från tvivlen nedan: `pages/tests/[id].vue` är en sida som alla andra, och det gäller även `public/` och minifierade filer, vars kod inte är en del av appen.
+
+Kommandona känner igen:
+
+- `$t`, `$ts`, `$tc`, `$has` och `$_t(route)`;
+- `t()` från `useI18n()` och `useTranslationServerMiddleware()`;
+- `<i18n-t keypath>` i mallar och JSX, och `<i18n-group prefix>`;
+- alias som `const { t: tr } = useI18n()`.
+
+### Hur `clean` bestämmer {#how-clean-decides}
+
+`clean` lämnar hellre kvar en död nyckel än tar bort en levande. En nyckel behålls när något av detta gäller:
+
+- ett anrop använder den, eller en nyckel under eller över den;
+- en sträng i koden är lika med den: `const key = 'menu.home'`, `<Item label="menu.home" />`;
+- en JSON-, YAML- eller Markdown-fil i projektet innehåller den;
+- en beräknad nyckel har en statisk början som täcker den: `` $t(`status.${state}`) `` behåller allt under `status.`;
+- ett layer definierar den.
+
+`clean` stannar utan att ändra något när den inte kan veta, och listar varför:
+
+- en nyckel är helt beräknad, som i `$t(name)`, `<i18n-t :keypath="name" />` eller `<i18n-t v-bind="props" />`;
+- `$t` skickas runt som ett värde, som i `items.map($t)`;
+- en funktion som heter `t` får ett beräknat argument och kommer från en parameter, en import eller ett anrop: den kan vara en wrapper runt den riktiga. En funktion som samma fil definierar räknas inte, eftersom en wrapper skulle ha sitt eget anrop inuti;
+- en källfil kan inte tolkas;
+- ingen fil använder någon nyckel alls, vilket oftast betyder att den letar på fel ställe;
+- en locale-fil är en symlänk ut ur projektet, så en annan app kan läsa den.
+
+<Steps>
+
+<Step title="Förhandsgranska">
+
+Kör `i18n-micro clean --dryRun` och granska vad den listar.
+
+</Step>
+
+<Step title="Skydda nycklar">
+
+Behåll nycklar som bara ser oanvända ut med `--exclude '^errors\.'`.
+
+</Step>
+
+<Step title="Ta bort">
+
+Kör den igen med `--force`.
+
+</Step>
+
+</Steps>
+
+## Översätt saknade nycklar {#translate-missing-keys}
+
+```bash
+i18n-micro translate --dryRun                     # keys and characters per locale, nothing sent
+export I18N_TRANSLATE_TOKEN=...                   # or put it in .env
+i18n-micro translate --service deepl --locale de,fr
+```
+
+- `translate` fyller nycklar som saknas eller är tomma; `--replace` översätter allt igen.
+- Platshållare och pluralformer skyddas. En översättning som förlorat en platshållare skrivs inte: nyckeln listas och kommandot avslutas med `1`.
+- Varje batch sparas innan nästa förfrågan skickas, så ett fel kostar bara den förfrågan som misslyckades.
+
+| `--service` | Tjänst | `--token` | Användbara `--options` |
+| --- | --- | --- | --- |
+| `ai` | Vercel AI Gateway, OpenAI, Anthropic eller valfri OpenAI-kompatibel server | API-nyckel, eller `AI_GATEWAY_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` | `provider`, `model`, `baseUrl`, `maxTokens` |
+| `azure` | Azure Translator | Prenumerationsnyckel | `region` |
+| `deepl` | DeepL, inklusive Free-nycklar | Autentiseringsnyckel | `formality`, `glossaryId`, `context` |
+| `google` | Google Cloud Translation v2 | API-nyckel | `model` |
+| `libretranslate` | LibreTranslate | Valfri | `baseUrl` |
+| `yandexcloud` | Yandex Cloud Translate | API-nyckel, eller IAM-token med `authScheme:Bearer` | `folderId`, `model` |
+
+Alternativ är `key:value`-par: `--options provider:openai,model:gpt-4o-mini`. Alla tjänster tar också `baseUrl`, `retries`, `retryDelayMs` och `timeoutMs`. En översättningsförfrågan kan redan ha debiterats, så den upprepas bara efter en `429` eller `503`, och inte när tjänsten ber om att vänta mer än en minut.
+
+<Warning>
+
+Flaggor syns i skalhistorik och processlistor, så skicka token via miljövariabeln. CLI:t maskerar det den vet är hemligt överallt där den skriver ut det, inklusive `--debug`: tokens, leverantörsnycklar, Basic-autentiseringsuppgifter, samt query och autentiseringsuppgifter i en URL du konfigurerat. En server som formaterar om en nyckel innan den ekar tillbaka den ligger utom räckhåll, så hantera loggar från en misslyckad körning varsamt.
+
+</Warning>
+
+Tjänsten `ai` följer en ordlista. När `.i18n-glossary.json` finns används den utan flagga; `--glossaryFile` väljer en annan fil.
+
+```json .i18n-glossary.json
+{ "entries": [{ "source": "Cart", "target": "Warenkorb", "to": "de" }] }
+```
+
+## Gör hårdkodad text till nycklar {#turn-hardcoded-text-into-keys}
+
+```bash
+i18n-micro text-to-i18n --dryRun   # list what would change
+i18n-micro text-to-i18n            # rewrite the templates
+```
+
+```vue
+<!-- before -->
+<h1>Welcome to our site</h1>
+<!-- after -->
+<h1>{{ $t('pages.index.welcome-to-our') }}</h1>
+```
+
+Endast `.vue`-mallar i själva projektet skrivs om, inte de i ett layer eller ett aliasmål. Varje omskriven fil tolkas igen innan den skrivs. Dessa listas och behåller sin text:
+
+- text i `.ts`-filer och skript, eftersom `$t` inte finns i scope överallt;
+- text bredvid markup eller en interpolering, som `<p>Hello <b>world</b> today</p>`: en halv mening kan inte översättas för sig;
+- en genererad nyckel som skulle kollidera med en annan, vilket en föräldersida och dess barn kan göra;
+- en känd nyckel som inte kan stå mellan citattecken.
+
+<Warning>
+
+Committa först, och granska diffen.
+
+</Warning>
+
+## Byt namn på en nyckel {#rename-a-key}
+
+```bash
+i18n-micro rename --from common.save --to actions.save
+i18n-micro rename --from settings --to account.settings   # a whole namespace
+```
+
+`rename` redigerar syntaxträdet, så kommentarer och orelaterade strängar förblir som de är, och alias och `:keypath` följs. Ett layers egen fil ändras aldrig. Den varnar för det den inte kan skriva om, och lämnar det orört:
+
+- en beräknad nyckel under det gamla namnet;
+- varje vanlig sträng som är lika med den;
+- en Pug-mall;
+- en källa i ett layer eller i en mapp utanför projektet.
+
+`--to` måste vara en nyckel som kan skrivas i kod: inga citattecken, inget omvänt snedstreck, inget tomt segment, inget `__proto__`.
+
+## Utbyt filer med översättare {#exchange-files-with-translators}
+
+```bash
+i18n-micro export --format csv
+i18n-micro import --format csv --dryRun
+```
+
+**`export`** skriver varje nyckel för varje locale, inklusive oöversatta, med standard-locales text som källa: en `Source`-kolumn i CSV, en `#.`-kommentar i PO.
+
+- Utan `--dir` hamnar PO i `pots` och CSV i `csv_exports`.
+- Den registrerar vad den skrev i `.i18n-export.json`, i utdatamappen. Den stannar när en fil har ändrats sedan dess och innehåller översättningar som locale-filerna inte har, inklusive fuzzy PO-poster; `--force` skriver över dem. Vanliga ändringar i locale-filerna stoppar den inte.
+
+**`import`** slår samman, hoppar över tomma celler och hoppar över PO-poster markerade `fuzzy`.
+
+- En nyckel som skulle skriva över ett värde, eller ett värde över en hel grupp nycklar, listas och utelämnas, och kommandot avslutas med `1`.
+- Den stannar med avslutningskod `2` vid en katalog på en oväntad plats, en sidas katalog som den senaste exporten inte skrev, ett citattecken på fel plats i en CSV, eller en sidpost under `disablePageLocales`.
+
+För en översättningsplattform, använd dess egen CLI: [Crowdin](/sv/guide/crowdin)-konfigurationen synkar JSON-filerna, inklusive sidfiler.
+
+## Synka med din egen endpoint {#sync-with-your-own-endpoint}
+
+`sync-remote` utbyter de globala locale-filerna med en HTTP-endpoint som du kör. Sidfiler stannar lokalt, och kommandot säger det. Beskriv endpointen i `.i18n-remote.json`:
+
+```json .i18n-remote.json
+{ "url": "https://translations.example.com", "path": "translations" }
+```
+
+Endpointen svarar på `GET` och `PUT` med ett `{ locale: messages }`-objekt. Autentisera med `auth: { username, password }`, eller lägg en bearer-token i `I18N_REMOTE_TOKEN`.
+
+| | Pull | Push |
+| --- | --- | --- |
+| Vad som flyttas | Fyller det du inte har och behåller nycklar som bara du har | Skickar projektets egna nycklar, inte ett layers, och utelämnar dina tomma värden |
+| Konflikter | En nyckel som skiljer sig på båda sidor: inget skrivs, avslutningskod `1`; `--force` tar fjärrvärdet | En PUT ersätter dokumentet, så en push läser först endpointen och stannar med avslutningskod `1` när den innehåller text du inte har; `--force` skriver över den. En endpoint som svarar `404` har inget att förlora |
+| `--dryRun` | Läser från endpointen, listar ändringarna, skriver ingenting | Anger vad som skulle skickas, utan att kontakta endpointen |
+
+En locale som du inte har konfigurerat hoppas över, och ett tomt fjärrvärde rensar ingenting.
+
+## Flytta från nuxt-i18n-micro-cli {#moving-from-nuxt-i18n-micro-cli}
+
+| Gammalt kommando | Nu |
+| --- | --- |
+| `validate` | `check` |
+| `diff` | `check --only missing` |
+| `check-duplicates` | `check --only duplicates` |
+| `export-csv`, `import-csv` | `export --format csv`, `import --format csv` |
+| `--potsDir`, `--csvDir` | `--dir` |
+| `estimate` | `translate --dryRun` |
+| `glossary` | Redigera `.i18n-glossary.json`; `translate` läser den själv |
+| `backup`, `restore` | Git, som redan sparar dina locale-filer |
+| `init` | `nuxi init`, lägg sedan till `nuxt-i18n-micro` i `modules` |
+| `split` | Borttaget: modulen läser inte uppdelade filer |
+| `optimize` | `check --only duplicates` |
+| `replace-values` | Din editor eller `sed` |
+| `stats --full` | `stats`; [DevTools](/sv/guide/devtools) har detaljerna |
+| `search --hardcodedOnly` | `text-to-i18n --dryRun` |
+| `search --preferUnused`, `--onlyVue` | Borttaget |
+| `lint`-reglerna `no-html-tags`, `no-special-chars`, `no-mixed-case`, `no-missing-punctuation`, `no-inconsistent-pluralization` | Borttagna: de flaggade normal text. Skriv en `customRegexRules`-post om du behöver en |
+| `text-to-i18n --extractOnlyDirs`, `--extractOnlyPatterns`, `--verbose` | Borttaget: kod skrivs aldrig om |
+| `--logLevel verbose` | Borttaget: det gjorde ingenting |
+
+**Borttagna tjänster:** `googlefree`, `yandex` (använd `yandexcloud`), `ibm`, `lingvatranslate`, `modernmt`, `lilt`, `unbabel`, `reverso`, `baidu`, `papago`, `tencent`, `systran`, `mymemory`.
+
+**Borttagna `sync-remote`-typer:** `github`, `gitlab`, `crowdin`, `lokalise`, `tolgee`, `weblate`. Använd plattformens egen CLI, eller `custom`, som inte längre behöver någon `type`.
+
+### Ändrat beteende {#changed-behaviour}
+
+- `extract` och `sync` skriver inte längre `''`. Nycklar förblir frånvarande, och `check` rapporterar dem. `extract` skriver en nyckel endast när koden anger dess text.
+- `extract` skriver sidnycklar till `locales/pages/<route name>/`, där modulen läser dem, och skannar `app/` på Nuxt 4. Flytta allt från kataloger som `pages/_about` och `pages/blog_`, och ta bort en kvarglömd `locales/pages/<locale>.json`.
+- `translationDir` från `nuxt.config` respekteras; tidigare använde varje kommando tyst `locales`.
+- Utan `defaultLocale` är standard `en`, som i modulen, och `DEFAULT_LOCALE` respekteras. Tidigare var det den första locale.
+- `check` och `sync` använder standard-locale som referens och kontrollerar sidfiler. `"a.b"` och `a: { b }` räknas som en nyckel.
+- `clean` behåller en nyckel som används var som helst, i vilket scope som helst, och stannar när användning inte kan bevisas. `--include` och `--exclude` väljer vad som får tas bort.
+- `sync` stannar på samma sätt, och när standard-locale inte har några nycklar att jämföra med. `--force` åsidosätter det. Den stannar också när `DEFAULT_LOCALE` valde en annan referens än `nuxt.config`.
+- Långa flaggor med enkelt bindestreck och lösa argument är fel: `clean -dryRun` kör inte längre `clean`.
+- En skrivskyddad fil, eller en fil som inte är UTF-8, kan inte sparas: kommandot stannar innan det ändrar något. Att läsa en sådan fil går bra. En upprepad nyckel, en nyckel som heter `__proto__` och ett heltal över 2^53 stoppar ett kommando, eftersom en sparning skulle förlora dem.
+- En flagga som behöver ett värde och följs av en annan flagga är ett fel; skriv `--flag=--value` för ett värde som börjar med bindestreck. En boolesk flagga tar endast `true` eller `false`.
+- `export` stannar hellre än att skriva över översättningar som aldrig importerats.
+- Avslutningskoderna är `0`, `1` och `2`; fel var tidigare `1`, och `diff` och `check-duplicates` alltid `0`.
+- `lint --fix` lämnar inte längre `.bak`-filer.
+- En sparning behåller filens indentering, radslut, avslutande nyrad, symlänk och hårda länk, och lämnar filer den inte ändrat orörda.
+- En felstavad eller borttagen flagga är nu ett fel, inte tyst ignorerad.
+- Sökvägar som `--dir` är relativa till projektet, inte till skalet.
+- `ai` laddar inte längre `@ai-sdk/*`-paket: använd `provider` `gateway`, `openai` eller `anthropic`, eller `baseUrl` för en OpenAI-kompatibel server.
+
+## Relaterat {#related}
+
+<CardGroup cols={2}>
+
+<Card title="CLI-kommandon" icon="brackets-curly" href="/sv/api/cli">
+
+</Card>
+
+<Card title="Översättningsfiler" icon="book-open" href="/sv/guide/translations">
+
+</Card>
+
+<Card title="Crowdin" icon="book-open" href="/sv/guide/crowdin">
+
+</Card>
+
+<Card title="DevTools" icon="book-open" href="/sv/guide/devtools">
+
+</Card>
+
+</CardGroup>

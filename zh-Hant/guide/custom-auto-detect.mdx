@@ -1,0 +1,111 @@
+---
+title: "自訂語系偵測"
+description: "透過伺服器外掛與 useI18nLocale().setLocale() 自行選擇語系——依網域、標頭或使用者個人資料。"
+---
+
+內建的偵測會讀取 URL、cookie 與 `Accept-Language`。當語系取決於其他因素——網域、由 CDN 設定的地理位置標頭、使用者個人資料——時，請在 i18n 外掛之前執行的外掛中自行設定。模組接著會載入該語系的翻譯，並將其用於重新導向，就如同是模組自行偵測到的一樣。決定所選語系何時優先於 URL 的規則，請參閱[語系偵測](/zh-Hant/guide/locale-detection)；本頁說明如何接入您自己的來源。
+
+## 在伺服器外掛中設定語系 {#set-the-locale-in-a-server-plugin}
+
+```ts
+// plugins/i18n-locale.server.ts
+export default defineNuxtPlugin({
+  name: 'i18n-custom-locale',
+  enforce: 'pre',
+  order: -10, // before the i18n plugin (order -5)
+  setup() {
+    const { setLocale } = useI18nLocale()
+    const host = (useRequestHeaders(['host']).host ?? '').split(':')[0]! // without the port
+
+    if (host.endsWith('.de')) setLocale('de')
+    else if (host.endsWith('.fr')) setLocale('fr')
+  },
+})
+```
+
+`setLocale(code)` 會寫入語系狀態（`useState('i18n-locale')`），並在已設定語系 cookie 時一併寫入該 cookie。請使用它，而不要自行寫入 `useState` 或 `useCookie`。只傳入已啟用的語系代碼。
+
+當外掛會讀取請求標頭時，請保持為 `.server.ts` 外掛：瀏覽器中不存在這些標頭。`.client.ts` 外掛則適合處理僅存在於瀏覽器的來源，例如 `localStorage`。
+
+## 關閉內建的 Accept-Language 步驟 {#turn-off-the-built-in-accept-language-step}
+
+您的外掛與 `Accept-Language` 可能會有不同的結果。若只想讓您的程式碼（加上 URL 與 cookie）做決定，請關閉標頭偵測：
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    autoDetectLanguage: false,
+  },
+})
+```
+
+[`autoDetectLanguage`](/zh-Hant/api/module-options#autodetectlanguage) 只控制標頭步驟。URL 與有效的 cookie 仍然有效。
+
+## 接下來會發生什麼 {#what-happens-next}
+
+`setLocale` 的效果取決於[策略](/zh-Hant/guide/strategy)：
+
+| 策略 | 在外掛中呼叫 `setLocale('de')` 的效果 |
+| --- | --- |
+| `no_prefix` | 頁面以德文呈現；URL 不會改變。 |
+| `prefix`, `prefix_except_default` | 在沒有前綴、且 [`autoDetectPath`](/zh-Hant/api/module-options#autodetectpath) 允許重新導向的路徑上（預設只有 `/`），伺服器會以 `302` 回應並導向德文 URL。帶有語系前綴的 URL 則維持不變。 |
+| `prefix_and_default` | 不會重新導向：沒有前綴的 URL 是有效的預設語系頁面。 |
+
+在前綴策略下，URL 中的語系代表使用者的選擇，您的外掛不會覆寫它。`autoDetectPath: '*'` 是例外：此時伺服器會依 cookie 與 `Accept-Language` 移動帶前綴的 URL 並忽略狀態，但 `setLocale()` 在已設定 cookie 時也會寫入 cookie，因此從下一次請求開始，您外掛的選擇可能會重新導向帶前綴的 URL。當明確的語系 URL 必須優先時，請保留 `'/'` 或使用 `'no_prefix'`。請用您的外掛來決定訪客的到達位置，而不是改寫他們點擊的連結。
+
+## 尊重使用者選擇的語系 {#respect-a-locale-the-user-picked}
+
+使用者切換語言後，切換動作會寫入 cookie。當已存在有效的偏好時，請略過您自己的偵測：
+
+```ts
+// plugins/i18n-locale.server.ts
+import { detectLocaleFromAcceptLanguage } from '@i18n-micro/utils/accept-language'
+
+export default defineNuxtPlugin({
+  name: 'i18n-custom-locale',
+  enforce: 'pre',
+  order: -10,
+  setup() {
+    const { getPreferredLocale, setLocale, validLocales } = useI18nLocale()
+    if (getPreferredLocale()) return // valid state or cookie: keep it
+
+    const country = useRequestHeaders(['x-country'])['x-country']
+    if (country === 'JP') return setLocale('ja')
+
+    const header = useRequestHeaders(['accept-language'])['accept-language']
+    setLocale(detectLocaleFromAcceptLanguage(header, validLocales))
+  },
+})
+```
+
+`getPreferredLocale()` 只有在狀態或 cookie 為已啟用的語系時才會回傳它，因此過時的 cookie 不會阻止偵測。`detectLocaleFromAcceptLanguage` 是模組本身使用、支援 q 值的比對器（安裝 `@i18n-micro/utils` 即可匯入）；`setLocale(null)` 不會有任何作用。
+
+## 每個語系一個網域 {#one-domain-per-locale}
+
+如果每個網域都應提供自己的語系，就不需要外掛：為每個語系設定 `baseUrl`，在每個網域的預設語系上設定 `baseDefault: true`，然後建置一次（靜態網站仍需針對每個網域執行 `nuxi generate`）。請參閱[圖層與網域](/zh-Hant/guide/layers#multiple-domains)。
+
+## 相關內容 {#related}
+
+<CardGroup cols={2}>
+
+<Card title="語系偵測" icon="book-open" href="/zh-Hant/guide/locale-detection">
+
+完整的優先順序與重新導向規則
+
+</Card>
+
+<Card title="useI18nLocale" icon="brackets-curly" href="/zh-Hant/composables/useI18nLocale">
+
+</Card>
+
+<Card title="路由策略" icon="book-open" href="/zh-Hant/guide/strategy">
+
+</Card>
+
+<Card title="圖層與網域" icon="book-open" href="/zh-Hant/guide/layers">
+
+</Card>
+
+</CardGroup>

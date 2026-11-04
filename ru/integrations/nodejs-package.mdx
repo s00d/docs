@@ -1,0 +1,131 @@
+---
+title: "Node.js"
+description: "Загружайте файлы переводов с диска и переводите в серверах, скриптах и CLI на Node.js с помощью @i18n-micro/node."
+---
+
+`@i18n-micro/node` — это экземпляр [runtime](/ru/integrations/runtime-package) плюс загрузчик, читающий папку переводов с диска. Используйте его в сервере на Express или Fastify, в CLI, генераторе писем или PDF либо в любом скрипте, которому нужны те же JSON-файлы, что и вашему приложению Nuxt. Вы загружаете файлы один раз и переводите для каждого запроса, не разделяя изменяемое состояние между запросами.
+
+## Установка {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add @i18n-micro/node @i18n-micro/utils
+```
+
+```bash npm
+npm install @i18n-micro/node @i18n-micro/utils
+```
+
+```bash yarn
+yarn add @i18n-micro/node @i18n-micro/utils
+```
+
+</CodeGroup>
+
+Peer-зависимостей нет; Node.js `>=20`. `@i18n-micro/utils` нужен только для хелпера `Accept-Language`, описанного ниже.
+
+## Настройка {#setup}
+
+Загрузчик читает [структуру папок Nuxt](/ru/guide/translations): `locales/en.json` — корневой словарь, `locales/pages/blog/post/en.json` относится к маршруту `blog-post`.
+
+```ts
+import { createI18n } from '@i18n-micro/node'
+
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', translationDir: './locales' })
+await i18n.loadTranslations()
+
+i18n.t('greeting', { name: 'Ada' }) // 'Hello, Ada!'
+i18n.t('title', undefined, undefined, 'blog-post') // from locales/pages/blog/post/en.json
+```
+
+Опции — те же, что у runtime (см. [экземпляр](/ru/integrations/overview#the-instance)), плюс `translationDir` и `disablePageLocales` (считать файлы `pages/**` корневыми словарями). `i18n.reload()` очищает все словари и заново читает папку — для наблюдателя за файлами в режиме разработки.
+
+`loadTranslations(dir, disablePageLocales?)` также экспортируется отдельно и возвращает `{ root, routes }`:
+
+```ts
+import { loadTranslations } from '@i18n-micro/node'
+
+const { root, routes } = await loadTranslations('./locales')
+// root:   { en: {...}, de: {...} }
+// routes: { 'blog-post': { en: {...}, de: {...} } }
+```
+
+## Для каждого запроса {#per-request}
+
+Экземпляр хранит одну локаль и один маршрут. Переключение `i18n.locale` у общего экземпляра внутри обработчика запроса приводит к гонке с параллельными запросами. `run` даёт запросу собственный экземпляр:
+
+```ts
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', translationDir: './locales' })
+await i18n.loadTranslations()
+
+// `() => next()`: `run` hands its callback the fork, and Express reads an argument of `next` as an error
+app.use((req, res, next) => i18n.run(pickLocale(req), () => next()))
+
+app.get('/', (req, res) => {
+  res.send(i18n.t('greeting')) // the request's locale, in everything it awaits
+})
+```
+
+Внутри `run` общий экземпляр читает и устанавливает локаль и маршрут запроса (`AsyncLocalStorage`); форк стартует с текущего маршрута, а `i18n.setRoute(...)` внутри колбэка меняет маршрут этого запроса. Колбэк также получает форк запроса: словари, записанные в него, остаются в пределах запроса, а словари, записанные в общий экземпляр, доступны всем.
+
+Без `AsyncLocalStorage` метод `i18n.fork(locale)` возвращает такой же экземпляр, который можно передавать дальше.
+
+`reload()` заново читает каталог; старые словари отвечают, пока не загрузятся новые.
+
+## Выбор локали {#pick-the-locale}
+
+`detectLocaleFromAcceptLanguage(header, locales)` учитывает веса `q` и сопоставляет `de-DE` с локалью `de` (и `de` с `de-DE`). Если совпадений нет, возвращает `null`.
+
+```ts
+import express from 'express'
+import { detectLocaleFromAcceptLanguage } from '@i18n-micro/utils/accept-language'
+
+const app = express()
+
+app.get('/hello', (req, res) => {
+  const locale = detectLocaleFromAcceptLanguage(req.headers['accept-language'], locales) ?? 'en'
+  const i18n = byLocale.get(locale)!
+  res.json({ message: i18n.t('greeting', { name: 'Ada' }) })
+})
+```
+
+Для совместного учёта префикса URL, cookie и заголовка `resolveLocale({ defaultLocale, validLocales, url, cookie, acceptLanguage, autoDetectLanguage: true })` из `@i18n-micro/utils/resolve-locale` применяет приоритет модуля: URL, затем cookie, затем `Accept-Language`, затем значение по умолчанию. Недопустимые значения пропускаются.
+
+Внутри приложения Nuxt этот пакет на сервере не нужен: используйте [серверные переводы](/ru/guide/server-side-translations) модуля.
+
+## API {#api}
+
+| Экспорт | Примечания |
+| --- | --- |
+| `createI18n(options)`, `I18n` | экземпляр runtime + `translationDir`, `loadTranslations(dir?)`, `reload()` |
+| `loadTranslations(dir, disablePageLocales?)` | `{ root, routes }` |
+| `loadRootTranslations(dir, disablePageLocales?)` | только `root` |
+| `FormatService`, `interpolate` | из core |
+| Типы: `I18nOptions`, `LoadedTranslations`, `Translations`, `Locale`, `PluralFunc`, `Params` | |
+
+Методы экземпляра перечислены на странице [Runtime](/ru/integrations/runtime-package#api). Полные сигнатуры: [справочник пакета](/ru/api/packages/node).
+
+## См. также {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Runtime" icon="book-open" href="/ru/integrations/runtime-package">
+
+Экземпляр без `fs`
+
+</Card>
+
+<Card title="Переводы" icon="book-open" href="/ru/guide/translations">
+
+Структура папок
+
+</Card>
+
+<Card title="Определение локали" icon="book-open" href="/ru/guide/locale-detection">
+
+Приоритет в модуле Nuxt
+
+</Card>
+
+</CardGroup>

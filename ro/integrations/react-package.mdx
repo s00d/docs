@@ -1,0 +1,291 @@
+---
+title: "React și Preact"
+description: "Traduceri, schimbarea limbii și integrare cu router-ul pentru aplicații React și Preact cu @i18n-micro/react și @i18n-micro/preact."
+---
+
+`@i18n-micro/react` și `@i18n-micro/preact` împachetează [runtime-ul](/ro/integrations/runtime-package) independent de framework într-un provider, un hook `useI18n()` și patru componente. Folosiți-le într-o aplicație React sau Preact care nu este construită cu Nuxt. Ambele pachete au același API; blocul [Preact](#preact) listează puținele diferențe, iar modelul comun este descris în [Framework-uri](/ro/integrations/overview).
+
+## Instalare {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add @i18n-micro/react
+```
+
+```bash npm
+npm install @i18n-micro/react
+```
+
+```bash yarn
+yarn add @i18n-micro/react
+```
+
+</CodeGroup>
+
+Dependențe peer: `react` `^18.0.0 || ^19.0.0`; `react-dom` (opțional, pentru randare); `react-router-dom` `^6.0.0 || ^7.0.0` (opțional, doar pentru `@i18n-micro/react/router`). Testat pe React 19.3 și 18.3, React Router 7.18 și 6.30.
+
+## Configurare {#setup}
+
+```tsx
+// src/main.tsx
+import { createRoot } from 'react-dom/client'
+import { createI18n, I18nProvider } from '@i18n-micro/react'
+import App from './App'
+import en from './locales/en.json'
+
+const locales = [
+  { code: 'en', iso: 'en-US', displayName: 'English' },
+  { code: 'de', iso: 'de-DE', displayName: 'Deutsch' },
+]
+
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', messages: { en } })
+
+createRoot(document.getElementById('root')!).render(
+  <I18nProvider i18n={i18n} locales={locales} defaultLocale="en">
+    <App />
+  </I18nProvider>,
+)
+```
+
+<Warning>
+
+Creați instanța o singură dată, la nivel de modul sau într-un inițializator `useState`, niciodată în corpul unei componente.
+
+</Warning>
+
+`<I18nProvider>` primește `i18n`, `locales`, `defaultLocale` și `routingStrategy`:
+
+- O proprietate omisă păstrează valoarea unui provider exterior, inclusiv instanța.
+- Fără nicio instanță, construiește una din opțiunile `createI18n` aflate alături, astfel încât props rămân date simple: `<I18nProvider locale="de" messages={messages}>`.
+- O nouă proprietate `locale` construiește o nouă instanță cu `messages` din acea randare. O astfel de instanță trăiește în componentă: dacă ceva de deasupra ei suspendă în timpul montării, React o aruncă, împreună cu tot ce i s-a adăugat.
+
+Toate opțiunile `createI18n`, inclusiv `routeMessages`, sunt descrise în [instanța](/ro/integrations/overview#the-instance).
+
+## Traducere {#translate}
+
+```tsx
+import { useI18n } from '@i18n-micro/react'
+
+export function Greeting() {
+  const { t, tc, tn } = useI18n()
+  return (
+    <>
+      <h1>{t('greeting', { name: 'Ada' })}</h1> {/* Hello, Ada! */}
+      <p>{tc('apples', 3)}</p> {/* 3 apples */}
+      <p>{tn(1234.5)}</p>
+    </>
+  )
+}
+```
+
+`useI18n()` returnează:
+
+| Grup | Membri |
+| --- | --- |
+| Traducere | `t`, `ts`, `tc`, `tn`, `td`, `tdr`, `has` |
+| Limbă și rută | `locale`, `fallbackLocale`, `currentRoute`, `setLocale`, `setRoute`, `getRoute`, `getLocales`, `defaultLocale()`, `getLocaleName` |
+| Rutare | `switchLocale`, `localePath`, `localeRoute` |
+| Dicționare | `addTranslations`, `addRouteTranslations`, `clearCache` |
+
+- Componenta se re-randează când se schimbă limba, ruta sau un dicționar citibil și când provider-ul primește un nou obiect `locales` sau `routingStrategy`. Un dicționar al unei limbi care nu este nici activă, nici de rezervă nu declanșează randarea.
+- `t` și celelalte metode de traducere se schimbă doar odată cu store-ul, deci sunt sigure în `memo` și în dependențele efectelor.
+
+`useT` este un singur șir ca valoare. Componenta se randează doar când acel șir se schimbă, indiferent ce se întâmplă cu celelalte props ale provider-ului; nici `<I18nT>` nu depinde de ele:
+
+```tsx
+const title = useT('page.title')
+```
+
+Încărcați mai multe dicționare oricând:
+
+```tsx
+const { addTranslations, addRouteTranslations, setRoute } = useI18n()
+
+useEffect(() => {
+  import('./locales/de.json').then((m) => addTranslations('de', m.default))
+  addRouteTranslations('en', 'about', { title: 'About us' })
+  setRoute('about') // t('title') now reads the 'about' dictionary first
+}, [])
+```
+
+Instanța în sine are și `loadFromUrl(url, { locale, routeName })` pentru JSON prin `fetch`.
+
+## Schimbarea limbii {#switch-locale}
+
+```tsx
+const { setLocale, switchLocale } = useI18n()
+
+setLocale('de') // only the locale
+switchLocale('de') // the locale, then the adapter's push to the localized current path
+```
+
+Schimbarea nu încarcă nimic; adăugați mai întâi dicționarul limbii. O scriere în store este sincronă pentru React, chiar și în `startTransition`, așa că o componentă care suspendă din cauza unui dicționar lipsă și-ar afișa fallback-ul. `useLocaleSwitch` încarcă mai întâi și păstrează vechea interfață până când dicționarul este încărcat:
+
+```tsx
+const [switchTo, pending] = useLocaleSwitch((locale) => i18n.loadFromUrl(`/locales/${locale}.json`, { locale }))
+
+<button disabled={pending} onClick={() => switchTo('de')}>Deutsch</button>
+```
+
+Ultimul apel câștigă. O încărcare eșuată este respinsă și lasă limba așa cum era.
+
+`<I18nGroup>` transmite un `t` cu prefix unui copil de tip render-prop. `<I18nT>` și `t()` din interiorul lui nu primesc prefix:
+
+```tsx
+<I18nGroup prefix="profile">{({ t }) => <h2>{t('title')}</h2> /* profile.title */}</I18nGroup>
+```
+
+## Rutare {#routing}
+
+Adaptorul pentru React Router se află într-un subpath, astfel încât intrarea principală nu importă niciodată `react-router-dom`. Are nevoie de `useLocation()` și `useNavigate()`, deci creați-l într-o componentă aflată sub router:
+
+```tsx
+// src/App.tsx
+import { useMemo } from 'react'
+import { BrowserRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
+import { I18nLink, I18nProvider, I18nSwitcher } from '@i18n-micro/react'
+import { createReactRouterAdapter } from '@i18n-micro/react/router'
+import { i18n, locales } from './i18n'
+import { About, Home } from './pages'
+
+function Localized() {
+  const location = useLocation()
+  const navigate = useNavigate()
+  // memoized: a new object on every render re-renders every `useI18n()` consumer
+  const routingStrategy = useMemo(() => createReactRouterAdapter(locales, 'en', location, navigate), [location, navigate])
+  return (
+    <I18nProvider i18n={i18n} locales={locales} defaultLocale="en" routingStrategy={routingStrategy}>
+      <I18nLink to="/about">About</I18nLink>
+      <I18nSwitcher />
+      <Routes>
+        <Route path="/:locale?" element={<Home />} />
+        <Route path="/:locale?/about" element={<About />} />
+      </Routes>
+    </I18nProvider>
+  )
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <Localized />
+    </BrowserRouter>
+  )
+}
+```
+
+Adaptorul adaugă prefix fiecărei limbi cu excepția celei implicite (`/about`, `/de/about`) și randează `<I18nLink>` ca `<Link>` al React Router. Setați singur limba din URL (de exemplu din `useParams().locale` într-un efect). Pentru orice alt router, scrieți un adaptor cu `getCurrentPath`, `push` și `replace` (toate obligatorii) — vedeți [Adaptor de router](/ro/integrations/overview#router-adapter).
+
+## SSR {#ssr}
+
+`renderToString` funcționează: `useI18n()` are un snapshot pentru server. Creați câte o instanță per cerere și adăugați-i dicționarele înainte de randare, astfel încât cererile în limbi diferite să nu partajeze starea, sau transmiteți date simple provider-ului.
+
+### Hidratare {#hydration}
+
+Numerele, pluralele și textul se hidratează așa cum sunt. O dată depinde de fusul orar, iar o dată relativă de ceas: setați `timeZone` pe server și în browser, iar pentru `tdr` transmiteți browserului ora serverului prin `now`. `<I18nT>` cu `date` sau `relativeDate` setează `suppressHydrationWarning`, astfel încât o diferență nu face hidratarea să eșueze, dar textul serverului rămâne până când textul se schimbă. Acest lucru acționează pe un singur nivel: `children` care împachetează traducerea într-un element tot eșuează la o diferență, așa că dați-le același `timeZone`.
+
+### Server Components {#server-components}
+
+Pachetul își marchează codul de client cu `'use client'`. `@i18n-micro/react/server` are `createI18n` și un `I18nT` fără hook-uri care primește instanța ca proprietate, astfel încât textul rămâne în afara bundle-ului de client. Sub condiția `react-server`, ca în app router-ul Next.js, și intrarea principală se rezolvă la acesta, dar TypeScript nu știe asta implicit: importați din `/server`. `@i18n-micro/react/client` oferă întotdeauna intrarea de client.
+
+```tsx
+// app/[locale]/layout.tsx: a server component
+import { cache } from 'react'
+import { createI18n, I18nT } from '@i18n-micro/react/server'
+import { I18nProvider } from '@i18n-micro/react/client'
+import { loadMessages } from './messages'
+
+const getI18n = cache(async (locale: string) => createI18n({ locale, messages: await loadMessages(locale) }))
+
+export default async function Layout({ params, children }) {
+  const { locale } = await params
+  const i18n = await getI18n(locale)
+  return (
+    <I18nProvider locale={locale} messages={{ [locale]: i18n.resolveTranslations() }}>
+      <h1>
+        <I18nT i18n={i18n} keypath="title" />
+      </h1>
+      {children}
+    </I18nProvider>
+  )
+}
+```
+
+Randat prin `react-server-dom-webpack`; o aplicație Next.js propriu-zisă nu a fost rulată cu acest cod.
+
+## API {#api}
+
+| Export | Intrare |
+| --- | --- |
+| `createI18n`, `ReactI18n`, `I18nProvider`, `useI18n`, `useT`, `useLocaleSwitch` | `@i18n-micro/react` |
+| `I18nT`, `I18nLink`, `I18nSwitcher`, `I18nGroup` | `@i18n-micro/react` |
+| `I18nContext`, `I18nConfigContext`, `useI18nContext`, `useI18nLocales`, `useI18nDefaultLocale`, `useI18nRouter` | `@i18n-micro/react` |
+| `defaultPlural`, `FormatService`, `interpolate` | `@i18n-micro/react` |
+| Tipuri: `I18nRoutingStrategy`, `ReactI18nOptions`, `I18nProviderProps`, `UseI18nReturn`, props ale componentelor, `TranslationKey`, `Locale`, `Translations`, `PluralFunc` | `@i18n-micro/react` |
+| `createReactRouterAdapter` | `@i18n-micro/react/router` |
+| `createI18n`, `ReactI18n`, `I18nT` (primește `i18n`) | `@i18n-micro/react/server` |
+
+Semnăturile complete: [referința React](/ro/api/packages/react).
+
+## Preact {#preact}
+
+`@i18n-micro/preact` este construit din aceeași sursă, pe Preact însuși, fără `preact/compat`: aceeași instanță, același provider, aceleași hook-uri și componente. Diferențe:
+
+| | React | Preact |
+| --- | --- | --- |
+| Dependență peer | `react` (+ opțional `react-router-dom`) | `preact` `^10.0.0 \|\| ^11.0.0`, testat pe 10.29 și 11.1 |
+| Clasa instanței | `ReactI18n` | `PreactI18n` |
+| Adaptor de router | `createReactRouterAdapter` din `/router` | `createBrowserHistoryAdapter(locales, defaultLocale, ssrUrl?)` din `/router` |
+| Re-randare | `useSyncExternalStore` | o abonare prin layout-effect care reverifică store-ul |
+| Server Components | `/server`, `/client` | niciunul |
+
+`createBrowserHistoryAdapter` funcționează cu orice router bazat pe History API (wouter, preact-router): `push` și `replace` apelează `history.pushState` / `replaceState` și emit `popstate`, iar `<I18nLink>` randează un simplu `<a>` care navighează prin `push`. Un server nu are bară de adresă: transmiteți URL-ul cererii ca `ssrUrl`, altfel linkurile și comutatorul se randează ca pe `/`. Într-un browser, bara de adresă are prioritate.
+
+```tsx
+// src/main.tsx
+import { render } from 'preact'
+import { createI18n, I18nProvider } from '@i18n-micro/preact'
+import { createBrowserHistoryAdapter } from '@i18n-micro/preact/router'
+import { App } from './App'
+import en from './locales/en.json'
+
+const locales = [
+  { code: 'en', iso: 'en-US', displayName: 'English' },
+  { code: 'de', iso: 'de-DE', displayName: 'Deutsch' },
+]
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', messages: { en } })
+
+render(
+  <I18nProvider i18n={i18n} locales={locales} defaultLocale="en" routingStrategy={createBrowserHistoryAdapter(locales, 'en')}>
+    <App />
+  </I18nProvider>,
+  document.getElementById('app')!,
+)
+```
+
+Semnăturile complete: [referința Preact](/ro/api/packages/preact).
+
+## Conexe {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Framework-uri" icon="book-open" href="/ro/integrations/overview">
+
+Opțiunile instanței, adaptorul de router, props ale componentelor
+
+</Card>
+
+<Card title="Runtime" icon="book-open" href="/ro/integrations/runtime-package">
+
+Instanța pe care se bazează aceste pachete
+
+</Card>
+
+<Card title="Generator de tipuri" icon="book-open" href="/ro/integrations/types-generator">
+
+Autocompletare pentru chei
+
+</Card>
+
+</CardGroup>

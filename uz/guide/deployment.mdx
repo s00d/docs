@@ -1,0 +1,440 @@
+---
+title: "Joylashtirish"
+description: "Node serverga, serverless yoki Edge'ga yoki statik sayt sifatida joylashtiring — tarjima payload'lari qayerga tushadi, har bir platformaga nima kerak, proksilar va keshlash."
+---
+
+Modul har qanday Nitro preset bilan qo'shimcha sozlamasiz ishlaydi: tarjima fayllari qayerda joylashishini siz build qilayotgan presetdan aniqlaydi. Standart qiymatlar ko'pchilik ilovalar uchun to'g'ri; o'z platformangizga oid bo'limni o'qing. Bu sahifa quyidagilarni tushuntiradi:
+
+- `.output/` ichiga nima tushadi va payload'lar qanday sarlavhalarni oladi;
+- statik hosting, katta kataloglar, sub-path, proksi yoki CDN uchun nimani o'zgartirish kerak.
+
+<Note>
+
+Haqiqiy hostlarda joylashtirilgan va tekshirilgan: Cloudflare Workers va Pages, Vercel va Vercel Edge, Netlify va Netlify Edge, Cloud Run va Deno Deploy — har biri [Platformalar](#platforms) bo'limida keltirilgan sozlamalar bilan. Qolgan presetlar lokal tarzda build qilingan va ishga tushirilgan.
+
+</Note>
+
+## Tarjimalar qanday yetkaziladi {#how-translations-are-delivered}
+
+Build vaqtida modul `locales/`ni (barcha qatlamlar birlashtirilgan holda) **payload**larga aylantiradi: har bir sahifa va lokal uchun bitta JSON fayl. Ularni ikki iste'molchi o'qiydi:
+
+- **SSR** render qilinayotgan sahifaning payload'ini jarayon ichida yuklaydi — HTTP so'rovsiz, lug'at esa HTML'ga joylashtirilmaydi.
+- **Brauzer** gidratatsiyada va navigatsiyada `/_locales/<page>/<locale>/data.json?v=<dateBuild>`ni yuklab oladi.
+
+`_locales` — bu [`apiBaseUrl`](/uz/api/module-options#apibaseurl). Ushbu URL'ga o'rnatilgan server marshruti javob beradi; `public/` ichidagi statik nusxa esa serversiz javob beradi.
+
+## Node server {#node-server}
+
+```bash
+npx nuxi build
+node .output/server/index.mjs
+```
+
+`node-server` (standart preset), `node-cluster`, `bun`, `deno-server` yoki `public/`ni diskdan taqdim etadigan va `public/` papkasi `server/` papkasi yonida joylashgan istalgan boshqa preset bilan:
+
+- payload'lar `.output/public/_locales/<page>/<locale>/data.json`ga nusxalanadi;
+- SSR ularni o'sha papkadan `fs` orqali o'qiydi (serverga hech narsa bundle qilinmaydi);
+- brauzer ularni statik fayllar sifatida yoki server marshrutidan oladi.
+
+Butun `.output/` katalogini joylashtiring. Modulga Node 20 yoki undan yangiroq kerak, Nuxt'ning esa o'z minimumi bor: Nuxt 4.5 `^22.19.0 || ^24.11.0 || >=26.0.0`ni e'lon qiladi.
+
+Doimiy yuklama ostidagi jarayon o'zining jonli heap'idan ancha ko'p xotirani ushlab turishi mumkin. Konteyner chegarasini belgilashdan oldin [Node serverdagi xotira](/uz/guide/performance#memory-on-a-node-server) bo'limiga qarang.
+
+Boshqa tuzilmada modul payload'larni keyingi bo'limda tasvirlanganidek joylashtiradi. Bunga quyidagilar kiradi:
+
+- build bir marta o'qiydigan maxsus `nitro.output.publicDir`;
+- statik fayllarni boshqa joyda saqlaydigan presetdagi `serveStatic: true`.
+
+<Warning>
+
+Agar build `public/`ni o'qisa-yu, papka serverga yetib bormasa (masalan, `aws-lambda` va `serveStatic: true` bilan), server bitta xatoni log qiladi va sahifalar xom kalitlarni ko'rsatadi. Payload'larni joylashtirish uchun `nitro.serveStatic: false`ni o'rnating.
+
+</Warning>
+
+## Serverless va Edge {#serverless-and-edge}
+
+Bu presetlar runtime'da `public/`ni o'qiy olmaydi:
+
+- `public/`ni CDN'ga yuboradigan yoki uni taqdim etmaydigan funksiya presetlari: `vercel`, `netlify`, `aws-lambda`, `aws-amplify`, `azure-swa`, `firebase`, `stormkit`, `zeabur`, `node-listener`;
+- fayl tizimisiz Edge presetlari: `cloudflare-module`, `cloudflare-pages`, `vercel-edge`, `netlify-edge`, `deno_deploy`;
+- `serveStatic: 'inline'`, masalan `winterjs`.
+
+U yerda modul payload'larni server bundle'iga Nitro server assetlari (`assets:i18n`) sifatida joylashtiradi va brauzer uchun public nusxani baribir yozadi.
+
+To'liq sahifa × lokal matritsasini joylashtirish bundle'ni katta qiladi. Edge platformasi chegarasidan oshganda build ogohlantiradi va uni nomlaydi, [Bundle chegaralari](#bundle-limits-on-edge)ga qarang. Katta kataloglar uchun `source` rejimiga o'ting — u ixcham manba fayllarini joylashtiradi va ildiz, sahifa hamda zaxira tarjimalarini runtime'da birlashtiradi:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    translationPayloads: {
+      mode: 'source',
+    },
+  },
+})
+```
+
+`source` rejimida brauzer payload'larni har doim server marshrutidan oladi, u esa ularni so'rov bo'yicha birlashtiradi (har qanday public nusxa faqat server o'qiydigan ixcham manba daraxtini saqlaydi). Buning uchun ishlayotgan server kerak, shuning uchun sof statik sayt uchun `source`dan foydalanmang.
+
+### Edge'dagi bundle chegaralari {#bundle-limits-on-edge}
+
+| Platforma          | Chegara                                                                                      |
+| ------------------ | -------------------------------------------------------------------------------------------- |
+| Cloudflare Workers | Siqilmagan holda 64 MiB, Free va Paid'da. Siqilgan hajm chegarasi yo'q. 1 s ishga tushish, 128 MB xotira |
+| Vercel Edge        | Hobby'da 1 MB gzip, Pro'da 2 MB, Enterprise'da 4 MB                                          |
+| Netlify Edge       | Siqilgan holda 20 MB                                                                         |
+
+Build o'zi joylashtiradigan lug'atlarni jamlaydi va faqat platformaning eng past chegarasidan oshganda ogohlantiradi. U faqat lug'atlarni hisoblaydi, ilova esa bunga qo'shimcha bo'ladi. Masalan, 60 KB ildiz faylli 120 sahifa × 4 lokal quyidagicha joylashtiriladi:
+
+| Rejim | Joylashtirilgan | Sig'adi |
+| --- | --- | --- |
+| `premerged` | 34.9 MiB | Cloudflare; Vercel Edge yoki Netlify Edge emas |
+| `source` | 5.7 MiB | Vercel Edge'da baribir 3 MB gzip |
+
+Vercel Edge'da shunday hajmdagi katalogga [payload hosti](#app-baseurl-and-payload-hosts) kerak.
+
+`source` har bir izolyatda har bir sahifa va lokal uchun birlashtirishga sarf qiladi: o'sha misolda taxminan 1 ms, sovuq izolyatda esa 7 ms CPU. Bu zaxira zanjiri hajmi bilan o'sadi: 4 MB zanjir fayllari uchun taxminan 43 ms. Netlify Edge har bir so'rov uchun 50 ms CPU'ga, Cloudflare'ning Free tarifi esa 10 ms'ga ruxsat beradi.
+
+### Edge runtime'larida sanalar {#dates-on-edge-runtimes}
+
+`$td` runtime'ning `Intl`idan foydalanadi va uning ICU ma'lumotlari brauzernikidan farq qilishi mumkin. Netlify Edge'da formatlangan sanada Chrome oddiy bo'sh joy qo'yadigan joyda U+202F (tor uzilmaydigan bo'sh joy) bo'lishi mumkin, shuning uchun Vue bitta gidratatsiya nomuvofiqligini log qiladi va matn gidratatsiyada o'zini tuzatadi. Oddiy `Intl` bilan oddiy Nuxt ham u yerda xuddi shunday qiladi; Deno Deploy esa yo'q.
+
+<Tip>
+
+`date` yoki `relativeDate` bilan `<i18n-t>` nomuvofiqlikka allaqachon ruxsat beradi. Shablondagi `$td` uchun elementga `data-allow-mismatch="text"` qo'ying.
+
+</Tip>
+
+## Statik sayt (nuxi generate) {#static-site-nuxi-generate}
+
+```bash
+npx nuxi generate
+```
+
+`nuxi build --preset <static preset>` ham xuddi shunday qiladi.
+
+- Standart `premerged` rejimi har bir payload'ni `.output/public/_locales/`ga yozadi, shuning uchun ularni istalgan statik host taqdim eta oladi.
+- Sahifalar har bir lokal uchun oldindan render qilinadi: `prefix` ostida modul har bir lokallashtirilgan ildizni (`/en`, `/de`) qo'shadi, `/` esa yo'naltirish stub'i sifatida saqlanadi.
+- [`prerenderRoutes`](/uz/api/module-options#translationpayloads)ni o'chiq qoldiring: public nusxada payload fayllari allaqachon mavjud.
+- `source` rejimi yoki `publicAssets: false` bilan brauzer o'qiydigan hech narsa bo'lmaydi va build ogohlantiradi.
+
+<Note>
+
+Cookie yoki `Accept-Language`ni o'qiydigan server yo'q, shuning uchun saqlangan lokal birinchi yuklanishda `/`ni yo'naltirmaydi. `no_prefix` ostida HTML standart lokalni saqlaydi va saqlangan cookie yuklanishda qo'llanilmaydi: `$switchLocale` ochiq sahifada baribir ishlaydi.
+
+</Note>
+
+Cloudflare Pages uchun [Cloudflare Pages](#cloudflare-pages) bo'limiga qarang.
+
+[Lokal domenlari](/uz/guide/layers#multiple-domains) bilan build uchun generate'ni har bir domen uchun bir marta, ishga tushirish hosti sifatida `NUXT_I18N_DOMAIN` bilan bajaring. Shunda har bir daraxt o'sha domenning sahifalari va payload'larini saqlaydi. Nitro'da chiqish papkasi uchun o'zgaruvchi yo'q, shuning uchun o'zingiznikini konfiguratsiyadan o'qing:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: { output: { publicDir: process.env.PUBLIC_DIR } },
+})
+```
+
+```bash
+NUXT_I18N_DOMAIN=example.de PUBLIC_DIR=sites/example.de npx nuxi generate
+NUXT_I18N_DOMAIN=example.com PUBLIC_DIR=sites/example.com npx nuxi generate
+```
+
+- Papkalarni `.output`dan tashqarida saqlang: har bir ishga tushirish uni bo'shatadi.
+- Boshqa domenlarga mutlaq havolalar crawl qilinmaydi.
+- O'zgaruvchisiz `baseUrl` lokalli build ogohlantiradi va build konfiguratsiyasini generatsiya qiladi, unda bu lokallar havolalar bo'ladi va sahifa olmaydi.
+- Node serverda xuddi shu o'zgaruvchi `Host` nima deyishidan qat'i nazar jarayonni bitta domenga bog'laydi.
+
+Statik host bu fayllarga o'z sarlavhalarini qo'llaydi; keshlashni hostning konfiguratsiyasida sozlang. Modulning `/_locales/*` qoidasi Cloudflare Pages'ga `_headers` orqali va Vercel'ga `config.json` orqali `public, max-age=60` sifatida yetib boradi. `.gz` / `.br` yonidosh fayllarni yuborish uchun `nitro.compressPublicAssets`ni yoqing: modul payload nusxasini xuddi shu sozlamalar bilan siqadi.
+
+## Kesh sarlavhalari va dateBuild {#cache-headers-and-datebuild}
+
+| So'rov                                                                                   | `Cache-Control`                                                                                                 |
+| ---------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Node server yoki marshrut, `?v=` joriy `dateBuild`ga teng, bo'sh bo'lmagan lug'at        | `private, max-age=<httpCacheDuration>, immutable`                                                               |
+| Node server yoki marshrut, `?v=`siz, eskisi bilan yoki bo'sh lug'at                      | `public, max-age=0, must-revalidate`                                                                            |
+| Hostdagi `public/` nusxasi, istalgan `?v=`                                               | `public, max-age=60` ([`httpCacheControl`](/uz/api/module-options#other)) |
+| `source` rejimi, `cacheTtl` yoki `apiBaseServerHost`: lug'at build'siz o'zgarishi mumkin | har doim `httpCacheControl` sarlavhasi                                                                          |
+| Server marshruti, lug'atni o'qib bo'lmadi                                                | `503`, `no-store`                                                                                               |
+| dev server                                                                               | yo'q                                                                                                            |
+
+Jadval nima uchun bunday ko'rinishda:
+
+- Joriy `v`li URL xeshlangan asset kabi qotiriladi va buni faqat so'rov parametrini ko'radigan narsa ayta oladi: server marshruti va o'z statik fayllariga sarlavha qo'yadigan Node server.
+- U `private`, shuning uchun so'rov parametrini e'tiborsiz qoldiradigan CDN keyingi `v`ga bu javobdan javob bera olmaydi.
+- Hostning statik fayllari butun yo'l uchun sarlavhani `/_locales/**` route rule'dan oladi, u esa so'rov parametrini ko'ra olmaydi, shuning uchun u qisqa bo'lib qoladi; takroriy yuklanish baribir hech narsani bloklamaydi.
+- Eski `v` taqdim etiladigan bo'lib qoladi, chunki keshlangan HTML uni nomlaydi.
+
+`httpCacheControl: false` har bir statik faylni `max-age=0, must-revalidate`da saqlaydi. [`httpCacheDuration`](/uz/api/module-options#httpcacheduration) standart bo'yicha bir yil; `0` hech qanday sarlavha yubormaydi. `$clearCache()` keyin yuklaydigan har qanday narsani qayta tekshiradi.
+
+Safari oldindan yuklangan payload'ni, javobdan qayta foydalana olmasligi mumkin bo'lganda, yana so'raydi: `no-cache` va `ETag` bilan ikkinchi so'rov `304` bo'ladi, na kesh sarlavhasi, na validator bo'lmaganda esa bu ikkinchi to'liq yuklab olish bo'ladi. `0`dan katta `max-age` bitta so'rov beradi. Buning narxini faqat validator qo'shmaydigan hostdagi `httpCacheDuration: 0` to'laydi.
+
+[`dateBuild`](/uz/api/module-options#datebuild) — bu `?v=` qiymati. Standart bo'yicha u tarjima fayllaringizning xeshi, shuning uchun u faqat tarjimalar o'zgarganda o'zgaradi va brauzerlar ularga tegmagan deploy'lar davomida keshlangan payload'larini saqlab qoladi. U zaxira zanjiri bilan ham o'zgaradi.
+
+- Qiymatni qotirish uchun uni o'zingiz o'rnating.
+- `?v=`ni butunlay olib tashlash uchun `0` yoki `''` o'rnating; shunda payload'lar hech qachon `immutable` bo'lmaydi.
+
+<Tip>
+
+Node serverda lug'atni joyida almashtirgandan so'ng `NUXT_I18N_DATE_BUILD=<new value>` bilan qayta ishga tushiring: qayta build'siz `v`ni boshqa hech narsa o'zgartirmaydi.
+
+</Tip>
+
+### Ildiz va delta fayllar {#root-and-delta-files}
+
+`premerged` har bir lokal uchun bitta ildiz — `__root/<locale>/data.json` — yozadi, har bir sahifa faylida esa faqat undan farq qiladigan qismini yozadi.
+
+- Sahifa fayli o'zi asosida yaratilgan ildizni `__i18n_root` kaliti bilan belgilaydi.
+- Brauzer ikkalasini ham yuklab oladi, ikkalasi kelmaguncha sahifa hech narsa ko'rsatmaydi va SSR ularni har bir chunk uchun bir marta birlashtiradi.
+- Belgisiz fayl — to'liq lug'at va u mustaqil: dev, `source` rejimi, server marshruti va hali eski fayllarni saqlayotgan host — barchasi hech qanday sozlamasiz shunday faylni qaytaradi.
+
+Demak, `_locales/*/data.json`ni to'g'ridan-to'g'ri o'qigan har kim deltani o'qiydi. To'liq fayllarni saqlash uchun `translationPayloads.rootDelta: false`ni o'rnating.
+
+Deploy davomida ochiq qolgan va yangi deltani so'ragan tab uning boshqa ildiz asosida yaratilganini ko'radi va uni ko'rsatishdan oldin o'sha ildizni yuklab oladi.
+
+### Lug'atni o'qib bo'lmaganda {#when-a-dictionary-cannot-be-read}
+
+Hostdan muvaffaqiyatsiz yuklash (404'dan boshqa har qanday holat), o'qib bo'lmaydigan yoki buzilgan fayl yoki JSON obyekti bo'lmagan 200 javobi hech qanday keshga tushmaydi va keyingi so'rov yana o'qiydi:
+
+- sahifa renderi ogohlantirishni log qiladi, o'sha lug'at uchun xom kalitlarni ko'rsatadi va `Cache-Control: no-store` bilan `503` javob beradi — har bir CDN sarlavhasida ham xuddi shunday (`CDN-Cache-Control`, `Cloudflare-CDN-Cache-Control`, `Netlify-CDN-Cache-Control`, `Vercel-CDN-Cache-Control`, `Surrogate-Control`, route rule'dagi har qanday qiymat ustidan) va `Retry-After: 60`;
+- `/_locales/...` `no-store` bilan `503` javob beradi;
+- `useTranslationServerMiddleware` kalitni yoki standart qiymatni qaytaradigan `t`ni beradi.
+
+Uzilish paytida nima bo'ladi:
+
+- **Tashrif buyuruvchilar:** o'sha 503 javobining tanasi — sahifaning o'zi. Gidratatsiyada brauzer lug'atni yana o'qiydi va host qayta ishlay boshlagach matn paydo bo'ladi, bunda Vue konsolda gidratatsiya nomuvofiqligi haqida bitta xato chiqaradi, chunki serverning HTML'ida kalitlar bo'lgan.
+- **Crawler'larga** keyinroq qaytish aytiladi.
+- **Keshlar:** `swr` yoki `cache` route rule'i 400 yoki undan yuqori statusli hech narsani saqlamaydi, CDN esa `no-store` oladi, shuning uchun hech qanday kesh xom kalitlarni saqlamaydi va tiklanishdan keyingi birinchi so'rov haqiqiy matnni render qiladi.
+- Qoida tomonidan **allaqachon keshlangan sahifalar** o'zgarmay qoladi: qayta tekshirish muvaffaqiyatsiz bo'ladi va hech narsa saqlamaydi. Vercel'da muvaffaqiyatsiz `isr` qayta tekshiruvi ham xuddi shunday oxirgi sahifani saqlab qoladi.
+
+Bu render yuklaydigan har bir chunk'ni qamrab oladi, jumladan ildizi qo'l ostida bo'lgan muvaffaqiyatsiz sahifa chunk'ini va renderda keyinroq birlashtirilgan chunk'ni. Sog'lom lug'atli sahifa, yo'naltirish va xato sahifasi o'z statusini saqlaydi. [Komponent oroli](/uz/guide/server-side-translations) bundan istisno: u 200 bo'lib qoladi, chunki 503 uni sahifadan olib tashlagan bo'lardi, shuning uchun o'z lug'ati yuklanadigan sahifa orolning xom kalitlari bilan saqlanib qolishi mumkin. Uzilish paytidagi har bir so'rov hostga yetib boradi, javob sarlavhalari uchun 60 soniyadan tashqari modulning o'z timeout'i yo'q.
+
+Hostdan kelgan 404 — unda bunday fayl yo'qligini bildiradi, bu muvaffaqiyatsizlik emas. Sahifa renderi brauzer kabi ildiz lug'atini ko'rsatadi va `/_locales/...` xuddi shu 404 bilan javob beradi. Ikkalasini ham hech qanday kesh saqlamaydi, shuning uchun paydo bo'lgan fayl keyingi so'rovda o'qiladi — buning narxi bunday sahifaning har bir renderida hostga bitta so'rov. Ildiz fayli ham bo'lmasa, lug'at bo'sh bo'ladi va [prerender](/uz/guide/upgrade#server,-build-and-deployment) muvaffaqiyatsiz tugaydi.
+
+Server yuklangan payload'larni `cacheMaxSize` tagacha (standart bo'yicha 1000) yozuvga ega jarayon ichidagi LRU keshda saqlaydi, u o'rnatilgan bo'lsa `cacheTtl`dan keyin yozuvni qayta yuklaydi; ikkalasi [Ishlash samaradorligini sozlash](/uz/guide/performance) sahifasida yoritilgan, [`cacheStorage`](/uz/guide/performance#shared-cache-for-several-instances) esa instansiyalar o'rtasida umumiy keshni qo'shadi. Buning ustiga `/_locales/**` uchun Nitro `cache` route rule'ini qo'shmang: u to'liq URL bo'yicha, so'rov parametrlari bilan birga kalitlaydi va uchinchi nusxani saqlaydi.
+
+## Ilova baseURL'i va payload hostlari {#app-baseurl-and-payload-hosts}
+
+**`app.baseURL`** uchun boshqa hech narsa kerak emas. `app.baseURL: '/shop/'` bilan brauzer `/shop/_locales/...`ni yuklab oladi; nusxa `.output/public/_locales/`da qoladi, uni Nitro base ostida taqdim etadi (statik host chiqishni `/shop/`ga ulashi kerak). Lokal prefikslari va [istisno qilingan yo'llar](/uz/guide/excluding-static-files) base'siz moslashtiriladi.
+
+**`app.cdnURL`** payload'larni ham ko'chiradi, agar ular `public/` ichidagi fayllar bo'lsa: brauzer `<cdnURL>/_locales/...`ni yuklab oladi va oldindan yuklaydi.
+
+- CDN `_locales/`ni `_nuxt/` yonida, o'sha yo'lda saqlashi kerak.
+- U saytingiz origin'iga ruxsat berishi kerak (CORS), chunki fayl `fetch` orqali keladi.
+- Faqat server marshruti javob beradigan lug'at (`source` rejimi, public nusxa yo'q) ilovaning origin'ida qoladi.
+
+`cloudflare-module`dagi runtime `NUXT_APP_BASE_URL` uchun Node mosligi (`nodejs_compat`) kerak. `nitro.cloudflare.nodeCompat` o'chirilgan bo'lsa (Nitro bayroqsiz eski sanada ham shunga o'tadi), u o'zgaruvchini ko'rmaydi va `/`ni taqdim etadi — oddiy Nuxt ham shunday —, lokal yo'naltirishi esa baribir base'ga boradi. U yerda `app.baseURL`ni build vaqtida o'rnating.
+
+Payload'larni boshqa origin'dan taqdim etish uchun mijoz va serverni unga yo'naltiring va lokal chiqishlarni o'chiring:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    apiBaseClientHost: 'https://cdn.example.com',
+    apiBaseServerHost: 'https://cdn.example.com',
+    translationPayloads: {
+      serverHandler: false,
+      publicAssets: false,
+      serverAssets: false,
+    },
+  },
+})
+```
+
+- Node'da `serverAssets` serverning o'z o'qishlari uchun xuddi shu nusxani yozadi va o'sha fayl `/_locales`ga javob beradi: u ham o'chirilgan bo'lishi kerak, hatto brauzer uchun server marshrutini saqlab qolsangiz ham, chunki brauzer unga hech qachon yetib bormaydi.
+- Host xuddi shu `<apiBaseUrl>/<page>/<locale>/data.json` tuzilmasini taqdim etishi kerak.
+- Barcha lokal chiqishlar o'chirilgan va host ko'rsatilmagan bo'lsa, build ogohlantiradi.
+
+Xuddi shu qiymatlar build vaqtida `NUXT_I18N_APP_BASE_URL`, `NUXT_I18N_APP_BASE_CLIENT_HOST` va `NUXT_I18N_APP_BASE_SERVER_HOST`dan kelishi mumkin. `NUXT_I18N_APP_BASE_SERVER_HOST` runtime'da ham ishlaydi va build qiymatidan ustun turadi. Tafsilotlar uchun [`apiBaseServerHost`](/uz/api/module-options#apibaseserverhost)ga qarang.
+
+## Platformalar {#platforms}
+
+Faqat modul yoki uning chiqishi uchun kerak bo'ladigan narsalar. Akkauntlar, regionlar va CLI'ga kirish platformaning hujjatlarida keltirilgan.
+
+### Cloudflare Workers {#cloudflare-workers}
+
+Preset `cloudflare_module`. `wrangler deploy` Nitro chiqishini esbuild bilan ikkinchi marta bundle qiladi va shundan so'ng xom `defineAsyncComponent(() => import('./X.vue'))` serverda bo'sh render qilinadi. Nuxt'ning standart xato sahifasi aynan shunday, shuning uchun 404'ning tanasi bo'sh bo'ladi va brauzer gidratatsiya nomuvofiqligini log qiladi. Keyin mijoz sahifani render qiladi va status 404 bo'lib qoladi, lekin JavaScript'siz sahifa bo'sh bo'ladi. Bu [nuxt#33270](https://github.com/nuxt/nuxt/issues/33270): moduldan holi oddiy Nuxt ham xuddi shunday qiladi. Sahifa marshrutlariga ta'sir qilmaydi.
+
+Ikkinchi bundle'ni o'chiring:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: {
+    preset: 'cloudflare_module',
+    cloudflare: {
+      deployConfig: true, // `wrangler` below applies only with it
+      wrangler: {
+        no_bundle: true,
+        find_additional_modules: true,
+        rules: [{ type: 'ESModule', globs: ['**/*.mjs'] }],
+      },
+    },
+  },
+})
+```
+
+```bash
+npx nuxi build
+cd .output/server && npx wrangler deploy -c wrangler.json
+```
+
+`compatibilityDate`ni `2024-09-19` yoki undan keyingi sanaga o'rnating: eskiroq sana eski presetni tanlaydi, u `wrangler.json` yozmaydi va hech qanday xato bermaydi. Shunda 404 render qilinadi va yuklanadigan hajm kichrayadi: test ilovasida 246 KiB o'rniga 190 KiB gzip. O'zingizning `error.vue` faylingiz — boshqa yechim, lekin u faqat xato sahifasini qamrab oladi.
+
+Modulning o'ziga `nodejs_compat` kerak emas. Chegaralar uchun [Bundle chegaralari](#bundle-limits-on-edge)ga qarang.
+
+### Cloudflare Pages {#cloudflare-pages}
+
+`cloudflare-pages-static` presetidan foydalaning. `nuxi generate --preset cloudflare-pages` — `index.html`siz server build'i.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: {
+    preset: 'cloudflare-pages-static',
+    prerender: { autoSubfolderIndex: false },
+  },
+})
+```
+
+```bash
+npx nuxi generate
+npx wrangler pages project create my-site --production-branch main --force
+npx wrangler pages deploy dist --project-name my-site --branch main
+```
+
+- **Chiqish.** Preset `.output/public`ga emas, `dist/`ga yozadi.
+- **`--force`.** Usiz yangi wrangler (bu yerda 4.156) `pages project create`ni Workers'ga topshiradi. U bilan siz klassik Pages loyihasini olasiz. U bir marta, yaratish uchun kerak.
+- **`autoSubfolderIndex: false`.** Pages `/de`ga `/de/`ga 308 bilan javob beradi, canonical va `hreflang` esa `/de`ni nomlaydi, shuning uchun ular yo'naltirishga ishora qiladi. Bu opsiya bilan fayl `de.html` bo'ladi va yo'naltirish yo'qoladi.
+- **404'da konsoldagi `NUXT_E1005`** — oddiy 404. Nuxt buni shunday xabar qiladi, chunki `404.html` mijozda, ilova mount qilinishidan oldin ishga tushadi. Sahifa ishlaydi va oddiy Nuxt ham xuddi shu qatorni chiqaradi.
+
+### Vercel va Vercel Edge {#vercel-and-vercel-edge}
+
+`vercel` va `vercel_edge` presetlari, ilovaga hech qanday o'zgartirishsiz. Teglar `metaBaseUrl`siz, platformaning yo'naltirilgan sarlavhalaridan ishlaydi. Vercel Edge'ning bundle chegarasi kichik: [Bundle chegaralari](#bundle-limits-on-edge)ga qarang. Umumiy kesh uchun [`upstash` drayveridan](/uz/guide/performance#upstash-on-vercel-and-vercel-edge) foydalaning.
+
+### Netlify {#netlify}
+
+`netlify` va `netlify_edge` presetlari.
+
+```bash
+npx nuxi build --preset netlify
+npx netlify deploy --prod --no-build --dir dist --functions .netlify/functions-internal
+```
+
+- **`nitro.output`ni o'rnatmang.** Preset `.netlify/` va `dist/`ni o'zi yozadi.
+- **Deploy qilayotgan papkangizda `package.json` saqlang.** Usiz CLI ota papkaga qaraydi va hech qanday funksiyani deploy qilmaydi, xatosiz.
+- **Netlify Edge** faqat `--dir dist` bilan deploy qilinadi. [Edge runtime'larida sanalar](#dates-on-edge-runtimes)ga qarang.
+
+### Cloud Run {#cloud-run}
+
+Standart `node-server` build'idan foydalaning. Lokal ravishda docker ishlamayotganda `gcloud run deploy --source`ga chiqish papkasida `Dockerfile` kerak:
+
+```dockerfile
+# .output/Dockerfile
+FROM node:22-slim
+WORKDIR /app
+COPY . .
+ENV NODE_ENV=production
+CMD ["node", "server/index.mjs"]
+```
+
+```bash
+cd .output && gcloud run deploy my-app --source .
+```
+
+Teglar `metaBaseUrl`siz, platformaning yo'naltirilgan sarlavhalaridan ishlaydi.
+
+### Deno Deploy {#deno-deploy}
+
+Preset `deno_deploy`. `deno deploy` `deployctl`ni almashtiradi. `server/index.ts` kirish nuqtasi bilan dinamik ilova yarating va chiqish papkasidan deploy qiling.
+
+### Firebase {#firebase}
+
+| Mahsulot | Sozlash |
+| --- | --- |
+| App Hosting | Node build'ini ishga tushiradi: standart preset yoki `firebase-app-hosting`dan va Node 20+ dan foydalaning |
+| Cloud Functions | `firebase` preseti payload'larni joylashtiradi va `firebase-functions`ni talab qiladi |
+| Hosting (statik) | `.output/public`ni fayllar sifatida taqdim etadi, shuning uchun `/_locales/**` Hosting sarlavhalarini oladi |
+
+Statik Hosting'da JSON noto'g'ri `Content-Type` yoki keshlash bilan qaytsa, `firebase.json`da `/_locales/**` uchun `headers` yozuvini qo'shing. Nuxt `routeRules` sarlavhalari Hosting o'zi taqdim etadigan fayllarga qo'llanilmaydi; payload marshruti serverga yetib boradigan javoblarga o'z `Content-Type` va `Cache-Control` qiymatlarini qo'yadi.
+
+### AWS Amplify {#aws-amplify}
+
+`aws-amplify` statik fayllarni serverning yonida emas, compute papkasi yonida saqlaydi, shuning uchun payload'lar funksiya platformasidagi kabi joylashtiriladi.
+
+### Bitta build'ning bir nechta instansiyalari {#several-instances-of-one-build}
+
+Bitta artefakt muhit o'zgaruvchilari orqali har bir instansiyada boshqa standart yoki o'chirilgan lokal bilan ishlashi mumkin: [Runtime'da qayta belgilash](/uz/guide/runtime-overrides)ga qarang. Faqat runtime'da o'chirilgan lokalning statik fayllari `public/`da qoladi; agar ularga kirish imkoni bo'lmasligi kerak bo'lsa, uni build vaqtida o'chiring.
+
+Lug'atlarni masofaviy hostdan yuklaydigan instansiyalar ularni Redis, Upstash, Cloudflare KV yoki D1, Deno KV yoki boshqa Nitro storage'da baham ko'rishi mumkin, shunda backend har bir instansiyadan bittadan emas, bitta so'rov oladi. Bu kesh, tarjimalar manbai emas: [Bir nechta instansiya uchun umumiy kesh](/uz/guide/performance#shared-cache-for-several-instances)ga qarang.
+
+## Proksi yoki CDN ortida {#behind-a-proxy-or-cdn}
+
+Ilova ommaviy host va sxemani so'rovdan bilib olishi kerak.
+
+| Proksi yuboradi                              | Oddiy build                                      | Lokallarda `baseUrl` bilan build                                                  |
+| -------------------------------------------- | ------------------------------------------------ | --------------------------------------------------------------------------------- |
+| Haqiqiy `Host`                               | Hech narsa o'rnatish shart emas                  | Hech narsa o'rnatish shart emas                                                   |
+| Origin'ning `Host`i, qo'shimcha `X-Forwarded-Host` | Hech narsa o'rnatish shart emas            | [`trustForwardedHost: true`](/uz/api/module-options#trustforwardedhost)           |
+| Hech biri                                    | [`metaBaseUrl`](/uz/api/module-options#metabaseurl) | Hech qanday sozlama yordam bermaydi: har bir so'rov origin hostidek ko'rinadi, shuning uchun proksini o'zgartiring |
+
+- **`swr` yoki `cache` ostidagi marshrutlar.** Jadval u yerda amal qilmaydi: [HTML'ni keshlash](#caching-html)ga qarang. `metaBaseUrl` yoki `site.url`ni o'rnating.
+- **`X-Forwarded-Proto`.** Uni yuboring, aks holda HTTPS proksi ortida canonical URL'lar `http://` bo'lib qoladi. `metaBaseUrl` buni ham tuzatadi.
+- **Domen build'ida** teglarning base URL'ini domen tanlaydi. U yerda domenni `metaTrustForwardedHost` emas, faqat `trustForwardedHost` tanlaydi.
+- **Yo'naltirishlar nisbiy va lokal cookie'sida `Domain` yo'q,** shuning uchun ikkalasi ham ommaviy hostda qoladi.
+
+<Warning>
+
+**Origin'ga kirish mumkin bo'lib qolsa, `metaBaseUrl`ni qotiring** — `metaBaseUrl` yoki `site.url`siz oddiy build'da canonical, `hreflang` va `og:url` hostni so'rovdan oladi. [`metaTrustForwardedHost`](/uz/api/module-options#metatrustforwardedhost) standart bo'yicha yoqilgan, shuning uchun `X-Forwarded-Host: evil.example` bilan to'g'ridan-to'g'ri so'rov o'sha teglarda `https://evil.example`ni oladi va oldindagi kesh o'sha sahifani tarqatadi. `*.workers.dev` kabi platforma hosti aynan shunday origin. `metaBaseUrl` buni `Host` uchun ham yopadi. Domen build'ining ma'lum hosti o'z `baseUrl`ini saqlaydi. `trustForwardedHost: true` bilan to'g'ridan-to'g'ri mijoz boshqa domenning sahifasini tanlay oladi, shuning uchun uni faqat sarlavhani qayta yozadigan proksi ortida yoqing.
+
+</Warning>
+
+## HTML'ni keshlash {#caching-html}
+
+Ko'pchilik URL'larni keshlash xavfsiz, chunki ular o'z lokalini nomlaydi. Quyidagilar tashrif buyuruvchiga bog'liq:
+
+| Sozlama                        | URL'lar                                                     |
+| ------------------------------ | ----------------------------------------------------------- |
+| Standart, `autoDetectPath: '/'` | `/`                                                        |
+| `prefix`                       | `/` va faqat yo'naltiradigan har bir prefikssiz URL         |
+| `autoDetectPath: '*'`          | Har bir URL                                                 |
+| `no_prefix`                    | Har bir sahifa                                              |
+
+- **`Vary`.** Bu javoblar [`localeCookie`](/uz/api/module-options#localecookie) o'rnatilganda `Cookie` bilan va `autoDetectLanguage` yoqilganda `Accept-Language` bilan `Vary`ni olib yuradi. Unga amal qiladigan kesh javoblarni alohida saqlaydi.
+- **`Vary`ni e'tiborsiz qoldiradigan kesh,** masalan "hammasini URL bo'yicha keshlash", bu URL'larni o'tkazib yuborishi kerak. Aks holda bir tashrif buyuruvchining `302 /de` javobi keyingisiga yetib boradi va saqlangan standart sahifa hamma uchun yo'naltirishni yo'qotadi. `/`da `redirects: false`ni ham o'rnatishingiz mumkin. Nitro'ning route keshi yo'l va uning `varies` ro'yxati bo'yicha kalitlaydi, shuning uchun `/`ni `swr` va `cache` qoidalaridan ham tashqarida saqlang.
+- **`Set-Cookie`.** `localeCookie` o'rnatilganda prefiks ostidagi har bir server-render sahifa `Set-Cookie`ni olib yuradi va to'g'ri CDN uni saqlamaydi. Keshlangan HTML uchun `localeCookie`ni o'chiq qoldiring yoki sarlavhani edge'da olib tashlang.
+- **`swr` va `cache` qoidalariga `metaBaseUrl` yoki `site.url` kerak.** Nitro bunday marshrutni faqat `cache.varies`dagi sarlavhalar bilan render qiladi, shuning uchun `Host`, `X-Forwarded-Host` va `X-Forwarded-Proto` yo'qoladi va so'rov URL'i `http://localhost` bo'ladi. Qat'iy origin bo'lmasa, o'sha marshrutlardagi canonical, `hreflang` va `og:url` har qanday platformada `http://localhost`ga ishora qiladi. Oddiy Nuxt'ning `useRequestURL()` funksiyasi ham u yerda xuddi shuni o'qiydi. Hostni o'rniga tashrif buyuruvchidan olish esa bir tashrif buyuruvchining `X-Forwarded-Host`ini har bir tashrif buyuruvchi oladigan sahifaga qo'ygan bo'lardi. Domen build'iga ta'sir qilmaydi: uning teglari lokallarning `baseUrl`idan foydalanadi.
+
+  Agar bitta build bir nechta hostga xizmat qilsa va yagona origin mos kelmasa, qoidaga sarlavhalarni ko'rishga ruxsat bering va har bir qiymat uchun bitta nusxa saqlang: `'/blog/**': { swr: 60, cache: { varies: ['host', 'x-forwarded-host', 'x-forwarded-proto'] } }`. Har bir alohida qiymat — yangi kesh yozuvi, shuning uchun to'qib chiqarilgan sarlavhalarni yuboradigan mijoz keshni to'ldiradi: origin'ni ularni o'rnatadigan proksi ortiga qo'ying.
+- **Domen build'idagi `swr` va `cache` qoidalari.** Modul har bir bunday qoidaning `cache.varies` ro'yxatiga `host`ni, `trustForwardedHost` bilan esa `x-forwarded-host`ni qo'shadi, shunda bir domen boshqasiga o'z sahifasini taqdim etmaydi. `cache: false`li qoida yozilganicha qoladi. `isr` — platformaning keshi: u host bo'yicha kalitlashini tekshiring. Kalitda host bo'lsa, to'qib chiqarilgan hostlarni yuboradigan mijoz kesh yozuvlarini qo'shadi.
+
+Payload fayllari uchun [Kesh sarlavhalari va dateBuild](#cache-headers-and-datebuild)ga qarang.
+
+## Bog'liq {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Ishlash samaradorligini sozlash" icon="book-open" href="/uz/guide/performance">
+
+</Card>
+
+<Card title="Runtime'da qayta belgilash" icon="book-open" href="/uz/guide/runtime-overrides">
+
+</Card>
+
+<Card title="translationPayloads ma'lumotnomasi" icon="brackets-curly" href="/uz/api/module-options#translationpayloads">
+
+</Card>
+
+<Card title="Qatlamlar va domenlar" icon="book-open" href="/uz/guide/layers">
+
+</Card>
+
+<Card title="SEO" icon="book-open" href="/uz/guide/seo">
+
+</Card>
+
+</CardGroup>

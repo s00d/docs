@@ -1,0 +1,440 @@
+---
+title: "Izvietošana"
+description: "Izvietojiet Node serverī, serverless vai Edge vidē, vai kā statisku vietni — kur nonāk tulkojumu payload, kas vajadzīgs katrai platformai, starpniekserveri un kešošana."
+---
+
+Modulis darbojas ar jebkuru Nitro preset bez papildu konfigurācijas: tas izvēlas, kur atrodas tulkojumu faili, pēc preset, kuram jūs būvējat. Noklusējuma vērtības ir piemērotas lielākajai daļai lietotņu; izlasiet sadaļu par savu platformu. Šajā lapā paskaidrots:
+
+- kas nonāk `.output/` un kādas galvenes saņem payload;
+- kas jāmaina statiskai mitināšanai, lieliem katalogiem, apakšceļam, starpniekserverim vai CDN.
+
+<Note>
+
+Izvietots un pārbaudīts uz reāliem resursdatoriem: Cloudflare Workers un Pages, Vercel un Vercel Edge, Netlify un Netlify Edge, Cloud Run un Deno Deploy, katrs ar to, kas uzskaitīts sadaļā [Platformas](#platforms). Pārējie preset tika uzbūvēti un palaisti lokāli.
+
+</Note>
+
+## Kā tiek piegādāti tulkojumi {#how-translations-are-delivered}
+
+Būvēšanas laikā modulis pārvērš `locales/` (visi slāņi apvienoti) par **payload**: vienu JSON failu katrai lapai un lokalei. Tos nolasa divi patērētāji:
+
+- **SSR** ielādē renderētās lapas payload procesa iekšienē — bez HTTP pieprasījuma, un vārdnīca netiek iegulta HTML.
+- **Pārlūks** ielādē `/_locales/<page>/<locale>/data.json?v=<dateBuild>` hidratācijas laikā un navigācijas laikā.
+
+`_locales` ir [`apiBaseUrl`](/lv/api/module-options#apibaseurl). Iebūvētais servera maršruts atbild uz šo URL; statiskā kopija mapē `public/` atbild uz to bez servera.
+
+## Node serveris {#node-server}
+
+```bash
+npx nuxi build
+node .output/server/index.mjs
+```
+
+Ar `node-server` (noklusējuma preset), `node-cluster`, `bun`, `deno-server` vai jebkuru citu preset, kas apkalpo `public/` no diska, ar `public/` blakus mapei `server/`:
+
+- payload tiek kopēti uz `.output/public/_locales/<page>/<locale>/data.json`;
+- SSR tos nolasa no šīs mapes ar `fs` (servera pakotnē nekas netiek iekļauts);
+- pārlūks tos saņem kā statiskus failus vai no servera maršruta.
+
+Izvietojiet visu `.output/` direktoriju. Modulim nepieciešams Node 20 vai jaunāks, un Nuxt ir savs minimums: Nuxt 4.5 deklarē `^22.19.0 || ^24.11.0 || >=26.0.0`.
+
+Process pastāvīgas slodzes apstākļos var aizņemt daudz vairāk atmiņas nekā tā dzīvā kaudze. Skatiet [Atmiņa Node serverī](/lv/guide/performance#memory-on-a-node-server), pirms iestatāt konteinera limitu.
+
+Ar citu struktūru modulis iegulst payload, kā aprakstīts nākamajā sadaļā. Tas attiecas uz:
+
+- pielāgotu `nitro.output.publicDir`, ko būvēšana nolasa vienreiz;
+- `serveStatic: true` preset, kas glabā statiskos failus citur.
+
+<Warning>
+
+Ja būvēšana nolasa `public/` un mape nenonāk līdz serverim, kā tas ir ar `aws-lambda` un `serveStatic: true`, serveris reģistrē vienu kļūdu un lapas rāda neapstrādātas atslēgas. Iestatiet `nitro.serveStatic: false`, lai iegultu payload.
+
+</Warning>
+
+## Serverless un Edge {#serverless-and-edge}
+
+Šie preset izpildlaikā nevar nolasīt `public/`:
+
+- funkciju preset, kas nosūta `public/` uz CDN vai to neapkalpo: `vercel`, `netlify`, `aws-lambda`, `aws-amplify`, `azure-swa`, `firebase`, `stormkit`, `zeabur`, `node-listener`;
+- Edge preset bez failu sistēmas: `cloudflare-module`, `cloudflare-pages`, `vercel-edge`, `netlify-edge`, `deno_deploy`;
+- `serveStatic: 'inline'`, piemēram, `winterjs`.
+
+Tur modulis iegulst payload servera pakotnē kā Nitro servera resursus (`assets:i18n`) un joprojām raksta publisko kopiju pārlūkam.
+
+Pilnas lapu × lokaļu matricas iegulšana padara pakotni lielu. Pārsniedzot Edge platformas limitu, būvēšana brīdina un to nosauc, skatiet [Pakotnes limiti](#bundle-limits-on-edge). Lieliem katalogiem pārslēdzieties uz `source` režīmu, kas iegulst kompaktos avota failus un apvieno saknes, lapas un rezerves tulkojumus izpildlaikā:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    translationPayloads: {
+      mode: 'source',
+    },
+  },
+})
+```
+
+`source` režīmā pārlūks vienmēr ielādē payload no servera maršruta, kas tos apvieno pēc pieprasījuma (jebkura publiskā kopija satur kompakto avota koku, ko nolasa tikai serveris). Tam vajadzīgs strādājošs serveris, tāpēc neizmantojiet `source` tīri statiskai vietnei.
+
+### Pakotnes limiti Edge vidē {#bundle-limits-on-edge}
+
+| Platforma          | Limits                                                                                 |
+| ------------------ | -------------------------------------------------------------------------------------- |
+| Cloudflare Workers | 64 MiB nesaspiesti, Free un Paid plānos. Saspiestā apjoma limita nav. 1 s palaišana, 128 MB atmiņa |
+| Vercel Edge        | 1 MB gzip Hobby plānā, 2 MB Pro, 4 MB Enterprise                                       |
+| Netlify Edge       | 20 MB saspiesti                                                                        |
+
+Būvēšana summē iegultās vārdnīcas un brīdina tikai, pārsniedzot platformas zemāko limitu. Tā skaita tikai vārdnīcas, tāpēc lietotne nāk klāt. Piemēram, 120 lapas × 4 lokales ar 60 KB saknes failu iegulst:
+
+| Režīms | Iegults | Ietilpst |
+| --- | --- | --- |
+| `premerged` | 34.9 MiB | Cloudflare; ne Vercel Edge vai Netlify Edge |
+| `source` | 5.7 MiB | Joprojām 3 MB gzip Vercel Edge |
+
+Tāda izmēra katalogam Vercel Edge vidē vajadzīgs [payload resursdators](#app-baseurl-and-payload-hosts).
+
+`source` maksā vienu apvienošanu katrai lapai un lokalei katrā izolātā, šajā piemērā aptuveni 1 ms un aukstā izolātā 7 ms CPU. Tas pieaug līdz ar rezerves ķēdes izmēru: aptuveni 43 ms 4 MB ķēdes failiem. Netlify Edge atļauj 50 ms CPU vienam pieprasījumam, bet Cloudflare Free plāns — 10 ms.
+
+### Datumi Edge izpildlaikos {#dates-on-edge-runtimes}
+
+`$td` izmanto izpildlaika `Intl`, un tā ICU dati var atšķirties no pārlūka datiem. Netlify Edge vidē formatēts datums var saturēt U+202F (šauru nedalāmu atstarpi) tur, kur Chrome ir parasta atstarpe, tāpēc Vue reģistrē vienu hidratācijas neatbilstību, un teksts hidratācijas laikā izlabojas pats. Tīrs Nuxt ar tīru `Intl` tur dara to pašu; Deno Deploy — ne.
+
+<Tip>
+
+`<i18n-t>` ar `date` vai `relativeDate` jau pieļauj neatbilstību. `$td` veidnē elementam pievienojiet `data-allow-mismatch="text"`.
+
+</Tip>
+
+## Statiska vietne (nuxi generate) {#static-site-nuxi-generate}
+
+```bash
+npx nuxi generate
+```
+
+`nuxi build --preset <static preset>` dara to pašu.
+
+- Noklusējuma `premerged` režīms ieraksta katru payload mapē `.output/public/_locales/`, tāpēc tos var apkalpot jebkurš statisks resursdators.
+- Lapas tiek iepriekš renderētas katrai lokalei: ar `prefix` modulis sagatavo katru lokalizēto sakni (`/en`, `/de`), un `/` tiek saglabāts kā novirzīšanas aizstājējs.
+- Atstājiet [`prerenderRoutes`](/lv/api/module-options#translationpayloads) izslēgtu: publiskā kopija jau satur payload failus.
+- Ar `source` režīmu vai `publicAssets: false` pārlūkam nav ko nolasīt, un būvēšana brīdina.
+
+<Note>
+
+Nav servera, kas nolasītu sīkfailu vai `Accept-Language`, tāpēc saglabāta lokale pirmajā ielādē nenovirza `/`. Ar `no_prefix` HTML satur noklusējuma lokali, un saglabāts sīkfails ielādē netiek piemērots: `$switchLocale` joprojām darbojas atvērtajā lapā.
+
+</Note>
+
+Cloudflare Pages gadījumā skatiet [Cloudflare Pages](#cloudflare-pages).
+
+Būvei ar [lokaļu domēniem](/lv/guide/layers#multiple-domains) palaidiet generate vienreiz katram domēnam, ar `NUXT_I18N_DOMAIN` kā palaišanas resursdatoru. Tad katrs koks satur šī domēna lapas un payload. Nitro nav mainīgā izvades mapei, tāpēc nolasiet savu no konfigurācijas:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: { output: { publicDir: process.env.PUBLIC_DIR } },
+})
+```
+
+```bash
+NUXT_I18N_DOMAIN=example.de PUBLIC_DIR=sites/example.de npx nuxi generate
+NUXT_I18N_DOMAIN=example.com PUBLIC_DIR=sites/example.com npx nuxi generate
+```
+
+- Glabājiet mapes ārpus `.output`: katra palaišana to iztukšo.
+- Absolūtās saites uz citiem domēniem netiek pārmeklētas.
+- Bez mainīgā būve ar `baseUrl` lokali brīdina un ģenerē būves konfigurāciju, kurā šīs lokales ir saites un nesaņem lapas.
+- Node serverī tas pats mainīgais piesaista procesu vienam domēnam neatkarīgi no tā, ko saka `Host`.
+
+Statisks resursdators šiem failiem piemēro savas galvenes; iestatiet kešošanu resursdatora konfigurācijā. Moduļa `/_locales/*` noteikums sasniedz Cloudflare Pages caur `_headers` un Vercel caur `config.json` kā `public, max-age=60`. Lai piegādātu `.gz` / `.br` blakus failus, ieslēdziet `nitro.compressPublicAssets`: modulis saspiež payload kopiju ar tiem pašiem iestatījumiem.
+
+## Kešatmiņas galvenes un dateBuild {#cache-headers-and-datebuild}
+
+| Pieprasījums                                                                             | `Cache-Control`                                                                                                 |
+| ---------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Node serveris vai maršruts, `?v=` vienāds ar pašreizējo `dateBuild`, netukša vārdnīca     | `private, max-age=<httpCacheDuration>, immutable`                                                               |
+| Node serveris vai maršruts, bez `?v=`, ar vecu vērtību vai tukša vārdnīca                 | `public, max-age=0, must-revalidate`                                                                            |
+| Resursdatora `public/` kopija, jebkurš `?v=`                                              | `public, max-age=60` ([`httpCacheControl`](/lv/api/module-options#other)) |
+| `source` režīms, `cacheTtl` vai `apiBaseServerHost`: vārdnīca var mainīties bez būvēšanas | vienmēr `httpCacheControl` galvene                                                                              |
+| Servera maršruts, vārdnīcu neizdevās nolasīt                                             | `503`, `no-store`                                                                                               |
+| izstrādes serveris                                                                       | nav                                                                                                             |
+
+Kāpēc tabula izskatās šādi:
+
+- URL ar pašreizējo `v` tiek fiksēts kā resurss ar jaucējkodu, un to var pateikt tikai tas, kas redz query: servera maršruts un Node serveris, kas iestata galveni saviem statiskajiem failiem.
+- Tas ir `private`, tāpēc CDN, kas ignorē query, nevar atbildēt uz nākamo `v` ar šo atbildi.
+- Resursdatora statiskie faili saņem visam ceļam kopīgu galveni no `/_locales/**` maršruta noteikuma, kas nevar redzēt query, tāpēc tā paliek īsa; atkārtota ielāde joprojām neko nebloķē.
+- Vecs `v` paliek apkalpojams, jo kešotais HTML uz to atsaucas.
+
+`httpCacheControl: false` saglabā katram statiskajam failam `max-age=0, must-revalidate`. [`httpCacheDuration`](/lv/api/module-options#httpcacheduration) pēc noklusējuma ir viens gads; `0` nesūta galveni. `$clearCache()` atkārtoti validē visu, ko tas ielādē nākamo.
+
+Safari pieprasa iepriekš ielādētu payload vēlreiz, ja tas nedrīkst atkārtoti izmantot atbildi: ar `no-cache` un `ETag` otrais pieprasījums ir `304`, bez kešatmiņas galvenes un bez validatora tā ir otra pilna lejupielāde. `max-age` virs `0` dod vienu pieprasījumu. To maksā tikai `httpCacheDuration: 0` resursdatorā, kas nepievieno validatoru.
+
+[`dateBuild`](/lv/api/module-options#datebuild) ir `?v=` vērtība. Pēc noklusējuma tas ir jūsu tulkojumu failu jaucējkods, tāpēc tas mainās tikai tad, kad mainās tulkojumi, un pārlūki saglabā kešotos payload starp izvietošanām, kas tos neskāra. Tas mainās arī līdz ar rezerves ķēdi.
+
+- Iestatiet to paši, lai fiksētu vērtību.
+- Iestatiet `0` vai `''`, lai pilnībā atmestu `?v=`; tad payload nekad nav `immutable`.
+
+<Tip>
+
+Pēc vārdnīcas aizstāšanas uz vietas Node serverī restartējiet ar `NUXT_I18N_DATE_BUILD=<new value>`: nekas cits nemaina `v` bez pārbūvēšanas.
+
+</Tip>
+
+### Saknes un delta faili {#root-and-delta-files}
+
+`premerged` ieraksta vienu sakni katrai lokalei, `__root/<locale>/data.json`, un katras lapas failā tikai to, kas no tās atšķiras.
+
+- Lapas fails atzīmē sakni, pret kuru tas tika izveidots, ar `__i18n_root` atslēgu.
+- Pārlūks ielādē abus, lapa neko nerāda, kamēr abi nav ielādēti, un SSR tos apvieno vienreiz katram fragmentam.
+- Fails bez atzīmes ir vesela vārdnīca un ir patstāvīgs: izstrādes režīms, `source` režīms, servera maršruts un resursdators, kas joprojām glabā vecākus failus, visi atbild ar tādu bez jebkāda iestatījuma.
+
+Tāpēc ikviens, kas tieši nolasa `_locales/*/data.json`, nolasa deltu. Iestatiet `translationPayloads.rootDelta: false`, lai saglabātu veselus failus.
+
+Cilne, kas atvērta izvietošanas laikā un pieprasa jaunu deltu, redz, ka tā izveidota pret citu sakni, un ielādē šo sakni pirms attēlošanas.
+
+### Kad vārdnīcu nevar nolasīt {#when-a-dictionary-cannot-be-read}
+
+Neveiksmīga ielāde no resursdatora (jebkas, izņemot 404), nenolasāms vai bojāts fails vai 200 atbilde, kas nav JSON objekts, nenonāk nevienā kešatmiņā, un nākamais pieprasījums nolasa atkal:
+
+- lapas renderēšana reģistrē brīdinājumu, rāda neapstrādātas atslēgas šai vārdnīcai un atbild ar `503` ar `Cache-Control: no-store`, to pašu katrā CDN galvenē (`CDN-Cache-Control`, `Cloudflare-CDN-Cache-Control`, `Netlify-CDN-Cache-Control`, `Vercel-CDN-Cache-Control`, `Surrogate-Control`, virs jebkurām no maršruta noteikuma) un `Retry-After: 60`;
+- `/_locales/...` atbild ar `503` ar `no-store`;
+- `useTranslationServerMiddleware` dod `t`, kas atbild ar atslēgu vai noklusējuma vērtību.
+
+Kas notiek pārtraukuma laikā:
+
+- **Apmeklētāji:** šīs 503 atbildes saturs ir pati lapa. Hidratācijas laikā pārlūks nolasa vārdnīcu vēlreiz, un teksts parādās, tiklīdz resursdators atkal darbojas, ar vienu Vue konsoles kļūdu par hidratācijas neatbilstību, jo servera HTML saturēja atslēgas.
+- **Rāpuļprogrammām** tiek norādīts atgriezties vēlāk.
+- **Kešatmiņas:** `swr` vai `cache` maršruta noteikums neko nesaglabā ar statusu 400 vai lielāku, un CDN saņem `no-store`, tāpēc neviena kešatmiņa nesaglabā neapstrādātās atslēgas, un pirmais pieprasījums pēc atjaunošanās renderē īsto tekstu.
+- **Lapas, kuras noteikums jau kešojis,** paliek nemainīgas: atkārtotā validācija neizdodas un neko nesaglabā. Vercel neveiksmīga `isr` atkārtotā validācija tāpat saglabā pēdējo lapu.
+
+Tas attiecas uz katru fragmentu, ko renderēšana ielādē, ieskaitot neveiksmīgu lapas fragmentu ar pieejamu sakni un fragmentu, kas apvienots vēlāk renderēšanas gaitā. Lapa ar veselu vārdnīcu, novirzīšana un kļūdas lapa saglabā savu statusu. Izņēmums ir [komponentu sala](/lv/guide/server-side-translations): tā paliek 200, jo 503 to izņemtu no lapas, tāpēc lapa, kuras pašas vārdnīca ielādējas, var tikt saglabāta ar salas neapstrādātajām atslēgām. Pārtraukuma laikā katrs pieprasījums sasniedz resursdatoru bez moduļa paša noildzes, izņemot 60 sekundes atbildes galvenēm.
+
+404 no resursdatora nozīmē, ka tam nav šāda faila, kas nav kļūme. Lapas renderēšana rāda saknes vārdnīcu, tāpat kā pārlūks, un `/_locales/...` atbild ar to pašu 404. Neviena kešatmiņa nesaglabā ne vienu, ne otru, tāpēc fails, kas parādās, tiek nolasīts nākamajā pieprasījumā, par cenu vienam pieprasījumam resursdatoram katrā šādas lapas renderēšanā. Ja nav arī saknes faila, vārdnīca ir tukša, un [iepriekšēja renderēšana](/lv/guide/upgrade#server,-build-and-deployment) neizdodas.
+
+Serveris glabā ielādētos payload procesa iekšējā LRU kešatmiņā ar līdz pat `cacheMaxSize` ierakstiem (pēc noklusējuma 1000), kas atkārtoti ielādē ierakstu pēc `cacheTtl`, ja tas ir iestatīts; [Veiktspējas pielāgošana](/lv/guide/performance) apraksta abus, un [`cacheStorage`](/lv/guide/performance#shared-cache-for-several-instances) pievieno instancēm koplietotu kešatmiņu. Nepievienojiet papildus Nitro `cache` maršruta noteikumu uz `/_locales/**`: tas izmanto pilnu URL kā atslēgu, ieskaitot query, un glabā trešo kopiju.
+
+## Lietotnes baseURL un payload resursdatori {#app-baseurl-and-payload-hosts}
+
+**`app.baseURL`** neprasa neko vairāk. Ar `app.baseURL: '/shop/'` pārlūks ielādē `/shop/_locales/...`; kopija paliek `.output/public/_locales/`, ko Nitro apkalpo zem bāzes (statiskam resursdatoram izvade jāpievieno pie `/shop/`). Lokaļu prefiksi un [izslēgtie ceļi](/lv/guide/excluding-static-files) tiek salīdzināti bez bāzes.
+
+**`app.cdnURL`** pārvieto arī payload, ja tie ir faili mapē `public/`: pārlūks ielādē un iepriekš ielādē `<cdnURL>/_locales/...`.
+
+- CDN ir jāglabā `_locales/` blakus `_nuxt/`, šajā ceļā.
+- Tam jāatļauj jūsu vietnes izcelsme (CORS), jo fails pienāk ar `fetch`.
+- Vārdnīca, uz kuru atbild tikai servera maršruts (`source` režīms, nav publiskās kopijas), paliek lietotnes izcelsmē.
+
+Izpildlaika `NUXT_APP_BASE_URL` uz `cloudflare-module` prasa Node saderību (`nodejs_compat`). Ja `nitro.cloudflare.nodeCompat` ir izslēgts, uz ko Nitro pārslēdzas arī ar vecu datumu bez karoga, tas neredz mainīgo un apkalpo `/`, ieskaitot tīru Nuxt, kamēr lokales novirzīšana joprojām ved uz bāzi. Tur iestatiet `app.baseURL` būvēšanas laikā.
+
+Lai apkalpotu payload no citas izcelsmes, norādiet uz to klientu un serveri un izslēdziet lokālās izvades:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    apiBaseClientHost: 'https://cdn.example.com',
+    apiBaseServerHost: 'https://cdn.example.com',
+    translationPayloads: {
+      serverHandler: false,
+      publicAssets: false,
+      serverAssets: false,
+    },
+  },
+})
+```
+
+- Node vidē `serverAssets` raksta to pašu kopiju servera paša nolasīšanai, un šis fails atbild uz `/_locales`: arī tam jābūt izslēgtam, pat ja saglabājat servera maršrutu pārlūkam, ko tas nekad nesasniegtu.
+- Resursdatoram jāapkalpo tā pati `<apiBaseUrl>/<page>/<locale>/data.json` struktūra.
+- Būvēšana brīdina, ja visas lokālās izvades ir izslēgtas un resursdators nav norādīts.
+
+Tās pašas vērtības var nākt no `NUXT_I18N_APP_BASE_URL`, `NUXT_I18N_APP_BASE_CLIENT_HOST` un `NUXT_I18N_APP_BASE_SERVER_HOST` būvēšanas laikā. `NUXT_I18N_APP_BASE_SERVER_HOST` darbojas arī izpildlaikā un ir noteicošs pār būvēšanas vērtību. Sīkāk skatiet [`apiBaseServerHost`](/lv/api/module-options#apibaseserverhost).
+
+## Platformas {#platforms}
+
+Tikai tas, kas vajadzīgs modulim vai tā izvadei. Konti, reģioni un CLI pieteikšanās ir aprakstīti platformas dokumentācijā.
+
+### Cloudflare Workers {#cloudflare-workers}
+
+Preset `cloudflare_module`. `wrangler deploy` otrreiz sapako Nitro izvadi ar esbuild, un pēc tam neapstrādāts `defineAsyncComponent(() => import('./X.vue'))` serverī tiek renderēts tukšs. Nuxt noklusējuma kļūdas lapa ir tieši tāda, tāpēc 404 atbildei ir tukšs saturs, un pārlūks reģistrē hidratācijas neatbilstību. Pēc tam klients renderē lapu, un statuss paliek 404, bet bez JavaScript lapa ir tukša. Tas ir [nuxt#33270](https://github.com/nuxt/nuxt/issues/33270): tīrs Nuxt bez moduļa dara to pašu. Lapu maršruti netiek ietekmēti.
+
+Izslēdziet otro sapakošanu:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: {
+    preset: 'cloudflare_module',
+    cloudflare: {
+      deployConfig: true, // `wrangler` below applies only with it
+      wrangler: {
+        no_bundle: true,
+        find_additional_modules: true,
+        rules: [{ type: 'ESModule', globs: ['**/*.mjs'] }],
+      },
+    },
+  },
+})
+```
+
+```bash
+npx nuxi build
+cd .output/server && npx wrangler deploy -c wrangler.json
+```
+
+Iestatiet `compatibilityDate` uz `2024-09-19` vai vēlāku: vecāks datums izvēlas mantoto preset, kas neraksta `wrangler.json` un nedod kļūdu. Tad 404 tiek renderēts, un augšupielāde kļūst mazāka: 190 KiB gzip pret 246 KiB testa lietotnē. Jūsu pašu `error.vue` ir otrs risinājums, bet tas attiecas tikai uz kļūdas lapu.
+
+Modulim pašam `nodejs_compat` nav vajadzīgs. Limitus skatiet sadaļā [Pakotnes limiti](#bundle-limits-on-edge).
+
+### Cloudflare Pages {#cloudflare-pages}
+
+Izmantojiet `cloudflare-pages-static` preset. `nuxi generate --preset cloudflare-pages` ir servera būve bez `index.html`.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: {
+    preset: 'cloudflare-pages-static',
+    prerender: { autoSubfolderIndex: false },
+  },
+})
+```
+
+```bash
+npx nuxi generate
+npx wrangler pages project create my-site --production-branch main --force
+npx wrangler pages deploy dist --project-name my-site --branch main
+```
+
+- **Izvade.** Preset raksta uz `dist/`, nevis `.output/public`.
+- **`--force`.** Bez tā jauns wrangler (šeit 4.156) nodod `pages project create` Workers. Ar to jūs iegūstat klasisku Pages projektu. Tas vajadzīgs vienreiz, izveidei.
+- **`autoSubfolderIndex: false`.** Pages atbild uz `/de` ar 308 uz `/de/`, kamēr canonical un `hreflang` norāda `/de`, tāpēc tie norāda uz novirzīšanu. Ar šo opciju fails ir `de.html`, un novirzīšanas vairs nav.
+- **`NUXT_E1005` konsolē pie 404** ir parasts 404. Nuxt to tā ziņo, jo `404.html` startē klientā, pirms lietotne ir piemontēta. Lapa darbojas, un tīrs Nuxt izdrukā to pašu rindu.
+
+### Vercel un Vercel Edge {#vercel-and-vercel-edge}
+
+Preset `vercel` un `vercel_edge`, bez izmaiņām lietotnē. Tagi darbojas bez `metaBaseUrl`, izmantojot platformas pārsūtītās galvenes. Vercel Edge ir mazs pakotnes limits: skatiet [Pakotnes limiti](#bundle-limits-on-edge). Koplietotai kešatmiņai izmantojiet [`upstash` draiveri](/lv/guide/performance#upstash-on-vercel-and-vercel-edge).
+
+### Netlify {#netlify}
+
+Preset `netlify` un `netlify_edge`.
+
+```bash
+npx nuxi build --preset netlify
+npx netlify deploy --prod --no-build --dir dist --functions .netlify/functions-internal
+```
+
+- **Atstājiet `nitro.output` neiestatītu.** Preset pats raksta `.netlify/` un `dist/`.
+- **Saglabājiet `package.json` mapē, no kuras izvietojat.** Bez tā CLI skatās vecākmapē un neizvieto nevienu funkciju, nedodot kļūdu.
+- **Netlify Edge** tiek izvietots tikai ar `--dir dist`. Skatiet [Datumi Edge izpildlaikos](#dates-on-edge-runtimes).
+
+### Cloud Run {#cloud-run}
+
+Izmantojiet noklusējuma `node-server` būvi. `gcloud run deploy --source` izvades mapē vajadzīgs `Dockerfile`, ja docker nedarbojas lokāli:
+
+```dockerfile
+# .output/Dockerfile
+FROM node:22-slim
+WORKDIR /app
+COPY . .
+ENV NODE_ENV=production
+CMD ["node", "server/index.mjs"]
+```
+
+```bash
+cd .output && gcloud run deploy my-app --source .
+```
+
+Tagi darbojas bez `metaBaseUrl`, izmantojot platformas pārsūtītās galvenes.
+
+### Deno Deploy {#deno-deploy}
+
+Preset `deno_deploy`. `deno deploy` aizstāj `deployctl`. Izveidojiet dinamisku lietotni ar ieejas punktu `server/index.ts` un izvietojiet no izvades mapes.
+
+### Firebase {#firebase}
+
+| Produkts | Iestatīšana |
+| --- | --- |
+| App Hosting | Palaiž Node būvi: izmantojiet noklusējuma preset vai `firebase-app-hosting` un Node 20+ |
+| Cloud Functions | `firebase` preset iegulst payload, un tam vajadzīgs `firebase-functions` |
+| Hosting (statisks) | Apkalpo `.output/public` kā failus, tāpēc `/_locales/**` saņem Hosting galvenes |
+
+Statiskajā Hosting, ja JSON tiek atgriezts ar nepareizu `Content-Type` vai kešošanu, pievienojiet `headers` ierakstu priekš `/_locales/**` failā `firebase.json`. Nuxt `routeRules` galvenes neattiecas uz failiem, ko Hosting apkalpo pats; payload maršruts iestata savu `Content-Type` un `Cache-Control` atbildēm, kas sasniedz serveri.
+
+### AWS Amplify {#aws-amplify}
+
+`aws-amplify` glabā statiskos failus blakus savai skaitļošanas mapei, nevis blakus serverim, tāpēc payload tiek iegulti tāpat kā funkciju platformā.
+
+### Vairākas vienas būves instances {#several-instances-of-one-build}
+
+Viens artefakts var darboties ar atšķirīgu noklusējuma vai atspējotu lokali katrā instancē, izmantojot vides mainīgos: skatiet [Izpildlaika pārrakstījumi](/lv/guide/runtime-overrides). Lokalei, kas atspējota tikai izpildlaikā, joprojām ir statiskie faili mapē `public/`; atspējojiet to būvēšanas laikā, ja tiem nedrīkst būt piekļuves.
+
+Instances, kas ielādē vārdnīcas no attāla resursdatora, var tās koplietot Redis, Upstash, Cloudflare KV vai D1, Deno KV vai citā Nitro krātuvē, tāpēc aizmugursistēma saņem vienu pieprasījumu, nevis vienu katrai instancei. Tā ir kešatmiņa, nevis tulkojumu avots: skatiet [Koplietota kešatmiņa vairākām instancēm](/lv/guide/performance#shared-cache-for-several-instances).
+
+## Aiz starpniekservera vai CDN {#behind-a-proxy-or-cdn}
+
+Lietotnei no pieprasījuma jāuzzina publiskais resursdators un shēma.
+
+| Starpniekserveris sūta                       | Parasta būve                                     | Būve ar `baseUrl` lokalēm                                                         |
+| -------------------------------------------- | ------------------------------------------------ | --------------------------------------------------------------------------------- |
+| Īsto `Host`                                  | Nekas nav jāiestata                              | Nekas nav jāiestata                                                               |
+| Izcelsmes `Host`, plus `X-Forwarded-Host`    | Nekas nav jāiestata                              | [`trustForwardedHost: true`](/lv/api/module-options#trustforwardedhost)           |
+| Neviena                                      | [`metaBaseUrl`](/lv/api/module-options#metabaseurl) | Neviens iestatījums nelīdz: katrs pieprasījums izskatās kā izcelsmes resursdators, tāpēc mainiet starpniekserveri |
+
+- **Maršruti ar `swr` vai `cache`.** Tabula tur nav spēkā: skatiet [HTML kešošana](#caching-html). Iestatiet `metaBaseUrl` vai `site.url`.
+- **`X-Forwarded-Proto`.** Sūtiet to, citādi canonical URL aiz HTTPS starpniekservera būs `http://`. `metaBaseUrl` to arī novērš.
+- **Domēnu būvē** domēns izvēlas tagu bāzes URL. `metaTrustForwardedHost` tur neizvēlas domēnu, to dara tikai `trustForwardedHost`.
+- **Novirzīšanas ir relatīvas, un lokales sīkfailam nav `Domain`,** tāpēc abi paliek publiskajā resursdatorā.
+
+<Warning>
+
+**Fiksējiet `metaBaseUrl`, ja izcelsme paliek sasniedzama** — Parastā būvē bez `metaBaseUrl` vai `site.url` canonical, `hreflang` un `og:url` ņem resursdatoru no pieprasījuma. [`metaTrustForwardedHost`](/lv/api/module-options#metatrustforwardedhost) pēc noklusējuma ir ieslēgts, tāpēc tiešs pieprasījums ar `X-Forwarded-Host: evil.example` saņem `https://evil.example` šajos tagos, un kešatmiņa priekšā izplata šo lapu. Platformas resursdators, piemēram, `*.workers.dev`, ir tieši šāda izcelsme. `metaBaseUrl` to novērš arī `Host` gadījumā. Zināms domēnu būves resursdators saglabā savu `baseUrl`. Ar `trustForwardedHost: true` tiešs klients var izvēlēties cita domēna lapu, tāpēc ieslēdziet to tikai aiz starpniekservera, kas pārraksta galveni.
+
+</Warning>
+
+## HTML kešošana {#caching-html}
+
+Lielāko daļu URL ir droši kešot, jo tie nosauc savu lokali. Šie ir atkarīgi no apmeklētāja:
+
+| Iestatījums                    | URL                                               |
+| ------------------------------ | ------------------------------------------------- |
+| Noklusējums, `autoDetectPath: '/'` | `/`                                           |
+| `prefix`                       | `/` un katrs URL bez prefiksa, kas tikai novirza  |
+| `autoDetectPath: '*'`          | Katrs URL                                         |
+| `no_prefix`                    | Katra lapa                                        |
+
+- **`Vary`.** Šīs atbildes satur `Vary` ar `Cookie`, ja ir iestatīts [`localeCookie`](/lv/api/module-options#localecookie), un `Accept-Language`, ja `autoDetectLanguage` ir ieslēgts. Kešatmiņa, kas to ievēro, tur atbildes atsevišķi.
+- **Kešatmiņai, kas ignorē `Vary`,** piemēram, "kešot visu pēc URL", šie URL jāizlaiž. Citādi viena apmeklētāja `302 /de` sasniedz nākamo apmeklētāju, un saglabāta noklusējuma lapa atceļ novirzīšanu visiem. Uz `/` varat arī iestatīt `redirects: false`. Nitro maršrutu kešatmiņa par atslēgu izmanto ceļu un savu `varies` sarakstu, tāpēc arī turiet `/` ārpus `swr` un `cache` noteikumiem.
+- **`Set-Cookie`.** Ja `localeCookie` ir iestatīts, katra servera renderēta lapa zem prefiksa satur `Set-Cookie`, un korekts CDN to nesaglabās. Kešotam HTML atstājiet `localeCookie` izslēgtu vai noņemiet galveni edge līmenī.
+- **`swr` un `cache` noteikumiem vajadzīgs `metaBaseUrl` vai `site.url`.** Nitro renderē šādu maršrutu tikai ar galvenēm no `cache.varies`, tāpēc `Host`, `X-Forwarded-Host` un `X-Forwarded-Proto` pazūd, un pieprasījuma URL ir `http://localhost`. Bez fiksētas izcelsmes canonical, `hreflang` un `og:url` šajos maršrutos norāda uz `http://localhost` katrā platformā. Tīra Nuxt `useRequestURL()` tur nolasa to pašu. Ja resursdators tiktu ņemts no apmeklētāja, viena apmeklētāja `X-Forwarded-Host` nonāktu lapā, ko saņem visi apmeklētāji. Domēnu būve netiek ietekmēta: tās tagi izmanto lokaļu `baseUrl`.
+
+  Ja viena būve apkalpo vairākus resursdatorus un neviena izcelsme neder, ļaujiet noteikumam redzēt galvenes un glabājiet vienu kopiju katrai vērtībai: `'/blog/**': { swr: 60, cache: { varies: ['host', 'x-forwarded-host', 'x-forwarded-proto'] } }`. Katra atšķirīga vērtība ir jauns kešatmiņas ieraksts, tāpēc klients, kas sūta izdomātas galvenes, piepilda kešatmiņu: novietojiet izcelsmi aiz starpniekservera, kas tās iestata.
+- **`swr` un `cache` noteikumi domēnu būvē.** Modulis pievieno `host` katra šāda noteikuma `cache.varies`, un `x-forwarded-host` ar `trustForwardedHost`, lai viens domēns neapkalpotu citam savu lapu. Noteikums ar `cache: false` paliek, kā uzrakstīts. `isr` ir platformas kešatmiņa: pārbaudiet, vai tā izmanto resursdatoru atslēgā. Ja resursdators ir atslēgā, klients, kas sūta izdomātus resursdatorus, pievieno kešatmiņas ierakstus.
+
+Par payload failiem skatiet [Kešatmiņas galvenes un dateBuild](#cache-headers-and-datebuild).
+
+## Saistītie {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Veiktspējas pielāgošana" icon="book-open" href="/lv/guide/performance">
+
+</Card>
+
+<Card title="Izpildlaika pārrakstījumi" icon="book-open" href="/lv/guide/runtime-overrides">
+
+</Card>
+
+<Card title="translationPayloads atsauce" icon="brackets-curly" href="/lv/api/module-options#translationpayloads">
+
+</Card>
+
+<Card title="Slāņi un domēni" icon="book-open" href="/lv/guide/layers">
+
+</Card>
+
+<Card title="SEO" icon="book-open" href="/lv/guide/seo">
+
+</Card>
+
+</CardGroup>

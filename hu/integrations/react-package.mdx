@@ -1,0 +1,291 @@
+---
+title: "React és Preact"
+description: "Fordítások, locale-váltás és router-integráció React- és Preact-alkalmazásokhoz az @i18n-micro/react és az @i18n-micro/preact segítségével."
+---
+
+Az `@i18n-micro/react` és az `@i18n-micro/preact` a keretrendszer-független [runtime](/hu/integrations/runtime-package) csomagot egy providerbe, egy `useI18n()` hookba és négy komponensbe csomagolja. Olyan React- vagy Preact-alkalmazásban használd őket, amely nem Nuxttal készül. Mindkét csomag API-ja azonos; a [Preact](#preact) blokk sorolja fel a néhány eltérést, a közös modell pedig a [Keretrendszerek](/hu/integrations/overview) oldalon található.
+
+## Telepítés {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add @i18n-micro/react
+```
+
+```bash npm
+npm install @i18n-micro/react
+```
+
+```bash yarn
+yarn add @i18n-micro/react
+```
+
+</CodeGroup>
+
+Peer-függőségek: `react` `^18.0.0 || ^19.0.0`; `react-dom` (opcionális, rendereléshez); `react-router-dom` `^6.0.0 || ^7.0.0` (opcionális, csak az `@i18n-micro/react/router` számára). Tesztelve React 19.3 és 18.3, valamint React Router 7.18 és 6.30 verzión.
+
+## Beállítás {#setup}
+
+```tsx
+// src/main.tsx
+import { createRoot } from 'react-dom/client'
+import { createI18n, I18nProvider } from '@i18n-micro/react'
+import App from './App'
+import en from './locales/en.json'
+
+const locales = [
+  { code: 'en', iso: 'en-US', displayName: 'English' },
+  { code: 'de', iso: 'de-DE', displayName: 'Deutsch' },
+]
+
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', messages: { en } })
+
+createRoot(document.getElementById('root')!).render(
+  <I18nProvider i18n={i18n} locales={locales} defaultLocale="en">
+    <App />
+  </I18nProvider>,
+)
+```
+
+<Warning>
+
+A példányt egyszer hozd létre, modulszinten vagy egy `useState` inicializálóban, soha ne egy komponens törzsében.
+
+</Warning>
+
+Az `<I18nProvider>` az `i18n`, `locales`, `defaultLocale` és `routingStrategy` propokat fogadja:
+
+- Egy elhagyott prop megtartja egy külső provider értékét, a példányt is beleértve.
+- Ha egyáltalán nincs példány, a mellettük megadott `createI18n` opciókból készít egyet, így a propok egyszerű adatok maradnak: `<I18nProvider locale="de" messages={messages}>`.
+- Egy új `locale` prop új példányt hoz létre az adott renderelés `messages` értékével. Egy ilyen példány a komponensben él: ha felette valami felfüggesztődik (suspend) a mount során, a React eldobja, mindazzal együtt, ami hozzá lett adva.
+
+Az összes `createI18n` opció, a `routeMessages` opciót is beleértve, [a példány](/hu/integrations/overview#the-instance) részben található.
+
+## Fordítás {#translate}
+
+```tsx
+import { useI18n } from '@i18n-micro/react'
+
+export function Greeting() {
+  const { t, tc, tn } = useI18n()
+  return (
+    <>
+      <h1>{t('greeting', { name: 'Ada' })}</h1> {/* Hello, Ada! */}
+      <p>{tc('apples', 3)}</p> {/* 3 apples */}
+      <p>{tn(1234.5)}</p>
+    </>
+  )
+}
+```
+
+A `useI18n()` visszatérési értéke:
+
+| Csoport | Tagok |
+| --- | --- |
+| Fordítás | `t`, `ts`, `tc`, `tn`, `td`, `tdr`, `has` |
+| Locale és útvonal | `locale`, `fallbackLocale`, `currentRoute`, `setLocale`, `setRoute`, `getRoute`, `getLocales`, `defaultLocale()`, `getLocaleName` |
+| Útválasztás | `switchLocale`, `localePath`, `localeRoute` |
+| Szótárak | `addTranslations`, `addRouteTranslations`, `clearCache` |
+
+- A komponens újrarenderelődik, amikor a locale, az útvonal vagy egy olvasható szótár megváltozik, valamint amikor a provider új `locales` vagy `routingStrategy` objektumot kap. Egy olyan locale szótára, amely sem aktív, sem tartalék, nem okoz renderelést.
+- A `t` és a többi fordítási metódus csak a tárolóval együtt változik, így biztonságosan használhatók a `memo` és az effectek függőségeiben.
+
+A `useT` egyetlen karakterláncot ad értékként. A komponens csak akkor renderelődik, ha ez a karakterlánc megváltozik, bármi történjék is a provider többi propjával; az `<I18nT>` sem függ tőlük:
+
+```tsx
+const title = useT('page.title')
+```
+
+Bármikor tölthetsz be további szótárakat:
+
+```tsx
+const { addTranslations, addRouteTranslations, setRoute } = useI18n()
+
+useEffect(() => {
+  import('./locales/de.json').then((m) => addTranslations('de', m.default))
+  addRouteTranslations('en', 'about', { title: 'About us' })
+  setRoute('about') // t('title') now reads the 'about' dictionary first
+}, [])
+```
+
+Magának a példánynak is van `loadFromUrl(url, { locale, routeName })` metódusa JSON `fetch` útján történő betöltéséhez.
+
+## Locale váltása {#switch-locale}
+
+```tsx
+const { setLocale, switchLocale } = useI18n()
+
+setLocale('de') // only the locale
+switchLocale('de') // the locale, then the adapter's push to the localized current path
+```
+
+A váltás nem tölt be semmit; előbb add hozzá a locale szótárát. A tárolóba írás a React számára szinkron, még `startTransition` belsejében is, így egy hiányzó szótár miatt felfüggesztődő komponens a fallbackjét mutatná. A `useLocaleSwitch` előbb betölt, és megtartja a régi felületet, amíg a szótár meg nem érkezik:
+
+```tsx
+const [switchTo, pending] = useLocaleSwitch((locale) => i18n.loadFromUrl(`/locales/${locale}.json`, { locale }))
+
+<button disabled={pending} onClick={() => switchTo('de')}>Deutsch</button>
+```
+
+Az utolsó hívás nyer. A sikertelen betöltés elutasítással (reject) zárul, és a locale változatlan marad.
+
+Az `<I18nGroup>` egy prefixelt `t` függvényt ad át egy render-prop gyermeknek. Az `<I18nT>` és a benne lévő `t()` nincs prefixelve:
+
+```tsx
+<I18nGroup prefix="profile">{({ t }) => <h2>{t('title')}</h2> /* profile.title */}</I18nGroup>
+```
+
+## Útválasztás {#routing}
+
+A React Router adapter egy alútvonalon található, így a fő belépési pont soha nem importálja a `react-router-dom` csomagot. Szüksége van a `useLocation()` és a `useNavigate()` hookra, ezért a routeren belüli komponensben hozd létre:
+
+```tsx
+// src/App.tsx
+import { useMemo } from 'react'
+import { BrowserRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
+import { I18nLink, I18nProvider, I18nSwitcher } from '@i18n-micro/react'
+import { createReactRouterAdapter } from '@i18n-micro/react/router'
+import { i18n, locales } from './i18n'
+import { About, Home } from './pages'
+
+function Localized() {
+  const location = useLocation()
+  const navigate = useNavigate()
+  // memoized: a new object on every render re-renders every `useI18n()` consumer
+  const routingStrategy = useMemo(() => createReactRouterAdapter(locales, 'en', location, navigate), [location, navigate])
+  return (
+    <I18nProvider i18n={i18n} locales={locales} defaultLocale="en" routingStrategy={routingStrategy}>
+      <I18nLink to="/about">About</I18nLink>
+      <I18nSwitcher />
+      <Routes>
+        <Route path="/:locale?" element={<Home />} />
+        <Route path="/:locale?/about" element={<About />} />
+      </Routes>
+    </I18nProvider>
+  )
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <Localized />
+    </BrowserRouter>
+  )
+}
+```
+
+Az adapter az alapértelmezett kivételével minden locale-t prefixel (`/about`, `/de/about`), és az `<I18nLink>` komponenst a React Router `<Link>` elemeként rendereli. A locale-t az URL-ből magad állítsd be (például egy effectben a `useParams().locale` értékből). Bármely más routerhez írj adaptert `getCurrentPath`, `push` és `replace` függvénnyel (mindhárom kötelező) — lásd: [Router-adapter](/hu/integrations/overview#router-adapter).
+
+## SSR {#ssr}
+
+A `renderToString` működik: a `useI18n()` rendelkezik szerveroldali pillanatképpel. Kérésenként hozz létre egy példányt, és renderelés előtt add hozzá a szótárait, hogy a különböző locale-ú kérések ne osszanak meg állapotot, vagy adj át egyszerű adatokat a providernek.
+
+### Hidratálás {#hydration}
+
+A számok, a többes számú alakok és a szöveg változatlanul hidratálódnak. A dátum az időzónától, a relatív dátum pedig az órától függ: állítsd be a `timeZone` értéket a szerveren és a böngészőben, a `tdr` esetén pedig a `now` segítségével add át a böngészőnek a szerver idejét. A `date` vagy `relativeDate` propot használó `<I18nT>` beállítja a `suppressHydrationWarning` attribútumot, így egy eltérés nem töri meg a hidratálást, de a szerver szövege megmarad, amíg a szöveg meg nem változik. Ez csak egy szintre hat: azok a `children` elemek, amelyek egy elembe csomagolják a fordítást, eltérés esetén továbbra is hibát adnak, ezért ezeknek ugyanazt a `timeZone` értéket add meg.
+
+### Server Components {#server-components}
+
+A csomag a kliensoldali kódját `'use client'` direktívával jelöli. Az `@i18n-micro/react/server` tartalmazza a `createI18n` függvényt és egy hookok nélküli `I18nT` komponenst, amely propként kapja a példányt, így a szöveg kimarad a kliensoldali csomagból. A `react-server` feltétel alatt, mint a Next.js app routerben, a fő belépési pont is erre oldódik fel, de a TypeScript ezt alapértelmezés szerint nem tudja: a `/server` útvonalról importálj. Az `@i18n-micro/react/client` mindig a kliensoldali belépési pontot adja.
+
+```tsx
+// app/[locale]/layout.tsx: a server component
+import { cache } from 'react'
+import { createI18n, I18nT } from '@i18n-micro/react/server'
+import { I18nProvider } from '@i18n-micro/react/client'
+import { loadMessages } from './messages'
+
+const getI18n = cache(async (locale: string) => createI18n({ locale, messages: await loadMessages(locale) }))
+
+export default async function Layout({ params, children }) {
+  const { locale } = await params
+  const i18n = await getI18n(locale)
+  return (
+    <I18nProvider locale={locale} messages={{ [locale]: i18n.resolveTranslations() }}>
+      <h1>
+        <I18nT i18n={i18n} keypath="title" />
+      </h1>
+      {children}
+    </I18nProvider>
+  )
+}
+```
+
+A `react-server-dom-webpack` segítségével renderelve; magán egy Next.js-alkalmazáson ez még nem lett kipróbálva.
+
+## API {#api}
+
+| Export | Belépési pont |
+| --- | --- |
+| `createI18n`, `ReactI18n`, `I18nProvider`, `useI18n`, `useT`, `useLocaleSwitch` | `@i18n-micro/react` |
+| `I18nT`, `I18nLink`, `I18nSwitcher`, `I18nGroup` | `@i18n-micro/react` |
+| `I18nContext`, `I18nConfigContext`, `useI18nContext`, `useI18nLocales`, `useI18nDefaultLocale`, `useI18nRouter` | `@i18n-micro/react` |
+| `defaultPlural`, `FormatService`, `interpolate` | `@i18n-micro/react` |
+| Típusok: `I18nRoutingStrategy`, `ReactI18nOptions`, `I18nProviderProps`, `UseI18nReturn`, komponens-propok, `TranslationKey`, `Locale`, `Translations`, `PluralFunc` | `@i18n-micro/react` |
+| `createReactRouterAdapter` | `@i18n-micro/react/router` |
+| `createI18n`, `ReactI18n`, `I18nT` (`i18n` propot fogad) | `@i18n-micro/react/server` |
+
+Teljes szignatúrák: [React-referencia](/hu/api/packages/react).
+
+## Preact {#preact}
+
+Az `@i18n-micro/preact` ugyanabból a forráskódból készül, magára a Preactra építve, `preact/compat` nélkül: ugyanaz a példány, provider, hookok és komponensek. Eltérések:
+
+| | React | Preact |
+| --- | --- | --- |
+| Peer-függőség | `react` (+ opcionálisan `react-router-dom`) | `preact` `^10.0.0 \|\| ^11.0.0`, tesztelve 10.29 és 11.1 verzión |
+| Példányosztály | `ReactI18n` | `PreactI18n` |
+| Router-adapter | `createReactRouterAdapter` a `/router` útvonalról | `createBrowserHistoryAdapter(locales, defaultLocale, ssrUrl?)` a `/router` útvonalról |
+| Újrarenderelés | `useSyncExternalStore` | layout-effect feliratkozás, amely újraellenőrzi a tárolót |
+| Server Components | `/server`, `/client` | nincs |
+
+A `createBrowserHistoryAdapter` bármely History API alapú routerrel működik (wouter, preact-router): a `push` és a `replace` a `history.pushState` / `replaceState` függvényt hívja, és `popstate` eseményt küld, az `<I18nLink>` pedig egy egyszerű `<a>` elemet renderel, amely a `push` segítségével navigál. A szervernek nincs címsora: add át a kérés URL-jét `ssrUrl` értékként, különben a linkek és a nyelvváltó úgy renderelődnek, mint a `/` útvonalon. Böngészőben a címsor nyer.
+
+```tsx
+// src/main.tsx
+import { render } from 'preact'
+import { createI18n, I18nProvider } from '@i18n-micro/preact'
+import { createBrowserHistoryAdapter } from '@i18n-micro/preact/router'
+import { App } from './App'
+import en from './locales/en.json'
+
+const locales = [
+  { code: 'en', iso: 'en-US', displayName: 'English' },
+  { code: 'de', iso: 'de-DE', displayName: 'Deutsch' },
+]
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', messages: { en } })
+
+render(
+  <I18nProvider i18n={i18n} locales={locales} defaultLocale="en" routingStrategy={createBrowserHistoryAdapter(locales, 'en')}>
+    <App />
+  </I18nProvider>,
+  document.getElementById('app')!,
+)
+```
+
+Teljes szignatúrák: [Preact-referencia](/hu/api/packages/preact).
+
+## Kapcsolódó {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Keretrendszerek" icon="book-open" href="/hu/integrations/overview">
+
+Példányopciók, router-adapter, komponens-propok
+
+</Card>
+
+<Card title="Runtime" icon="book-open" href="/hu/integrations/runtime-package">
+
+A példány, amelyre ezek a csomagok épülnek
+
+</Card>
+
+<Card title="Típusgenerátor" icon="book-open" href="/hu/integrations/types-generator">
+
+Automatikus kiegészítés a kulcsokhoz
+
+</Card>
+
+</CardGroup>

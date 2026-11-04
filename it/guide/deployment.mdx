@@ -1,0 +1,440 @@
+---
+title: "Deployment"
+description: "Distribuisci su un server Node, serverless o Edge, o come sito statico — dove finiscono i payload di traduzione, di cosa ha bisogno ogni piattaforma, proxy e caching."
+---
+
+Il modulo funziona con qualsiasi preset Nitro senza configurazione aggiuntiva: sceglie dove collocare i file di traduzione in base al preset per cui esegui la build. Le impostazioni predefinite vanno bene per la maggior parte delle app; leggi la sezione relativa alla tua piattaforma. Questa pagina spiega:
+
+- cosa finisce in `.output/` e quali header ricevono i payload;
+- cosa cambiare per l'hosting statico, cataloghi di grandi dimensioni, un sottopercorso, un proxy o una CDN.
+
+<Note>
+
+Distribuito e verificato su host reali: Cloudflare Workers e Pages, Vercel e Vercel Edge, Netlify e Netlify Edge, Cloud Run e Deno Deploy, ciascuno con quanto elencato in [Piattaforme](#platforms). Gli altri preset sono stati compilati ed eseguiti in locale.
+
+</Note>
+
+## Come vengono distribuite le traduzioni {#how-translations-are-delivered}
+
+In fase di build il modulo trasforma `locales/` (con tutti i layer uniti) in **payload**: un file JSON per pagina e lingua. Due consumatori li leggono:
+
+- **L'SSR** carica il payload della pagina renderizzata nel processo — nessuna richiesta HTTP, e il dizionario non viene incorporato nell'HTML.
+- **Il browser** recupera `/_locales/<page>/<locale>/data.json?v=<dateBuild>` durante l'idratazione e la navigazione.
+
+`_locales` è [`apiBaseUrl`](/it/api/module-options#apibaseurl). La route del server integrata risponde a quell'URL; la copia statica in `public/` risponde senza un server.
+
+## Server Node {#node-server}
+
+```bash
+npx nuxi build
+node .output/server/index.mjs
+```
+
+Con `node-server` (il preset predefinito), `node-cluster`, `bun`, `deno-server` o qualsiasi altro preset che serve `public/` dal disco, con `public/` accanto alla cartella `server/`:
+
+- i payload vengono copiati in `.output/public/_locales/<page>/<locale>/data.json`;
+- l'SSR li legge da quella cartella con `fs` (nulla viene incluso nel bundle del server);
+- il browser li riceve come file statici, o dalla route del server.
+
+Distribuisci l'intera directory `.output/`. Il modulo richiede Node 20 o successivo, e Nuxt ha un proprio minimo: Nuxt 4.5 dichiara `^22.19.0 || ^24.11.0 || >=26.0.0`.
+
+Un processo sotto carico costante può occupare molta più memoria del suo heap attivo. Vedi [Memoria su un server Node](/it/guide/performance#memory-on-a-node-server) prima di impostare un limite per il container.
+
+Con un'altra struttura, il modulo incorpora i payload come descritto nella sezione successiva. Questo riguarda:
+
+- un `nitro.output.publicDir` personalizzato, che la build legge una sola volta;
+- `serveStatic: true` su un preset che conserva i file statici altrove.
+
+<Warning>
+
+Se una build legge `public/` e la cartella non raggiunge il server, come con `aws-lambda` e `serveStatic: true`, il server registra un errore e le pagine mostrano le chiavi grezze. Imposta `nitro.serveStatic: false` per incorporare i payload.
+
+</Warning>
+
+## Serverless ed Edge {#serverless-and-edge}
+
+Questi preset non possono leggere `public/` a runtime:
+
+- preset a funzioni che inviano `public/` a una CDN o non lo servono: `vercel`, `netlify`, `aws-lambda`, `aws-amplify`, `azure-swa`, `firebase`, `stormkit`, `zeabur`, `node-listener`;
+- preset Edge senza file system: `cloudflare-module`, `cloudflare-pages`, `vercel-edge`, `netlify-edge`, `deno_deploy`;
+- `serveStatic: 'inline'`, come `winterjs`.
+
+In questi casi il modulo incorpora i payload nel bundle del server come asset del server Nitro (`assets:i18n`) e scrive comunque la copia pubblica per il browser.
+
+Incorporare l'intera matrice pagine × lingue rende il bundle grande. Oltre il limite di una piattaforma Edge la build emette un avviso e la nomina, vedi [Limiti del bundle](#bundle-limits-on-edge). Per cataloghi grandi passa alla modalità `source`, che incorpora i file sorgente compatti e unisce a runtime le traduzioni radice, di pagina e di fallback:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    translationPayloads: {
+      mode: 'source',
+    },
+  },
+})
+```
+
+In modalità `source` il browser recupera sempre i payload dalla route del server, che li unisce su richiesta (qualsiasi copia pubblica contiene l'albero sorgente compatto che solo il server legge). Ciò richiede un server in esecuzione, quindi non usare `source` per un sito puramente statico.
+
+### Limiti del bundle sull'Edge {#bundle-limits-on-edge}
+
+| Piattaforma        | Limite                                                                                 |
+| ------------------ | -------------------------------------------------------------------------------------- |
+| Cloudflare Workers | 64 MiB non compressi, su Free e Paid. Nessun limite sul compresso. Avvio di 1 s, 128 MB di memoria |
+| Vercel Edge        | 1 MB gzip su Hobby, 2 MB su Pro, 4 MB su Enterprise                                    |
+| Netlify Edge       | 20 MB compressi                                                                        |
+
+La build somma i dizionari che incorpora ed emette un avviso solo oltre il limite più basso della piattaforma. Conta solo i dizionari, quindi l'app si aggiunge in cima. Ad esempio, 120 pagine × 4 lingue con un file radice di 60 KB incorporano:
+
+| Modalità | Incorporato | Rientra |
+| --- | --- | --- |
+| `premerged` | 34.9 MiB | Cloudflare; non Vercel Edge né Netlify Edge |
+| `source` | 5.7 MiB | Comunque 3 MB gzip su Vercel Edge |
+
+Un catalogo di quelle dimensioni su Vercel Edge richiede un [host per i payload](#app-baseurl-and-payload-hosts).
+
+`source` paga un merge per pagina e lingua in ogni isolate, circa 1 ms in quell'esempio e 7 ms di CPU in uno a freddo. Cresce con la dimensione della catena di fallback: circa 43 ms per 4 MB di file della catena. Netlify Edge consente 50 ms di CPU per richiesta e il piano Free di Cloudflare 10 ms.
+
+### Date sui runtime Edge {#dates-on-edge-runtimes}
+
+`$td` usa l'`Intl` del runtime, e i suoi dati ICU possono differire da quelli del browser. Su Netlify Edge una data formattata può contenere U+202F (spazio stretto non separabile) dove Chrome ha uno spazio normale, quindi Vue registra un mismatch di idratazione e il testo si corregge durante l'idratazione. Nuxt semplice con `Intl` semplice fa lo stesso lì; Deno Deploy no.
+
+<Tip>
+
+`<i18n-t>` con `date` o `relativeDate` consente già il mismatch. Per `$td` in un template, aggiungi `data-allow-mismatch="text"` all'elemento.
+
+</Tip>
+
+## Sito statico (nuxi generate) {#static-site-(nuxi-generate)}
+
+```bash
+npx nuxi generate
+```
+
+`nuxi build --preset <static preset>` fa lo stesso.
+
+- La modalità predefinita `premerged` scrive ogni payload in `.output/public/_locales/`, così qualsiasi host statico può servirli.
+- Le pagine vengono prerenderizzate per ogni lingua: con `prefix` il modulo predispone ogni radice localizzata (`/en`, `/de`), e `/` viene mantenuto come stub di reindirizzamento.
+- Lascia disattivato [`prerenderRoutes`](/it/api/module-options#translationpayloads): la copia pubblica contiene già i file dei payload.
+- Con la modalità `source` o `publicAssets: false` non c'è nulla da leggere per il browser, e la build emette un avviso.
+
+<Note>
+
+Non c'è un server che legga un cookie o `Accept-Language`, quindi una lingua salvata non reindirizza `/` al primo caricamento. Con `no_prefix` l'HTML contiene la lingua predefinita, e un cookie salvato non viene applicato al caricamento: `$switchLocale` funziona comunque nella pagina aperta.
+
+</Note>
+
+Per Cloudflare Pages vedi [Cloudflare Pages](#cloudflare-pages).
+
+Per una build con [domini per lingua](/it/guide/layers#multiple-domains), esegui generate una volta per dominio, con `NUXT_I18N_DOMAIN` come host dell'esecuzione. Ogni albero contiene quindi le pagine e i payload di quel dominio. Nitro non ha una variabile per la cartella di output, quindi leggine una tua dalla configurazione:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: { output: { publicDir: process.env.PUBLIC_DIR } },
+})
+```
+
+```bash
+NUXT_I18N_DOMAIN=example.de PUBLIC_DIR=sites/example.de npx nuxi generate
+NUXT_I18N_DOMAIN=example.com PUBLIC_DIR=sites/example.com npx nuxi generate
+```
+
+- Mantieni le cartelle fuori da `.output`: ogni esecuzione la svuota.
+- I link assoluti agli altri domini non vengono scansionati.
+- Senza la variabile, una build con una lingua dotata di `baseUrl` emette un avviso e genera la configurazione della build, in cui quelle lingue sono link e non ricevono pagine.
+- Su un server Node la stessa variabile vincola il processo a un solo dominio, qualunque cosa dica `Host`.
+
+Un host statico applica i propri header a questi file; imposta il caching nella configurazione dell'host. La regola `/_locales/*` del modulo raggiunge comunque Cloudflare Pages tramite `_headers` e Vercel tramite `config.json`, come `public, max-age=60`. Per distribuire file affiancati `.gz` / `.br`, attiva `nitro.compressPublicAssets`: il modulo comprime la copia dei payload con le stesse impostazioni.
+
+## Header di cache e dateBuild {#cache-headers-and-datebuild}
+
+| Richiesta                                                                                | `Cache-Control`                                                                                                 |
+| ---------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Server Node o route, `?v=` uguale al `dateBuild` corrente, un dizionario non vuoto       | `private, max-age=<httpCacheDuration>, immutable`                                                               |
+| Server Node o route, senza `?v=`, con uno vecchio, o un dizionario vuoto                 | `public, max-age=0, must-revalidate`                                                                            |
+| La copia di `public/` di un host, qualsiasi `?v=`                                        | `public, max-age=60` ([`httpCacheControl`](/it/api/module-options#other)) |
+| Modalità `source`, `cacheTtl` o `apiBaseServerHost`: un dizionario può cambiare senza build | l'header `httpCacheControl`, sempre                                                                          |
+| Route del server, il dizionario non è stato letto                                        | `503`, `no-store`                                                                                               |
+| server di sviluppo                                                                       | nessuno                                                                                                         |
+
+Perché la tabella è così:
+
+- L'URL con il `v` corrente viene fissato come un asset con hash, e solo chi vede la query può dirlo: la route del server, e un server Node, che imposta l'header sui suoi file statici.
+- È `private`, così una CDN che ignora la query non può rispondere al `v` successivo con questa risposta.
+- I file statici di un host ricevono un header valido per tutto il percorso da una route rule `/_locales/**`, che non può vedere la query, quindi resta breve; un caricamento ripetuto comunque non si blocca su nulla.
+- Un `v` vecchio resta servibile, dato che l'HTML in cache lo cita.
+
+`httpCacheControl: false` mantiene ogni file statico su `max-age=0, must-revalidate`. [`httpCacheDuration`](/it/api/module-options#httpcacheduration) è predefinito a un anno; `0` non invia alcun header. `$clearCache()` riconvalida tutto ciò che carica successivamente.
+
+Safari richiede di nuovo un payload precaricato quando non può riutilizzare la risposta: con `no-cache` e un `ETag` la seconda richiesta è un `304`, senza né un header di cache né un validatore è un secondo download completo. Un `max-age` superiore a `0` produce una sola richiesta. Paga questo costo solo `httpCacheDuration: 0` su un host che non aggiunge alcun validatore.
+
+[`dateBuild`](/it/api/module-options#datebuild) è il valore di `?v=`. Per impostazione predefinita è un hash dei tuoi file di traduzione, quindi cambia solo quando cambiano le traduzioni, e i browser conservano i payload in cache tra i deploy che non li hanno toccati. Si sposta anche con la catena di fallback.
+
+- Impostalo tu stesso per fissare un valore.
+- Imposta `0` o `''` per eliminare del tutto `?v=`; i payload non saranno quindi mai `immutable`.
+
+<Tip>
+
+Dopo aver sostituito un dizionario sul posto su un server Node, riavvia con `NUXT_I18N_DATE_BUILD=<new value>`: nient'altro sposta `v` senza una nuova build.
+
+</Tip>
+
+### File radice e delta {#root-and-delta-files}
+
+`premerged` scrive una radice per lingua, `__root/<locale>/data.json`, e nel file di ogni pagina solo ciò che differisce da essa.
+
+- Il file di pagina indica la radice rispetto a cui è stato creato con una chiave `__i18n_root`.
+- Il browser li recupera entrambi, la pagina non mostra nulla finché non sono arrivati entrambi, e l'SSR li unisce una volta per chunk.
+- Un file senza indicazione è un dizionario completo e sta da solo: sviluppo, modalità `source`, la route del server e un host che contiene ancora file più vecchi rispondono tutti con uno di questi, senza alcuna impostazione.
+
+Quindi chiunque legga direttamente `_locales/*/data.json` legge un delta. Imposta `translationPayloads.rootDelta: false` per mantenere file completi.
+
+Una scheda aperta durante un deploy che richiede un nuovo delta vede che è stato creato rispetto a un'altra radice, e recupera quella radice prima di mostrarlo.
+
+### Quando un dizionario non può essere letto {#when-a-dictionary-cannot-be-read}
+
+Un recupero fallito da un host (qualsiasi cosa tranne un 404), un file illeggibile o corrotto, o un 200 che non è un oggetto JSON non raggiunge alcuna cache, e la richiesta successiva legge di nuovo:
+
+- il rendering di una pagina registra un avviso, mostra le chiavi grezze per quel dizionario e risponde `503` con `Cache-Control: no-store`, lo stesso in ogni header CDN (`CDN-Cache-Control`, `Cloudflare-CDN-Cache-Control`, `Netlify-CDN-Cache-Control`, `Vercel-CDN-Cache-Control`, `Surrogate-Control`, sopra quelli di qualsiasi route rule) e `Retry-After: 60`;
+- `/_locales/...` risponde `503` con `no-store`;
+- `useTranslationServerMiddleware` fornisce un `t` che risponde con la chiave o il valore predefinito.
+
+Cosa succede durante l'interruzione:
+
+- **Visitatori:** il corpo di quel 503 è la pagina stessa. Durante l'idratazione il browser legge di nuovo il dizionario, e il testo appare non appena l'host torna disponibile, con un unico errore in console di Vue su un mismatch di idratazione, dato che l'HTML del server conteneva le chiavi.
+- **Ai crawler** viene detto di tornare più tardi.
+- **Cache:** una route rule `swr` o `cache` non memorizza nulla con uno stato pari o superiore a 400, e una CDN riceve `no-store`, quindi nessuna cache conserva le chiavi grezze e la prima richiesta dopo il ripristino renderizza il testo reale.
+- **Le pagine già in cache** tramite una regola restano come sono: la riconvalida fallisce e non memorizza nulla. Su Vercel una riconvalida `isr` fallita mantiene l'ultima pagina allo stesso modo.
+
+Questo copre ogni chunk caricato da un rendering, incluso un chunk di pagina fallito con la sua radice disponibile, e un chunk unito più avanti nel rendering. Una pagina con un dizionario integro, un reindirizzamento e una pagina di errore mantengono il loro stato. Un'[isola di componente](/it/guide/server-side-translations) è l'eccezione: resta un 200, dato che un 503 la rimuoverebbe dalla pagina, quindi una pagina il cui dizionario viene caricato può essere conservata con le chiavi grezze di un'isola. Durante un'interruzione ogni richiesta raggiunge l'host, senza alcun timeout proprio del modulo oltre ai 60 secondi per gli header della risposta.
+
+Un 404 dall'host significa che non ha quel file, il che non è un errore. Il rendering di una pagina mostra il dizionario radice, come fa il browser, e `/_locales/...` risponde con lo stesso 404. Nessuna cache conserva nessuno dei due, quindi un file che compare viene letto alla richiesta successiva, al costo di una richiesta all'host per ogni rendering di tale pagina. Se manca anche il file radice il dizionario è vuoto, e un [prerender](/it/guide/upgrade#server,-build-and-deployment) fallisce.
+
+Il server conserva i payload caricati in una cache LRU in-process fino a `cacheMaxSize` voci (1000 per impostazione predefinita) che ricarica una voce dopo `cacheTtl` quando impostato; [Ottimizzazione delle performance](/it/guide/performance) copre entrambi, e [`cacheStorage`](/it/guide/performance#shared-cache-for-several-instances) aggiunge una cache condivisa tra le istanze. Non aggiungere sopra una route rule Nitro `cache` su `/_locales/**`: usa come chiave l'URL completo, query inclusa, e memorizza una terza copia.
+
+## baseURL dell'app e host dei payload {#app-baseurl-and-payload-hosts}
+
+**`app.baseURL`** non richiede nient'altro. Con `app.baseURL: '/shop/'` il browser recupera `/shop/_locales/...`; la copia resta in `.output/public/_locales/`, che Nitro serve sotto la base (un host statico deve montare l'output su `/shop/`). I prefissi di lingua e i [percorsi esclusi](/it/guide/excluding-static-files) vengono confrontati senza la base.
+
+**`app.cdnURL`** sposta anche i payload, quando sono file in `public/`: il browser recupera e precarica `<cdnURL>/_locales/...`.
+
+- La CDN deve contenere `_locales/` accanto a `_nuxt/`, in quel percorso.
+- Deve consentire l'origine del tuo sito (CORS), dato che il file arriva tramite `fetch`.
+- Un dizionario a cui risponde solo la route del server (modalità `source`, nessuna copia pubblica) resta sull'origine dell'app.
+
+Un `NUXT_APP_BASE_URL` a runtime su `cloudflare-module` richiede la compatibilità Node (`nodejs_compat`). Con `nitro.cloudflare.nodeCompat` disattivato, su cui Nitro ricade anche con una data vecchia e nessun flag, non vede la variabile e serve `/`, Nuxt semplice incluso, mentre un reindirizzamento di lingua va comunque alla base. Lì imposta `app.baseURL` in fase di build.
+
+Per servire i payload da un'altra origine, indirizza client e server verso di essa e disattiva gli output locali:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    apiBaseClientHost: 'https://cdn.example.com',
+    apiBaseServerHost: 'https://cdn.example.com',
+    translationPayloads: {
+      serverHandler: false,
+      publicAssets: false,
+      serverAssets: false,
+    },
+  },
+})
+```
+
+- Su Node, `serverAssets` scrive la stessa copia per le letture del server stesso, e quel file risponde a `/_locales`: deve essere disattivato anch'esso, anche se mantieni la route del server per il browser, che non la raggiungerebbe mai.
+- L'host deve servire la stessa struttura `<apiBaseUrl>/<page>/<locale>/data.json`.
+- La build emette un avviso quando tutti gli output locali sono disattivati e manca un host.
+
+Gli stessi valori possono provenire da `NUXT_I18N_APP_BASE_URL`, `NUXT_I18N_APP_BASE_CLIENT_HOST` e `NUXT_I18N_APP_BASE_SERVER_HOST` in fase di build. `NUXT_I18N_APP_BASE_SERVER_HOST` funziona anche a runtime e prevale sul valore della build. Vedi [`apiBaseServerHost`](/it/api/module-options#apibaseserverhost) per i dettagli.
+
+## Piattaforme {#platforms}
+
+Solo ciò di cui hanno bisogno il modulo o il suo output. Account, regioni e login della CLI si trovano nella documentazione della piattaforma.
+
+### Cloudflare Workers {#cloudflare-workers}
+
+Preset `cloudflare_module`. `wrangler deploy` esegue un secondo bundle dell'output di Nitro con esbuild, e dopo di ciò un `defineAsyncComponent(() => import('./X.vue'))` grezzo viene renderizzato vuoto sul server. La pagina di errore predefinita di Nuxt è uno di questi, quindi un 404 ha un corpo vuoto e il browser registra un mismatch di idratazione. Il client renderizza poi la pagina e lo stato resta 404, ma senza JavaScript la pagina è vuota. Si tratta di [nuxt#33270](https://github.com/nuxt/nuxt/issues/33270): Nuxt semplice senza il modulo fa lo stesso. Le route delle pagine non sono interessate.
+
+Disattiva il secondo bundle:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: {
+    preset: 'cloudflare_module',
+    cloudflare: {
+      deployConfig: true, // `wrangler` below applies only with it
+      wrangler: {
+        no_bundle: true,
+        find_additional_modules: true,
+        rules: [{ type: 'ESModule', globs: ['**/*.mjs'] }],
+      },
+    },
+  },
+})
+```
+
+```bash
+npx nuxi build
+cd .output/server && npx wrangler deploy -c wrangler.json
+```
+
+Imposta `compatibilityDate` a `2024-09-19` o successiva: una più vecchia sceglie il preset legacy, che non scrive alcun `wrangler.json` e non dà errori. Il 404 viene quindi renderizzato, e l'upload diventa più piccolo: 190 KiB gzip contro 246 KiB sull'app di test. Il tuo `error.vue` è l'altra via d'uscita, ma copre solo la pagina di errore.
+
+Il modulo in sé non richiede `nodejs_compat`. Per i limiti vedi [Limiti del bundle](#bundle-limits-on-edge).
+
+### Cloudflare Pages {#cloudflare-pages}
+
+Usa il preset `cloudflare-pages-static`. `nuxi generate --preset cloudflare-pages` è una build server senza `index.html`.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: {
+    preset: 'cloudflare-pages-static',
+    prerender: { autoSubfolderIndex: false },
+  },
+})
+```
+
+```bash
+npx nuxi generate
+npx wrangler pages project create my-site --production-branch main --force
+npx wrangler pages deploy dist --project-name my-site --branch main
+```
+
+- **Output.** Il preset scrive in `dist/`, non in `.output/public`.
+- **`--force`.** Senza di esso un wrangler recente (qui 4.156) passa `pages project create` a Workers. Con esso ottieni un progetto Pages classico. Serve una sola volta, per la creazione.
+- **`autoSubfolderIndex: false`.** Pages risponde a `/de` con un 308 verso `/de/` mentre canonical e `hreflang` indicano `/de`, quindi puntano a un reindirizzamento. Con questa opzione il file è `de.html`, e il reindirizzamento scompare.
+- **`NUXT_E1005` nella console su un 404** è un normale 404. Nuxt lo segnala così perché `404.html` si avvia sul client, prima che l'app venga montata. La pagina funziona, e Nuxt semplice stampa la stessa riga.
+
+### Vercel e Vercel Edge {#vercel-and-vercel-edge}
+
+Preset `vercel` e `vercel_edge`, senza modifiche all'app. I tag funzionano senza `metaBaseUrl`, grazie agli header inoltrati dalla piattaforma. Vercel Edge ha un limite di bundle ridotto: vedi [Limiti del bundle](#bundle-limits-on-edge). Per una cache condivisa usa il [driver `upstash`](/it/guide/performance#upstash-on-vercel-and-vercel-edge).
+
+### Netlify {#netlify}
+
+Preset `netlify` e `netlify_edge`.
+
+```bash
+npx nuxi build --preset netlify
+npx netlify deploy --prod --no-build --dir dist --functions .netlify/functions-internal
+```
+
+- **Lascia `nitro.output` non impostato.** Il preset scrive da sé `.netlify/` e `dist/`.
+- **Mantieni un `package.json` nella cartella da cui esegui il deploy.** Senza di esso la CLI guarda la cartella superiore e non distribuisce alcuna funzione, senza errori.
+- **Netlify Edge** si distribuisce con il solo `--dir dist`. Vedi [Date sui runtime Edge](#dates-on-edge-runtimes).
+
+### Cloud Run {#cloud-run}
+
+Usa la build predefinita `node-server`. `gcloud run deploy --source` richiede un `Dockerfile` nella cartella di output quando docker non è in esecuzione in locale:
+
+```dockerfile
+# .output/Dockerfile
+FROM node:22-slim
+WORKDIR /app
+COPY . .
+ENV NODE_ENV=production
+CMD ["node", "server/index.mjs"]
+```
+
+```bash
+cd .output && gcloud run deploy my-app --source .
+```
+
+I tag funzionano senza `metaBaseUrl`, grazie agli header inoltrati dalla piattaforma.
+
+### Deno Deploy {#deno-deploy}
+
+Preset `deno_deploy`. `deno deploy` sostituisce `deployctl`. Crea un'app dinamica con l'entrypoint `server/index.ts` ed esegui il deploy dalla cartella di output.
+
+### Firebase {#firebase}
+
+| Prodotto | Configurazione |
+| --- | --- |
+| App Hosting | Esegue la build Node: usa il preset predefinito o `firebase-app-hosting`, e Node 20+ |
+| Cloud Functions | Il preset `firebase` incorpora i payload e richiede `firebase-functions` |
+| Hosting (statico) | Serve `.output/public` come file, quindi `/_locales/**` riceve gli header di Hosting |
+
+Su Hosting statico, se il JSON viene restituito con `Content-Type` o caching errati, aggiungi una voce `headers` per `/_locales/**` in `firebase.json`. Gli header di `routeRules` di Nuxt non si applicano ai file che Hosting serve da sé; la route dei payload imposta i propri `Content-Type` e `Cache-Control` sulle risposte che raggiungono il server.
+
+### AWS Amplify {#aws-amplify}
+
+`aws-amplify` conserva i file statici accanto alla sua cartella di calcolo, non accanto al server, quindi i payload vengono incorporati come su una piattaforma a funzioni.
+
+### Più istanze di una stessa build {#several-instances-of-one-build}
+
+Un unico artefatto può essere eseguito con una lingua predefinita o disabilitata diversa per ogni istanza tramite variabili d'ambiente: vedi [Sovrascritture di runtime](/it/guide/runtime-overrides). Una lingua disabilitata solo a runtime ha ancora i suoi file statici in `public/`; disabilitala in fase di build se non devono essere raggiungibili.
+
+Le istanze che caricano i dizionari da un host remoto possono condividerli in Redis, Upstash, Cloudflare KV o D1, Deno KV o un altro storage Nitro, così il backend riceve una sola richiesta invece di una per istanza. È una cache, non una sorgente di traduzioni: vedi [Cache condivisa per più istanze](/it/guide/performance#shared-cache-for-several-instances).
+
+## Dietro un proxy o una CDN {#behind-a-proxy-or-cdn}
+
+L'app deve ricavare l'host pubblico e lo schema dalla richiesta.
+
+| Il proxy invia                               | Build semplice                                   | Build con `baseUrl` sulle lingue                                                  |
+| -------------------------------------------- | ------------------------------------------------ | --------------------------------------------------------------------------------- |
+| L'`Host` reale                               | Nulla da impostare                               | Nulla da impostare                                                                |
+| L'`Host` dell'origine, più `X-Forwarded-Host` | Nulla da impostare                              | [`trustForwardedHost: true`](/it/api/module-options#trustforwardedhost)           |
+| Nessuno dei due                              | [`metaBaseUrl`](/it/api/module-options#metabaseurl) | Nessuna impostazione aiuta: ogni richiesta sembra provenire dall'host dell'origine, quindi modifica il proxy |
+
+- **Route sotto `swr` o `cache`.** Lì la tabella non vale: vedi [Caching dell'HTML](#caching-html). Imposta `metaBaseUrl` o `site.url`.
+- **`X-Forwarded-Proto`.** Invialo, altrimenti gli URL canonical riportano `http://` dietro un proxy HTTPS. Anche `metaBaseUrl` risolve questo problema.
+- **In una build con domini** è il dominio a scegliere l'URL di base dei tag. Lì `metaTrustForwardedHost` non sceglie il dominio, solo `trustForwardedHost` lo fa.
+- **I reindirizzamenti sono relativi e il cookie della lingua non ha `Domain`,** quindi entrambi restano sull'host pubblico.
+
+<Warning>
+
+**Fissa `metaBaseUrl` quando l'origine resta raggiungibile** — In una build semplice senza `metaBaseUrl` o `site.url`, canonical, `hreflang` e `og:url` prendono l'host dalla richiesta. [`metaTrustForwardedHost`](/it/api/module-options#metatrustforwardedhost) è attivo per impostazione predefinita, quindi una richiesta diretta con `X-Forwarded-Host: evil.example` ottiene `https://evil.example` in quei tag, e una cache davanti diffonde quella pagina. Un host di piattaforma come `*.workers.dev` è esattamente un'origine di questo tipo. `metaBaseUrl` chiude questa falla anche per `Host`. Un host noto di una build con domini mantiene il proprio `baseUrl`. Con `trustForwardedHost: true` un client diretto può scegliere la pagina di un altro dominio, quindi attivalo solo dietro un proxy che sovrascrive l'header.
+
+</Warning>
+
+## Caching dell'HTML {#caching-html}
+
+La maggior parte degli URL può essere messa in cache in sicurezza, perché indica la propria lingua. Questi dipendono dal visitatore:
+
+| Configurazione                 | URL                                               |
+| ------------------------------ | ------------------------------------------------- |
+| Predefinita, `autoDetectPath: '/'` | `/`                                           |
+| `prefix`                       | `/` e ogni URL senza prefisso, che si limitano a reindirizzare |
+| `autoDetectPath: '*'`          | Ogni URL                                          |
+| `no_prefix`                    | Ogni pagina                                       |
+
+- **`Vary`.** Queste risposte includono `Vary` con `Cookie` quando [`localeCookie`](/it/api/module-options#localecookie) è impostato e `Accept-Language` quando `autoDetectLanguage` è attivo. Una cache che lo rispetta mantiene separate le risposte.
+- **Una cache che ignora `Vary`,** come "metti tutto in cache per URL", deve saltare quegli URL. Altrimenti il `302 /de` di un visitatore raggiunge il visitatore successivo, e una pagina predefinita memorizzata elimina il reindirizzamento per tutti. Su `/` puoi anche impostare `redirects: false`. La cache delle route di Nitro usa come chiave il percorso e la sua lista `varies`, quindi tieni `/` fuori anche dalle regole `swr` e `cache`.
+- **`Set-Cookie`.** Con `localeCookie` impostato, ogni pagina renderizzata dal server sotto un prefisso include `Set-Cookie`, e una CDN corretta non la memorizzerà. Per l'HTML in cache lascia `localeCookie` disattivato, o rimuovi l'header sull'edge.
+- **Le regole `swr` e `cache` richiedono `metaBaseUrl` o `site.url`.** Nitro renderizza una route di questo tipo con i soli header in `cache.varies`, quindi `Host`, `X-Forwarded-Host` e `X-Forwarded-Proto` scompaiono e l'URL della richiesta risulta `http://localhost`. Senza un'origine fissa, canonical, `hreflang` e `og:url` su quelle route puntano a `http://localhost`, su ogni piattaforma. Anche `useRequestURL()` di Nuxt semplice legge lo stesso valore lì. Prendere invece l'host dal visitatore inserirebbe l'`X-Forwarded-Host` di un visitatore nella pagina che ricevono tutti. Una build con domini non è interessata: i suoi tag usano il `baseUrl` delle lingue.
+
+  Se una build serve più host e nessuna singola origine va bene, lascia che la regola veda gli header e conservi una copia per valore: `'/blog/**': { swr: 60, cache: { varies: ['host', 'x-forwarded-host', 'x-forwarded-proto'] } }`. Ogni valore distinto è una nuova voce di cache, quindi un client che invia header inventati riempie la cache: metti l'origine dietro un proxy che li imposta.
+- **Regole `swr` e `cache` su una build con domini.** Il modulo aggiunge `host` a `cache.varies` di ogni regola di questo tipo, e `x-forwarded-host` con `trustForwardedHost`, così un dominio non serve a un altro la propria pagina. Una regola con `cache: false` resta come scritta. `isr` è la cache della piattaforma: verifica che usi l'host come chiave. Con l'host nella chiave, un client che invia host inventati aggiunge voci di cache.
+
+Per i file dei payload vedi [Header di cache e dateBuild](#cache-headers-and-datebuild).
+
+## Correlati {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Ottimizzazione delle performance" icon="book-open" href="/it/guide/performance">
+
+</Card>
+
+<Card title="Sovrascritture di runtime" icon="book-open" href="/it/guide/runtime-overrides">
+
+</Card>
+
+<Card title="Riferimento di translationPayloads" icon="brackets-curly" href="/it/api/module-options#translationpayloads">
+
+</Card>
+
+<Card title="Layer e domini" icon="book-open" href="/it/guide/layers">
+
+</Card>
+
+<Card title="SEO" icon="book-open" href="/it/guide/seo">
+
+</Card>
+
+</CardGroup>

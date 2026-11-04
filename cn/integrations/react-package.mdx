@@ -1,0 +1,291 @@
+---
+title: "React 与 Preact"
+description: "使用 @i18n-micro/react 和 @i18n-micro/preact 为 React 和 Preact 应用提供翻译、locale 切换以及路由集成。"
+---
+
+`@i18n-micro/react` 和 `@i18n-micro/preact` 将与框架无关的 [runtime](/cn/integrations/runtime-package) 封装为一个 provider、一个 `useI18n()` hook 和四个组件。适用于不基于 Nuxt 构建的 React 或 Preact 应用。两个包的 API 相同；[Preact](#preact) 部分列出了少量差异，共享模型见[框架](/cn/integrations/overview)。
+
+## 安装 {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add @i18n-micro/react
+```
+
+```bash npm
+npm install @i18n-micro/react
+```
+
+```bash yarn
+yarn add @i18n-micro/react
+```
+
+</CodeGroup>
+
+Peer 依赖：`react` `^18.0.0 || ^19.0.0`；`react-dom`（可选，用于渲染）；`react-router-dom` `^6.0.0 || ^7.0.0`（可选，仅用于 `@i18n-micro/react/router`）。已在 React 19.3 和 18.3、React Router 7.18 和 6.30 上测试。
+
+## 设置 {#setup}
+
+```tsx
+// src/main.tsx
+import { createRoot } from 'react-dom/client'
+import { createI18n, I18nProvider } from '@i18n-micro/react'
+import App from './App'
+import en from './locales/en.json'
+
+const locales = [
+  { code: 'en', iso: 'en-US', displayName: 'English' },
+  { code: 'de', iso: 'de-DE', displayName: 'Deutsch' },
+]
+
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', messages: { en } })
+
+createRoot(document.getElementById('root')!).render(
+  <I18nProvider i18n={i18n} locales={locales} defaultLocale="en">
+    <App />
+  </I18nProvider>,
+)
+```
+
+<Warning>
+
+实例只需创建一次，放在模块顶层或 `useState` 初始化函数中，切勿在组件函数体中创建。
+
+</Warning>
+
+`<I18nProvider>` 接收 `i18n`、`locales`、`defaultLocale` 和 `routingStrategy`：
+
+- 省略的 prop 会沿用外层 provider 的值，实例也一样。
+- 如果完全没有实例，它会根据同时传入的 `createI18n` 选项创建一个，因此 props 仍是普通数据：`<I18nProvider locale="de" messages={messages}>`。
+- 新的 `locale` prop 会使用本次渲染的 `messages` 创建新实例。这样的实例存在于组件内部：如果其上层某处在挂载期间挂起（suspend），React 会将其连同添加进去的所有内容一起丢弃。
+
+所有 `createI18n` 选项（包括 `routeMessages`）见[实例](/cn/integrations/overview#the-instance)。
+
+## 翻译 {#translate}
+
+```tsx
+import { useI18n } from '@i18n-micro/react'
+
+export function Greeting() {
+  const { t, tc, tn } = useI18n()
+  return (
+    <>
+      <h1>{t('greeting', { name: 'Ada' })}</h1> {/* Hello, Ada! */}
+      <p>{tc('apples', 3)}</p> {/* 3 apples */}
+      <p>{tn(1234.5)}</p>
+    </>
+  )
+}
+```
+
+`useI18n()` 返回：
+
+| 分组 | 成员 |
+| --- | --- |
+| 翻译 | `t`, `ts`, `tc`, `tn`, `td`, `tdr`, `has` |
+| Locale 与路由 | `locale`, `fallbackLocale`, `currentRoute`, `setLocale`, `setRoute`, `getRoute`, `getLocales`, `defaultLocale()`, `getLocaleName` |
+| 路由 | `switchLocale`, `localePath`, `localeRoute` |
+| 字典 | `addTranslations`, `addRouteTranslations`, `clearCache` |
+
+- 当 locale、路由或可读取的字典发生变化，以及 provider 收到新的 `locales` 或 `routingStrategy` 对象时，组件会重新渲染。既不是当前 locale 也不是回退 locale 的字典不会触发渲染。
+- `t` 和其他翻译方法只随 store 变化，因此可以安全地用于 `memo` 和 effect 依赖中。
+
+`useT` 以值的形式提供一个字符串。只有当该字符串变化时组件才会渲染，无论 provider 的其他 props 如何变化；`<I18nT>` 同样不依赖它们：
+
+```tsx
+const title = useT('page.title')
+```
+
+随时可以加载更多字典：
+
+```tsx
+const { addTranslations, addRouteTranslations, setRoute } = useI18n()
+
+useEffect(() => {
+  import('./locales/de.json').then((m) => addTranslations('de', m.default))
+  addRouteTranslations('en', 'about', { title: 'About us' })
+  setRoute('about') // t('title') now reads the 'about' dictionary first
+}, [])
+```
+
+实例本身还提供 `loadFromUrl(url, { locale, routeName })`，用于通过 `fetch` 加载 JSON。
+
+## 切换 locale {#switch-locale}
+
+```tsx
+const { setLocale, switchLocale } = useI18n()
+
+setLocale('de') // only the locale
+switchLocale('de') // the locale, then the adapter's push to the localized current path
+```
+
+切换不会加载任何内容；请先添加该 locale 的字典。对 React 而言，store 写入是同步的，即使在 `startTransition` 中也是如此，因此因缺少字典而挂起的组件会显示其 fallback。`useLocaleSwitch` 会先加载，并在字典就绪前保留旧的 UI：
+
+```tsx
+const [switchTo, pending] = useLocaleSwitch((locale) => i18n.loadFromUrl(`/locales/${locale}.json`, { locale }))
+
+<button disabled={pending} onClick={() => switchTo('de')}>Deutsch</button>
+```
+
+以最后一次调用为准。加载失败会 reject，并保持 locale 不变。
+
+`<I18nGroup>` 会向 render-prop 子元素传入带前缀的 `t`。其中的 `<I18nT>` 和 `t()` 不带前缀：
+
+```tsx
+<I18nGroup prefix="profile">{({ t }) => <h2>{t('title')}</h2> /* profile.title */}</I18nGroup>
+```
+
+## 路由 {#routing}
+
+React Router 适配器位于子路径中，因此主入口永远不会导入 `react-router-dom`。它需要 `useLocation()` 和 `useNavigate()`，因此请在路由器之下的组件中创建它：
+
+```tsx
+// src/App.tsx
+import { useMemo } from 'react'
+import { BrowserRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
+import { I18nLink, I18nProvider, I18nSwitcher } from '@i18n-micro/react'
+import { createReactRouterAdapter } from '@i18n-micro/react/router'
+import { i18n, locales } from './i18n'
+import { About, Home } from './pages'
+
+function Localized() {
+  const location = useLocation()
+  const navigate = useNavigate()
+  // memoized: a new object on every render re-renders every `useI18n()` consumer
+  const routingStrategy = useMemo(() => createReactRouterAdapter(locales, 'en', location, navigate), [location, navigate])
+  return (
+    <I18nProvider i18n={i18n} locales={locales} defaultLocale="en" routingStrategy={routingStrategy}>
+      <I18nLink to="/about">About</I18nLink>
+      <I18nSwitcher />
+      <Routes>
+        <Route path="/:locale?" element={<Home />} />
+        <Route path="/:locale?/about" element={<About />} />
+      </Routes>
+    </I18nProvider>
+  )
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <Localized />
+    </BrowserRouter>
+  )
+}
+```
+
+该适配器会为除默认 locale 之外的每个 locale 添加前缀（`/about`、`/de/about`），并将 `<I18nLink>` 渲染为 React Router 的 `<Link>`。请自行根据 URL 设置 locale（例如在 effect 中读取 `useParams().locale`）。对于其他路由器，请编写一个包含 `getCurrentPath`、`push` 和 `replace`（均为必需）的适配器 — 参见[路由适配器](/cn/integrations/overview#router-adapter)。
+
+## SSR {#ssr}
+
+`renderToString` 可以正常工作：`useI18n()` 提供服务端快照。请为每个请求创建一个实例，并在渲染之前添加其字典，这样不同 locale 的请求就不会共享状态；也可以向 provider 传入普通数据。
+
+### 水合 {#hydration}
+
+数字、复数和文本会按原样水合。日期取决于时区，相对日期取决于时钟：请在服务端和浏览器中都设置 `timeZone`，对于 `tdr`，请通过 `now` 将服务端时间传给浏览器。带有 `date` 或 `relativeDate` 的 `<I18nT>` 会设置 `suppressHydrationWarning`，因此差异不会导致水合失败，但服务端的文本会一直保留，直到文本发生变化。这只作用于一层：将翻译包裹在元素中的 `children` 在出现差异时仍会失败，因此请为它们设置相同的 `timeZone`。
+
+### Server Components {#server-components}
+
+该包使用 `'use client'` 标记其客户端代码。`@i18n-micro/react/server` 提供 `createI18n` 和一个不使用 hooks、以 prop 接收实例的 `I18nT`，因此文本不会进入客户端 bundle。在 `react-server` 条件下（例如 Next.js app router），主入口也会解析到它，但 TypeScript 默认并不知道这一点：请从 `/server` 导入。`@i18n-micro/react/client` 始终提供客户端入口。
+
+```tsx
+// app/[locale]/layout.tsx: a server component
+import { cache } from 'react'
+import { createI18n, I18nT } from '@i18n-micro/react/server'
+import { I18nProvider } from '@i18n-micro/react/client'
+import { loadMessages } from './messages'
+
+const getI18n = cache(async (locale: string) => createI18n({ locale, messages: await loadMessages(locale) }))
+
+export default async function Layout({ params, children }) {
+  const { locale } = await params
+  const i18n = await getI18n(locale)
+  return (
+    <I18nProvider locale={locale} messages={{ [locale]: i18n.resolveTranslations() }}>
+      <h1>
+        <I18nT i18n={i18n} keypath="title" />
+      </h1>
+      {children}
+    </I18nProvider>
+  )
+}
+```
+
+已通过 `react-server-dom-webpack` 渲染验证；尚未在实际的 Next.js 应用中运行。
+
+## API {#api}
+
+| 导出 | 入口 |
+| --- | --- |
+| `createI18n`, `ReactI18n`, `I18nProvider`, `useI18n`, `useT`, `useLocaleSwitch` | `@i18n-micro/react` |
+| `I18nT`, `I18nLink`, `I18nSwitcher`, `I18nGroup` | `@i18n-micro/react` |
+| `I18nContext`, `I18nConfigContext`, `useI18nContext`, `useI18nLocales`, `useI18nDefaultLocale`, `useI18nRouter` | `@i18n-micro/react` |
+| `defaultPlural`, `FormatService`, `interpolate` | `@i18n-micro/react` |
+| 类型：`I18nRoutingStrategy`、`ReactI18nOptions`、`I18nProviderProps`、`UseI18nReturn`、组件 props、`TranslationKey`、`Locale`、`Translations`、`PluralFunc` | `@i18n-micro/react` |
+| `createReactRouterAdapter` | `@i18n-micro/react/router` |
+| `createI18n`, `ReactI18n`, `I18nT`（接收 `i18n`） | `@i18n-micro/react/server` |
+
+完整签名：[React 参考](/cn/api/packages/react)。
+
+## Preact {#preact}
+
+`@i18n-micro/preact` 由同一份源码构建，直接基于 Preact，不使用 `preact/compat`：实例、provider、hooks 和组件都相同。差异如下：
+
+| | React | Preact |
+| --- | --- | --- |
+| Peer 依赖 | `react`（+ 可选的 `react-router-dom`） | `preact` `^10.0.0 \|\| ^11.0.0`，已在 10.29 和 11.1 上测试 |
+| 实例类 | `ReactI18n` | `PreactI18n` |
+| 路由适配器 | 来自 `/router` 的 `createReactRouterAdapter` | 来自 `/router` 的 `createBrowserHistoryAdapter(locales, defaultLocale, ssrUrl?)` |
+| 重新渲染 | `useSyncExternalStore` | 重新检查 store 的 layout-effect 订阅 |
+| Server Components | `/server`、`/client` | 无 |
+
+`createBrowserHistoryAdapter` 适用于任何基于 History API 的路由器（wouter、preact-router）：`push` 和 `replace` 会调用 `history.pushState` / `replaceState` 并派发 `popstate`，`<I18nLink>` 渲染为通过 `push` 导航的普通 `<a>`。服务端没有地址栏：请将请求的 URL 作为 `ssrUrl` 传入，否则链接和切换器会按 `/` 渲染。在浏览器中以地址栏为准。
+
+```tsx
+// src/main.tsx
+import { render } from 'preact'
+import { createI18n, I18nProvider } from '@i18n-micro/preact'
+import { createBrowserHistoryAdapter } from '@i18n-micro/preact/router'
+import { App } from './App'
+import en from './locales/en.json'
+
+const locales = [
+  { code: 'en', iso: 'en-US', displayName: 'English' },
+  { code: 'de', iso: 'de-DE', displayName: 'Deutsch' },
+]
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', messages: { en } })
+
+render(
+  <I18nProvider i18n={i18n} locales={locales} defaultLocale="en" routingStrategy={createBrowserHistoryAdapter(locales, 'en')}>
+    <App />
+  </I18nProvider>,
+  document.getElementById('app')!,
+)
+```
+
+完整签名：[Preact 参考](/cn/api/packages/preact)。
+
+## 相关内容 {#related}
+
+<CardGroup cols={2}>
+
+<Card title="框架" icon="book-open" href="/cn/integrations/overview">
+
+实例选项、路由适配器、组件 props
+
+</Card>
+
+<Card title="Runtime" icon="book-open" href="/cn/integrations/runtime-package">
+
+这些包所基于的实例
+
+</Card>
+
+<Card title="类型生成器" icon="book-open" href="/cn/integrations/types-generator">
+
+键的自动补全
+
+</Card>
+
+</CardGroup>

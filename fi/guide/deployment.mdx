@@ -1,0 +1,440 @@
+---
+title: "Käyttöönotto tuotantoon"
+description: "Julkaise Node-palvelimelle, serverless- tai Edge-ympäristöön tai staattisena sivustona — minne käännöspayloadit menevät, mitä kukin alusta tarvitsee, välityspalvelimet ja välimuistitus."
+---
+
+Moduuli toimii minkä tahansa Nitro-esiasetuksen kanssa ilman lisäkonfiguraatiota: se valitsee käännöstiedostojen sijainnin sen esiasetuksen mukaan, jolle käännät. Oletukset sopivat useimmille sovelluksille; lue alustasi osio. Tämä sivu selittää:
+
+- mitä päätyy hakemistoon `.output/` ja mitä otsakkeita payloadit saavat;
+- mitä muuttaa staattista hostausta, suuria katalogeja, alipolkua, välityspalvelinta tai CDN:ää varten.
+
+<Note>
+
+Julkaistu ja tarkistettu oikeilla palvelimilla: Cloudflare Workers ja Pages, Vercel ja Vercel Edge, Netlify ja Netlify Edge, Cloud Run ja Deno Deploy, kukin sillä, mitä [Alustat](#platforms) luettelee. Muut esiasetukset käännettiin ja ajettiin paikallisesti.
+
+</Note>
+
+## Miten käännökset toimitetaan {#how-translations-are-delivered}
+
+Käännösvaiheessa moduuli muuttaa hakemiston `locales/` (kaikki kerrokset yhdistettyinä) **payloadeiksi**: yksi JSON-tiedosto sivua ja kieltä kohden. Kaksi kuluttajaa lukee niitä:
+
+- **SSR** lataa renderöitävän sivun payloadin prosessin sisällä — ei HTTP-pyyntöä, eikä sanakirjaa upoteta HTML:ään.
+- **Selain** hakee osoitteen `/_locales/<page>/<locale>/data.json?v=<dateBuild>` hydraatiossa ja navigoinnissa.
+
+`_locales` on [`apiBaseUrl`](/fi/api/module-options#apibaseurl). Sisäänrakennettu palvelinreitti vastaa tähän URL-osoitteeseen; staattinen kopio hakemistossa `public/` vastaa siihen ilman palvelinta.
+
+## Node-palvelin {#node-server}
+
+```bash
+npx nuxi build
+node .output/server/index.mjs
+```
+
+Esiasetuksilla `node-server` (oletus), `node-cluster`, `bun`, `deno-server` tai millä tahansa muulla esiasetuksella, joka tarjoaa `public/`-hakemiston levyltä niin, että `public/` on `server/`-kansion vieressä:
+
+- payloadit kopioidaan polkuun `.output/public/_locales/<page>/<locale>/data.json`;
+- SSR lukee ne kyseisestä kansiosta `fs`-moduulilla (palvelimeen ei paketoida mitään);
+- selain saa ne staattisina tiedostoina tai palvelinreitiltä.
+
+Julkaise koko `.output/`-hakemisto. Moduuli vaatii Node 20:n tai uudemman, ja Nuxtilla on oma vähimmäisvaatimuksensa: Nuxt 4.5 ilmoittaa `^22.19.0 || ^24.11.0 || >=26.0.0`.
+
+Jatkuvan kuormituksen alainen prosessi voi varata paljon enemmän muistia kuin sen elävä keko. Katso [Muisti Node-palvelimella](/fi/guide/performance#memory-on-a-node-server) ennen kuin asetat konttirajan.
+
+Muulla rakenteella moduuli upottaa payloadit seuraavassa osiossa kuvatulla tavalla. Tämä kattaa:
+
+- mukautetun `nitro.output.publicDir`-asetuksen, jonka käännös lukee kerran;
+- `serveStatic: true` -asetuksen esiasetuksella, joka säilyttää staattiset tiedostot muualla.
+
+<Warning>
+
+Jos käännös lukee `public/`-hakemiston eikä kansio päädy palvelimelle, kuten `aws-lambda`- ja `serveStatic: true` -yhdistelmällä, palvelin kirjaa yhden virheen ja sivut näyttävät raakoja avaimia. Aseta `nitro.serveStatic: false` upottaaksesi payloadit.
+
+</Warning>
+
+## Serverless ja Edge {#serverless-and-edge}
+
+Nämä esiasetukset eivät voi lukea `public/`-hakemistoa ajon aikana:
+
+- funktioesiasetukset, jotka lähettävät `public/`-hakemiston CDN:ään tai eivät tarjoa sitä: `vercel`, `netlify`, `aws-lambda`, `aws-amplify`, `azure-swa`, `firebase`, `stormkit`, `zeabur`, `node-listener`;
+- Edge-esiasetukset ilman tiedostojärjestelmää: `cloudflare-module`, `cloudflare-pages`, `vercel-edge`, `netlify-edge`, `deno_deploy`;
+- `serveStatic: 'inline'`, kuten `winterjs`.
+
+Niissä moduuli upottaa payloadit palvelinpakettiin Nitron palvelinresursseina (`assets:i18n`) ja kirjoittaa silti julkisen kopion selainta varten.
+
+Koko sivu × kieli -matriisin upottaminen tekee paketista suuren. Edge-alustan rajan ylittyessä käännös varoittaa ja nimeää sen, katso [Pakettirajat](#bundle-limits-on-edge). Suurille katalogeille vaihda `source`-tilaan, joka upottaa tiiviit lähdetiedostot ja yhdistää juuri-, sivu- ja varakäännökset ajon aikana:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    translationPayloads: {
+      mode: 'source',
+    },
+  },
+})
+```
+
+`source`-tilassa selain hakee payloadit aina palvelinreitiltä, joka yhdistää ne pyynnöstä (mahdollinen julkinen kopio sisältää tiiviin lähdepuun, jota vain palvelin lukee). Se vaatii käynnissä olevan palvelimen, joten älä käytä `source`-tilaa puhtaasti staattiselle sivustolle.
+
+### Pakettirajat Edgessä {#bundle-limits-on-edge}
+
+| Alusta             | Raja                                                                                   |
+| ------------------ | -------------------------------------------------------------------------------------- |
+| Cloudflare Workers | 64 MiB pakkaamattomana, Free- ja Paid-tasoilla. Ei pakatun koon rajaa. 1 s käynnistys, 128 MB muistia |
+| Vercel Edge        | 1 MB gzip Hobby-tasolla, 2 MB Pro-tasolla, 4 MB Enterprise-tasolla                     |
+| Netlify Edge       | 20 MB pakattuna                                                                        |
+
+Käännös laskee yhteen upottamansa sanakirjat ja varoittaa vain alustan alimman rajan ylittyessä. Se laskee pelkät sanakirjat, joten sovellus tulee päälle. Esimerkiksi 120 sivua × 4 kieltä 60 KB:n juuritiedostolla upottaa:
+
+| Tila | Upotettu | Mahtuu |
+| --- | --- | --- |
+| `premerged` | 34.9 MiB | Cloudflare; ei Vercel Edge eikä Netlify Edge |
+| `source` | 5.7 MiB | Silti 3 MB gzip Vercel Edgessä |
+
+Tämän kokoinen katalogi Vercel Edgessä tarvitsee [payload-isännän](#app-baseurl-and-payload-hosts).
+
+`source` maksaa yhdistämisen sivua ja kieltä kohden jokaisessa isolaatissa, noin 1 ms tuossa esimerkissä ja 7 ms CPU-aikaa kylmässä. Se kasvaa varaketjun koon mukana: noin 43 ms 4 MB:n ketjutiedostoilla. Netlify Edge sallii 50 ms CPU-aikaa pyyntöä kohden ja Cloudflaren Free-taso 10 ms.
+
+### Päivämäärät Edge-ajoympäristöissä {#dates-on-edge-runtimes}
+
+`$td` käyttää ajoympäristön `Intl`-rajapintaa, ja sen ICU-data voi poiketa selaimen datasta. Netlify Edgessä muotoiltu päivämäärä voi sisältää merkin U+202F (kapea sitova välilyönti) siellä, missä Chromessa on tavallinen välilyönti, joten Vue kirjaa yhden hydraatioristiriidan ja teksti korjautuu hydraatiossa. Pelkkä Nuxt pelkällä `Intl`-rajapinnalla tekee siellä saman; Deno Deploy ei.
+
+<Tip>
+
+`<i18n-t>` `date`- tai `relativeDate`-propsilla sallii ristiriidan jo valmiiksi. Mallissa käytettävälle `$td`-kutsulle lisää elementtiin `data-allow-mismatch="text"`.
+
+</Tip>
+
+## Staattinen sivusto (nuxi generate) {#static-site-nuxi-generate}
+
+```bash
+npx nuxi generate
+```
+
+`nuxi build --preset <static preset>` tekee saman.
+
+- Oletusarvoinen `premerged`-tila kirjoittaa jokaisen payloadin hakemistoon `.output/public/_locales/`, joten mikä tahansa staattinen palvelin voi tarjota ne.
+- Sivut esirenderöidään jokaiselle kielelle: `prefix`-strategiassa moduuli lisää jokaisen lokalisoidun juuren (`/en`, `/de`), ja `/` säilytetään uudelleenohjaustynkänä.
+- Jätä [`prerenderRoutes`](/fi/api/module-options#translationpayloads) pois päältä: julkinen kopio sisältää jo payload-tiedostot.
+- `source`-tilassa tai `publicAssets: false` -asetuksella selaimella ei ole mitään luettavaa, ja käännös varoittaa.
+
+<Note>
+
+Ei ole palvelinta, joka lukisi evästeen tai `Accept-Language`-otsakkeen, joten tallennettu kieli ei ohjaa `/`-polkua uudelleen ensimmäisellä latauksella. `no_prefix`-strategiassa HTML sisältää oletuskielen, eikä tallennettua evästettä sovelleta latauksessa: `$switchLocale` toimii silti avoimella sivulla.
+
+</Note>
+
+Cloudflare Pagesia varten katso [Cloudflare Pages](#cloudflare-pages).
+
+[Kieliverkkotunnuksia](/fi/guide/layers#multiple-domains) käyttävälle käännökselle aja generate kerran verkkotunnusta kohden niin, että `NUXT_I18N_DOMAIN` on ajon isäntä. Jokainen puu sisältää silloin kyseisen verkkotunnuksen sivut ja payloadit. Nitrolla ei ole muuttujaa tulostekansiolle, joten lue oma muuttujasi konfiguraatiosta:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: { output: { publicDir: process.env.PUBLIC_DIR } },
+})
+```
+
+```bash
+NUXT_I18N_DOMAIN=example.de PUBLIC_DIR=sites/example.de npx nuxi generate
+NUXT_I18N_DOMAIN=example.com PUBLIC_DIR=sites/example.com npx nuxi generate
+```
+
+- Pidä kansiot `.output`-hakemiston ulkopuolella: jokainen ajo tyhjentää sen.
+- Absoluuttisia linkkejä muihin verkkotunnuksiin ei indeksoida.
+- Ilman muuttujaa käännös, jossa on `baseUrl`-kieli, varoittaa ja luo käännöskonfiguraation, jossa nuo kielet ovat linkkejä eivätkä saa sivuja.
+- Node-palvelimella sama muuttuja sitoo prosessin yhteen verkkotunnukseen riippumatta siitä, mitä `Host` sanoo.
+
+Staattinen palvelin soveltaa näihin tiedostoihin omia otsakkeitaan; aseta välimuistitus palvelimen konfiguraatiossa. Moduulin `/_locales/*`-sääntö päätyy Cloudflare Pagesiin `_headers`-tiedoston kautta ja Verceliin `config.json`-tiedoston kautta muodossa `public, max-age=60`. Jos haluat toimittaa `.gz`- / `.br`-rinnakkaistiedostot, ota käyttöön `nitro.compressPublicAssets`: moduuli pakkaa payload-kopion samoilla asetuksilla.
+
+## Välimuistiotsakkeet ja dateBuild {#cache-headers-and-datebuild}
+
+| Pyyntö                                                                                   | `Cache-Control`                                                                                                 |
+| ---------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Node-palvelin tai reitti, `?v=` on sama kuin nykyinen `dateBuild`, ei-tyhjä sanakirja    | `private, max-age=<httpCacheDuration>, immutable`                                                               |
+| Node-palvelin tai reitti ilman `?v=`-arvoa, vanhalla arvolla tai tyhjä sanakirja         | `public, max-age=0, must-revalidate`                                                                            |
+| Palvelimen kopio `public/`-hakemistosta, mikä tahansa `?v=`                               | `public, max-age=60` ([`httpCacheControl`](/fi/api/module-options#other)) |
+| `source`-tila, `cacheTtl` tai `apiBaseServerHost`: sanakirja voi muuttua ilman käännöstä | `httpCacheControl`-otsake, aina                                                                                 |
+| Palvelinreitti, sanakirjaa ei voitu lukea                                                | `503`, `no-store`                                                                                               |
+| kehityspalvelin                                                                          | ei mitään                                                                                                       |
+
+Miksi taulukko näyttää tältä:
+
+- Nykyisellä `v`-arvolla varustettu URL kiinnitetään kuten hajautettu resurssi, ja vain se, mikä näkee kyselyn, voi sanoa niin: palvelinreitti ja Node-palvelin, joka asettaa otsakkeen staattisiin tiedostoihinsa.
+- Se on `private`, joten kyselyn huomiotta jättävä CDN ei voi vastata seuraavaan `v`-arvoon tästä vastauksesta.
+- Palvelimen staattiset tiedostot saavat koko polun kattavan otsakkeen `/_locales/**`-reittisäännöstä, joka ei näe kyselyä, joten se pysyy lyhyenä; toistuva lataus ei silti odota mitään.
+- Vanha `v` pysyy tarjottavana, koska välimuistissa oleva HTML viittaa siihen.
+
+`httpCacheControl: false` pitää jokaisen staattisen tiedoston asetuksessa `max-age=0, must-revalidate`. [`httpCacheDuration`](/fi/api/module-options#httpcacheduration) on oletuksena yksi vuosi; `0` ei lähetä otsaketta. `$clearCache()` validoi uudelleen kaiken, mitä se lataa seuraavaksi.
+
+Safari pyytää esiladatun payloadin uudelleen, kun se ei saa käyttää vastausta uudelleen: `no-cache`-arvolla ja `ETag`-otsakkeella toinen pyyntö on `304`, ilman välimuistiotsaketta ja validaattoria se on toinen täysi lataus. `max-age` yli `0` antaa yhden pyynnön. Tämän maksaa vain `httpCacheDuration: 0` palvelimella, joka ei lisää validaattoria.
+
+[`dateBuild`](/fi/api/module-options#datebuild) on `?v=`-arvo. Oletuksena se on käännöstiedostojesi tiiviste, joten se muuttuu vain käännösten muuttuessa, ja selaimet säilyttävät välimuistissa olevat payloadinsa julkaisujen yli, jotka eivät koskeneet niihin. Se liikkuu myös varaketjun mukana.
+
+- Aseta se itse kiinnittääksesi arvon.
+- Aseta `0` tai `''` poistaaksesi `?v=`-arvon kokonaan; payloadit eivät silloin ole koskaan `immutable`.
+
+<Tip>
+
+Kun olet korvannut sanakirjan paikallaan Node-palvelimella, käynnistä uudelleen asetuksella `NUXT_I18N_DATE_BUILD=<new value>`: mikään muu ei siirrä `v`-arvoa ilman uudelleenkäännöstä.
+
+</Tip>
+
+### Juuri- ja deltatiedostot {#root-and-delta-files}
+
+`premerged` kirjoittaa yhden juuren kieltä kohden, `__root/<locale>/data.json`, ja kunkin sivun tiedostoon vain sen, mikä eroaa siitä.
+
+- Sivutiedosto merkitsee juuren, jota vasten se tehtiin, `__i18n_root`-avaimella.
+- Selain hakee molemmat, sivu ei näytä mitään ennen kuin molemmat ovat saapuneet, ja SSR yhdistää ne kerran palaa kohden.
+- Merkitsemätön tiedosto on kokonainen sanakirja ja toimii yksinään: kehitystila, `source`-tila, palvelinreitti ja vanhempia tiedostoja yhä sisältävä palvelin vastaavat kaikki sellaisella, ilman asetuksia.
+
+Joten jokainen, joka lukee `_locales/*/data.json`-tiedostoja suoraan, lukee deltan. Aseta `translationPayloads.rootDelta: false` säilyttääksesi kokonaiset tiedostot.
+
+Julkaisun yli avoinna oleva välilehti, joka pyytää uutta deltaa, huomaa sen tehdyn toista juurta vasten ja hakee kyseisen juuren ennen sen näyttämistä.
+
+### Kun sanakirjaa ei voida lukea {#when-a-dictionary-cannot-be-read}
+
+Epäonnistunut haku palvelimelta (mikä tahansa muu kuin 404), lukukelvoton tai vioittunut tiedosto tai 200-vastaus, joka ei ole JSON-objekti, ei päädy mihinkään välimuistiin, ja seuraava pyyntö lukee uudelleen:
+
+- sivun renderöinti kirjaa varoituksen, näyttää kyseisen sanakirjan raa'at avaimet ja vastaa `503` otsakkeella `Cache-Control: no-store`, sama jokaisessa CDN-otsakkeessa (`CDN-Cache-Control`, `Cloudflare-CDN-Cache-Control`, `Netlify-CDN-Cache-Control`, `Vercel-CDN-Cache-Control`, `Surrogate-Control`, reittisäännön otsakkeiden yli) sekä `Retry-After: 60`;
+- `/_locales/...` vastaa `503` arvolla `no-store`;
+- `useTranslationServerMiddleware` antaa `t`-funktion, joka vastaa avaimella tai oletusarvolla.
+
+Mitä katkon aikana tapahtuu:
+
+- **Vierailijat:** tuon 503-vastauksen runko on itse sivu. Hydraatiossa selain lukee sanakirjan uudelleen, ja teksti ilmestyy, kun palvelin on taas saatavilla, Vuen yhdellä konsolivirheellä hydraatioristiriidasta, koska palvelimen HTML:ssä oli avaimet.
+- **Hakurobotteja** kehotetaan palaamaan myöhemmin.
+- **Välimuistit:** `swr`- tai `cache`-reittisääntö ei tallenna mitään tilakoodilla 400 tai suurempi, ja CDN saa `no-store`-arvon, joten mikään välimuisti ei säilytä raakoja avaimia, ja ensimmäinen pyyntö palautumisen jälkeen renderöi oikean tekstin.
+- **Säännön jo välimuistiin tallentamat sivut** pysyvät ennallaan: uudelleenvalidointi epäonnistuu eikä tallenna mitään. Vercelissä epäonnistunut `isr`-uudelleenvalidointi säilyttää viimeisen sivun samalla tavalla.
+
+Tämä kattaa jokaisen palan, jonka renderöinti lataa, mukaan lukien epäonnistuneen sivupalan, jonka juuri on saatavilla, sekä renderöinnin myöhemmin yhdistetyn palan. Sivu, jonka sanakirja on kunnossa, uudelleenohjaus ja virhesivu säilyttävät tilakoodinsa. [Komponenttisaareke](/fi/guide/server-side-translations) on poikkeus: se pysyy 200-vastauksena, koska 503 poistaisi sen sivulta, joten sivu, jonka oma sanakirja latautuu, voidaan säilyttää saarekkeen raa'oilla avaimilla. Katkon aikaiset pyynnöt tavoittavat kukin palvelimen, eikä moduulilla ole omaa aikakatkaisua vastausotsakkeiden 60 sekunnin lisäksi.
+
+Palvelimen 404 tarkoittaa, ettei sillä ole tällaista tiedostoa, mikä ei ole virhe. Sivun renderöinti näyttää juurisanakirjan, kuten selainkin, ja `/_locales/...` vastaa samalla 404:llä. Kumpaakaan ei säilytetä välimuistissa, joten ilmestyvä tiedosto luetaan seuraavassa pyynnössä, hintana yksi pyyntö palvelimelle tällaisen sivun jokaista renderöintiä kohden. Jos juuritiedostoakaan ei ole, sanakirja on tyhjä ja [esirenderöinti](/fi/guide/upgrade#server,-build-and-deployment) epäonnistuu.
+
+Palvelin säilyttää ladatut payloadit prosessin sisäisessä LRU-välimuistissa, jossa on enintään `cacheMaxSize` merkintää (oletuksena 1000) ja joka lataa merkinnän uudelleen `cacheTtl`-ajan jälkeen, kun se on asetettu; [Suorituskyvyn viritys](/fi/guide/performance) kattaa molemmat, ja [`cacheStorage`](/fi/guide/performance#shared-cache-for-several-instances) lisää instanssien jakaman välimuistin. Älä lisää päälle Nitron `cache`-reittisääntöä polulle `/_locales/**`: se avaintaa koko URL-osoitteen mukaan kysely mukaan lukien ja tallentaa kolmannen kopion.
+
+## Sovelluksen baseURL ja payload-isännät {#app-baseurl-and-payload-hosts}
+
+**`app.baseURL`** ei tarvitse mitään muuta. Asetuksella `app.baseURL: '/shop/'` selain hakee polusta `/shop/_locales/...`; kopio pysyy hakemistossa `.output/public/_locales/`, jonka Nitro tarjoaa basen alla (staattisen palvelimen on liitettävä tuloste polkuun `/shop/`). Kielietuliitteet ja [poissuljetut polut](/fi/guide/excluding-static-files) täsmätään ilman basea.
+
+**`app.cdnURL`** siirtää myös payloadit, kun ne ovat tiedostoja hakemistossa `public/`: selain hakee ja esilataa polun `<cdnURL>/_locales/...`.
+
+- CDN:n on sisällettävä `_locales/` `_nuxt/`-hakemiston vieressä kyseisessä polussa.
+- Sen on sallittava sivustosi alkuperä (CORS), koska tiedosto saapuu `fetch`-kutsulla.
+- Sanakirja, johon vain palvelinreitti vastaa (`source`-tila, ei julkista kopiota), pysyy sovelluksen alkuperässä.
+
+Ajonaikainen `NUXT_APP_BASE_URL` `cloudflare-module`-esiasetuksella vaatii Node-yhteensopivuuden (`nodejs_compat`). Kun `nitro.cloudflare.nodeCompat` on pois päältä, mihin Nitro myös päätyy vanhalla päivämäärällä ilman lippua, se ei näe muuttujaa ja tarjoaa polun `/`, myös pelkkä Nuxt, kun taas kielen uudelleenohjaus menee silti baseen. Aseta siellä `app.baseURL` käännösvaiheessa.
+
+Tarjotaksesi payloadit toisesta alkuperästä osoita asiakas ja palvelin siihen ja poista paikalliset tulosteet käytöstä:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    apiBaseClientHost: 'https://cdn.example.com',
+    apiBaseServerHost: 'https://cdn.example.com',
+    translationPayloads: {
+      serverHandler: false,
+      publicAssets: false,
+      serverAssets: false,
+    },
+  },
+})
+```
+
+- Nodessa `serverAssets` kirjoittaa saman kopion palvelimen omia lukuja varten, ja tuo tiedosto vastaa polkuun `/_locales`: sen on oltava myös pois päältä, myös jos säilytät palvelinreitin selainta varten, sillä selain ei koskaan tavoittaisi sitä.
+- Isännän on tarjottava sama `<apiBaseUrl>/<page>/<locale>/data.json`-rakenne.
+- Käännös varoittaa, kun kaikki paikalliset tulosteet ovat pois päältä ja isäntä puuttuu.
+
+Samat arvot voivat tulla käännösvaiheessa muuttujista `NUXT_I18N_APP_BASE_URL`, `NUXT_I18N_APP_BASE_CLIENT_HOST` ja `NUXT_I18N_APP_BASE_SERVER_HOST`. `NUXT_I18N_APP_BASE_SERVER_HOST` toimii myös ajon aikana ja voittaa käännösarvon. Katso lisätiedot kohdasta [`apiBaseServerHost`](/fi/api/module-options#apibaseserverhost).
+
+## Alustat {#platforms}
+
+Vain se, mitä moduuli tai sen tuloste tarvitsee. Tilit, alueet ja CLI-kirjautumiset löytyvät alustan dokumentaatiosta.
+
+### Cloudflare Workers {#cloudflare-workers}
+
+Esiasetus `cloudflare_module`. `wrangler deploy` paketoi Nitron tulosteen toisen kerran esbuildilla, ja sen jälkeen raaka `defineAsyncComponent(() => import('./X.vue'))` renderöityy palvelimella tyhjäksi. Nuxtin oletusvirhesivu on sellainen, joten 404-sivun runko on tyhjä ja selain kirjaa hydraatioristiriidan. Asiakas renderöi sitten sivun ja tilakoodi pysyy 404:nä, mutta ilman JavaScriptiä sivu on tyhjä. Tämä on [nuxt#33270](https://github.com/nuxt/nuxt/issues/33270): pelkkä Nuxt ilman moduulia tekee saman. Sivureitteihin tämä ei vaikuta.
+
+Poista toinen paketointi käytöstä:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: {
+    preset: 'cloudflare_module',
+    cloudflare: {
+      deployConfig: true, // `wrangler` below applies only with it
+      wrangler: {
+        no_bundle: true,
+        find_additional_modules: true,
+        rules: [{ type: 'ESModule', globs: ['**/*.mjs'] }],
+      },
+    },
+  },
+})
+```
+
+```bash
+npx nuxi build
+cd .output/server && npx wrangler deploy -c wrangler.json
+```
+
+Aseta `compatibilityDate` arvoon `2024-09-19` tai myöhemmäksi: vanhempi arvo valitsee vanhan esiasetuksen, joka ei kirjoita `wrangler.json`-tiedostoa eikä anna virhettä. 404 renderöityy silloin, ja lähetettävä paketti pienenee: 190 KiB gzip vastaan 246 KiB testisovelluksessa. Oma `error.vue` on toinen ratkaisu, mutta se kattaa vain virhesivun.
+
+Moduuli itse ei tarvitse `nodejs_compat`-asetusta. Rajoista katso [Pakettirajat](#bundle-limits-on-edge).
+
+### Cloudflare Pages {#cloudflare-pages}
+
+Käytä `cloudflare-pages-static`-esiasetusta. `nuxi generate --preset cloudflare-pages` on palvelinkäännös ilman `index.html`-tiedostoa.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: {
+    preset: 'cloudflare-pages-static',
+    prerender: { autoSubfolderIndex: false },
+  },
+})
+```
+
+```bash
+npx nuxi generate
+npx wrangler pages project create my-site --production-branch main --force
+npx wrangler pages deploy dist --project-name my-site --branch main
+```
+
+- **Tuloste.** Esiasetus kirjoittaa hakemistoon `dist/`, ei `.output/public`.
+- **`--force`.** Ilman sitä uusi wrangler (tässä 4.156) siirtää `pages project create` -komennon Workersille. Sen kanssa saat klassisen Pages-projektin. Sitä tarvitaan kerran, luontia varten.
+- **`autoSubfolderIndex: false`.** Pages vastaa `/de`-polkuun 308-uudelleenohjauksella polkuun `/de/`, kun taas canonical ja `hreflang` nimeävät `/de`, joten ne osoittavat uudelleenohjaukseen. Tällä asetuksella tiedosto on `de.html`, ja uudelleenohjaus poistuu.
+- **`NUXT_E1005` konsolissa 404-sivulla** on tavallinen 404. Nuxt raportoi sen näin, koska `404.html` käynnistyy asiakkaalla ennen kuin sovellus on liitetty. Sivu toimii, ja pelkkä Nuxt tulostaa saman rivin.
+
+### Vercel ja Vercel Edge {#vercel-and-vercel-edge}
+
+Esiasetukset `vercel` ja `vercel_edge` ilman muutoksia sovellukseen. Tagit toimivat ilman `metaBaseUrl`-asetusta alustan välittämien otsakkeiden perusteella. Vercel Edgellä on pieni pakettiraja: katso [Pakettirajat](#bundle-limits-on-edge). Jaettua välimuistia varten käytä [`upstash`-ajuria](/fi/guide/performance#upstash-on-vercel-and-vercel-edge).
+
+### Netlify {#netlify}
+
+Esiasetukset `netlify` ja `netlify_edge`.
+
+```bash
+npx nuxi build --preset netlify
+npx netlify deploy --prod --no-build --dir dist --functions .netlify/functions-internal
+```
+
+- **Jätä `nitro.output` asettamatta.** Esiasetus kirjoittaa `.netlify/`- ja `dist/`-hakemistot itse.
+- **Pidä `package.json` kansiossa, josta julkaiset.** Ilman sitä CLI katsoo yläkansiota eikä julkaise yhtään funktiota, eikä anna virhettä.
+- **Netlify Edge** julkaistaan pelkällä `--dir dist` -valitsimella. Katso [Päivämäärät Edge-ajoympäristöissä](#dates-on-edge-runtimes).
+
+### Cloud Run {#cloud-run}
+
+Käytä oletusarvoista `node-server`-käännöstä. `gcloud run deploy --source` tarvitsee `Dockerfile`-tiedoston tulostekansioon, kun docker ei ole käynnissä paikallisesti:
+
+```dockerfile
+# .output/Dockerfile
+FROM node:22-slim
+WORKDIR /app
+COPY . .
+ENV NODE_ENV=production
+CMD ["node", "server/index.mjs"]
+```
+
+```bash
+cd .output && gcloud run deploy my-app --source .
+```
+
+Tagit toimivat ilman `metaBaseUrl`-asetusta alustan välittämien otsakkeiden perusteella.
+
+### Deno Deploy {#deno-deploy}
+
+Esiasetus `deno_deploy`. `deno deploy` korvaa `deployctl`-työkalun. Luo dynaaminen sovellus sisääntulopisteellä `server/index.ts` ja julkaise tulostekansiosta.
+
+### Firebase {#firebase}
+
+| Tuote | Käyttöönotto |
+| --- | --- |
+| App Hosting | Ajaa Node-käännöksen: käytä oletusesiasetusta tai `firebase-app-hosting`-esiasetusta sekä Node 20+:aa |
+| Cloud Functions | `firebase`-esiasetus upottaa payloadit ja vaatii `firebase-functions`-paketin |
+| Hosting (staattinen) | Tarjoaa `.output/public`-hakemiston tiedostoina, joten `/_locales/**` saa Hostingin otsakkeet |
+
+Staattisessa Hostingissa, jos JSON palaa väärällä `Content-Type`-arvolla tai välimuistituksella, lisää `firebase.json`-tiedostoon `headers`-merkintä polulle `/_locales/**`. Nuxtin `routeRules`-otsakkeet eivät koske tiedostoja, jotka Hosting tarjoaa itse; payload-reitti asettaa oman `Content-Type`- ja `Cache-Control`-arvonsa vastauksiin, jotka tavoittavat palvelimen.
+
+### AWS Amplify {#aws-amplify}
+
+`aws-amplify` säilyttää staattiset tiedostot laskentakansionsa vieressä, ei palvelimen vieressä, joten payloadit upotetaan kuten funktioalustalla.
+
+### Saman käännöksen useita instansseja {#several-instances-of-one-build}
+
+Yhtä artefaktia voidaan ajaa eri oletuskielellä tai käytöstä poistetulla kielellä instanssikohtaisesti ympäristömuuttujien avulla: katso [Ajonaikaiset ohitukset](/fi/guide/runtime-overrides). Vain ajon aikana käytöstä poistetun kielen staattiset tiedostot ovat edelleen hakemistossa `public/`; poista se käytöstä käännösvaiheessa, jos niiden ei pidä olla saavutettavissa.
+
+Instanssit, jotka lataavat sanakirjoja etäpalvelimelta, voivat jakaa ne Redisissä, Upstashissa, Cloudflare KV:ssä tai D1:ssä, Deno KV:ssä tai muussa Nitro-tallennustilassa, jolloin taustajärjestelmä saa yhden pyynnön instanssikohtaisten sijaan. Se on välimuisti, ei käännösten lähde: katso [Jaettu välimuisti useille instansseille](/fi/guide/performance#shared-cache-for-several-instances).
+
+## Välityspalvelimen tai CDN:n takana {#behind-a-proxy-or-cdn}
+
+Sovelluksen on saatava julkinen isäntä ja skeema selville pyynnöstä.
+
+| Välityspalvelin lähettää                     | Tavallinen käännös                               | Käännös, jossa kielillä on `baseUrl`                                              |
+| -------------------------------------------- | ------------------------------------------------ | --------------------------------------------------------------------------------- |
+| Todellisen `Host`-otsakkeen                  | Ei mitään asetettavaa                            | Ei mitään asetettavaa                                                             |
+| Alkuperän `Host`-otsakkeen sekä `X-Forwarded-Host` | Ei mitään asetettavaa                      | [`trustForwardedHost: true`](/fi/api/module-options#trustforwardedhost)           |
+| Ei kumpaakaan                                | [`metaBaseUrl`](/fi/api/module-options#metabaseurl) | Mikään asetus ei auta: jokainen pyyntö näyttää alkuperän isännältä, joten muuta välityspalvelinta |
+
+- **`swr`- tai `cache`-reitit.** Taulukko ei päde niissä: katso [HTML:n välimuistitus](#caching-html). Aseta `metaBaseUrl` tai `site.url`.
+- **`X-Forwarded-Proto`.** Lähetä se, tai canonical-URL-osoitteet näyttävät `http://` HTTPS-välityspalvelimen takana. Myös `metaBaseUrl` korjaa tämän.
+- **Verkkotunnuskäännöksessä** verkkotunnus valitsee tagien perus-URL:n. `metaTrustForwardedHost` ei valitse siellä verkkotunnusta, vain `trustForwardedHost` valitsee.
+- **Uudelleenohjaukset ovat suhteellisia, eikä kielievästeellä ole `Domain`-arvoa,** joten molemmat pysyvät julkisella isännällä.
+
+<Warning>
+
+**Kiinnitä `metaBaseUrl`, kun alkuperä pysyy saavutettavissa** — Tavallisessa käännöksessä ilman `metaBaseUrl`- tai `site.url`-asetusta canonical, `hreflang` ja `og:url` ottavat isäntänsä pyynnöstä. [`metaTrustForwardedHost`](/fi/api/module-options#metatrustforwardedhost) on oletuksena päällä, joten suora pyyntö otsakkeella `X-Forwarded-Host: evil.example` saa noihin tageihin arvon `https://evil.example`, ja edessä oleva välimuisti levittää tuon sivun. Alustan isäntä, kuten `*.workers.dev`, on juuri tällainen alkuperä. `metaBaseUrl` sulkee tämän myös `Host`-otsakkeelta. Verkkotunnuskäännöksen tunnettu isäntä säilyttää oman `baseUrl`-arvonsa. Asetuksella `trustForwardedHost: true` suora asiakas voi valita toisen verkkotunnuksen sivun, joten ota se käyttöön vain välityspalvelimen takana, joka ylikirjoittaa otsakkeen.
+
+</Warning>
+
+## HTML:n välimuistitus {#caching-html}
+
+Useimmat URL-osoitteet on turvallista tallentaa välimuistiin, koska ne nimeävät kielensä. Nämä riippuvat vierailijasta:
+
+| Asetelma                       | URL-osoitteet                                     |
+| ------------------------------ | ------------------------------------------------- |
+| Oletus, `autoDetectPath: '/'`  | `/`                                               |
+| `prefix`                       | `/` ja jokainen etuliitteetön URL, jotka vain ohjaavat uudelleen |
+| `autoDetectPath: '*'`          | Jokainen URL                                      |
+| `no_prefix`                    | Jokainen sivu                                     |
+
+- **`Vary`.** Näissä vastauksissa on `Vary`, jossa on `Cookie`, kun [`localeCookie`](/fi/api/module-options#localecookie) on asetettu, ja `Accept-Language`, kun `autoDetectLanguage` on päällä. Sitä noudattava välimuisti pitää vastaukset erillään.
+- **`Vary`-otsakkeen huomiotta jättävän välimuistin,** kuten "tallenna kaikki URL-osoitteen mukaan", on ohitettava nämä URL-osoitteet. Muuten yhden vierailijan `302 /de` päätyy seuraavalle vierailijalle, ja tallennettu oletussivu poistaa uudelleenohjauksen kaikilta. Polulle `/` voit myös asettaa `redirects: false`. Nitron reittivälimuisti avaintaa polun ja sen `varies`-listan mukaan, joten pidä `/` myös poissa `swr`- ja `cache`-säännöistä.
+- **`Set-Cookie`.** Kun `localeCookie` on asetettu, jokaisessa etuliitteen alla palvelimella renderöidyssä sivussa on `Set-Cookie`, eikä oikein toimiva CDN tallenna sitä. Välimuistiin tallennettavaa HTML:ää varten jätä `localeCookie` pois päältä tai poista otsake reunalla.
+- **`swr`- ja `cache`-säännöt tarvitsevat `metaBaseUrl`- tai `site.url`-asetuksen.** Nitro renderöi tällaisen reitin vain `cache.varies`-listan otsakkeilla, joten `Host`, `X-Forwarded-Host` ja `X-Forwarded-Proto` puuttuvat ja pyynnön URL on `http://localhost`. Ilman kiinteää alkuperää canonical, `hreflang` ja `og:url` osoittavat näillä reiteillä osoitteeseen `http://localhost` kaikilla alustoilla. Pelkän Nuxtin `useRequestURL()` lukee siellä saman. Isännän ottaminen vierailijalta sen sijaan veisi yhden vierailijan `X-Forwarded-Host`-arvon sivulle, jonka jokainen vierailija saa. Verkkotunnuskäännökseen tämä ei vaikuta: sen tagit käyttävät kielten `baseUrl`-arvoa.
+
+  Jos yksi käännös palvelee useita isäntiä eikä mikään yksittäinen alkuperä sovi, anna säännön nähdä otsakkeet ja säilytä yksi kopio arvoa kohden: `'/blog/**': { swr: 60, cache: { varies: ['host', 'x-forwarded-host', 'x-forwarded-proto'] } }`. Jokainen erillinen arvo on uusi välimuistimerkintä, joten keksittyjä otsakkeita lähettävä asiakas täyttää välimuistin: sijoita alkuperä välityspalvelimen taakse, joka asettaa ne.
+- **`swr`- ja `cache`-säännöt verkkotunnuskäännöksessä.** Moduuli lisää `host`-arvon jokaisen tällaisen säännön `cache.varies`-listaan, ja `x-forwarded-host`-arvon `trustForwardedHost`-asetuksella, jotta yksi verkkotunnus ei tarjoa toiselle sen sivua. Sääntö, jossa on `cache: false`, pysyy kirjoitetun mukaisena. `isr` on alustan välimuisti: tarkista, että se avaintaa isännän mukaan. Kun isäntä on avaimessa, keksittyjä isäntiä lähettävä asiakas lisää välimuistimerkintöjä.
+
+Payload-tiedostoista katso [Välimuistiotsakkeet ja dateBuild](#cache-headers-and-datebuild).
+
+## Aiheeseen liittyvää {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Suorituskyvyn viritys" icon="book-open" href="/fi/guide/performance">
+
+</Card>
+
+<Card title="Ajonaikaiset ohitukset" icon="book-open" href="/fi/guide/runtime-overrides">
+
+</Card>
+
+<Card title="translationPayloads-viite" icon="brackets-curly" href="/fi/api/module-options#translationpayloads">
+
+</Card>
+
+<Card title="Kerrokset ja verkkotunnukset" icon="book-open" href="/fi/guide/layers">
+
+</Card>
+
+<Card title="SEO" icon="book-open" href="/fi/guide/seo">
+
+</Card>
+
+</CardGroup>

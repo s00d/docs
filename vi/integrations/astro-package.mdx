@@ -1,0 +1,249 @@
+---
+title: "Astro"
+description: "Bản dịch phía server, route có tiền tố locale, phát hiện ngôn ngữ ở trang chủ và thẻ SEO cho Astro với @i18n-micro/astro."
+---
+
+`@i18n-micro/astro` dịch các trang Astro trên server: một middleware chọn locale từ URL và đặt một instance cho mỗi request vào `Astro.locals`, và `useI18n(Astro)` đọc nó. Hãy dùng nó trong một site Astro cần URL có tiền tố locale (`/about`, `/fr/about`) và từ điển JSON dùng chung. Bạn có các component `.astro`, chuyển hướng trang chủ tới ngôn ngữ của khách truy cập, thẻ `hreflang` và props cho [island](/vi/integrations/astro-islands).
+
+## Cài đặt {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add @i18n-micro/astro
+```
+
+```bash npm
+npm install @i18n-micro/astro
+```
+
+```bash yarn
+yarn add @i18n-micro/astro
+```
+
+</CodeGroup>
+
+Peer dependency: `astro` `^5.0.0 || ^6.0.0 || ^7.0.0`. Tùy chọn, chỉ dành cho [island](/vi/integrations/astro-islands): `vue` `^3.3.0`, `react` `^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0`, `preact` `^10.0.0 || ^11.0.0`, `svelte` `^4.0.0 || ^5.0.0`.
+
+## Thiết lập {#setup}
+
+Thêm integration. Nó đóng gói từ điển của bạn vào server và cài đặt middleware, nên không cần `src/middleware.ts`:
+
+```ts
+// astro.config.mjs
+import { defineConfig } from 'astro/config'
+import node from '@astrojs/node'
+import { i18nIntegration } from '@i18n-micro/astro'
+
+export default defineConfig({
+  output: 'server',
+  adapter: node({ mode: 'standalone' }),
+  integrations: [
+    i18nIntegration({
+      locale: 'en',
+      fallbackLocale: 'en',
+      locales: [
+        { code: 'en', iso: 'en-US', displayName: 'English' },
+        { code: 'de', iso: 'de-DE', displayName: 'Deutsch' },
+        { code: 'fr', iso: 'fr-FR', displayName: 'Français' },
+      ],
+      translationDir: 'src/locales',
+    }),
+  ],
+})
+```
+
+Các từ điển trở thành mã lúc build: server không đọc đĩa, nên nó cũng chạy được trên edge (Cloudflare, Vercel Edge). Trong `astro dev`, một chỉnh sửa trong tệp sẽ áp dụng ở request tiếp theo.
+
+### Tùy chọn integration {#integration-options}
+
+| Tùy chọn | Mặc định | Ghi chú |
+| --- | --- | --- |
+| `locale` | bắt buộc | Locale mặc định. |
+| `fallbackLocale` | `locale` | |
+| `locales` | `[]` | Đối tượng `Locale` đầy đủ. Một locale `disabled` không phải là locale của URL nào và không phải đích chuyển hướng. `iso` là thẻ dùng để chia số nhiều khi mã không phải là thẻ hợp lệ (`ua` → `uk-UA`). |
+| `translationDir` | không có | Thư mục được đóng gói vào server, tương đối với thư mục gốc dự án. |
+| `disablePageLocales` | `false` | Các tệp trang được tính là bản dịch gốc. |
+| `autoDetect` | `true` | Chuyển hướng trang chủ, xem [Phát hiện locale](#locale-detection). |
+| `redirectToDefault` | `false` | `/` cũng chuyển hướng khi không có gì ưu tiên locale khác. |
+| `localeCookie` | `'i18n-locale'` | `null` vô hiệu hóa cookie. |
+| `missingWarn` | `false` | |
+| `middleware` | `true` | `false`: tự viết middleware, xem bên dưới. |
+
+Các thiết lập runtime được công bố trong `virtual:i18n-micro/config` (`config.base` là `base` của Astro, `config.localeCodes` là các mã đang bật), các từ điển trong `virtual:i18n-micro/messages`.
+
+### Middleware của riêng bạn {#your-own-middleware}
+
+Một quy tắc số nhiều, một handler cho khóa bị thiếu và một router adapter không thể đi từ tiến trình cấu hình sang bundle server. Với những thứ đó, hãy truyền `middleware: false` và viết `src/middleware.ts`. Khi đó cấu hình `i18n` của Astro được đặt sẵn cho bạn với `routing: 'manual'`, nên `Astro.currentLocale` và `astro:i18n` hoạt động. Astro không cho phép thiết lập đó khi không có `src/middleware.ts`, nên với middleware riêng của integration thì chúng không hoạt động.
+
+```ts
+// src/middleware.ts
+import { config } from 'virtual:i18n-micro/config'
+import { messages } from 'virtual:i18n-micro/messages'
+import { createAstroRouterAdapter, createI18n, createI18nMiddleware, localeIsoMap } from '@i18n-micro/astro'
+
+const i18n = createI18n({
+  locale: config.defaultLocale,
+  fallbackLocale: config.fallbackLocale,
+  localeIso: localeIsoMap(config.locales),
+  messages: messages.root,
+  routeMessages: messages.routes,
+  plural: myPluralRule,
+})
+
+export const onRequest = createI18nMiddleware({
+  i18n,
+  defaultLocale: config.defaultLocale,
+  locales: config.localeCodes,
+  localeObjects: config.locales,
+  autoDetect: config.autoDetect,
+  redirectToDefault: config.redirectToDefault,
+  localeCookie: config.localeCookie,
+  base: config.base,
+  routingStrategy: createAstroRouterAdapter(config.locales, config.defaultLocale),
+})
+```
+
+Để đọc thư mục lúc runtime thay vào đó, `loadTranslationsFromDir` và `loadTranslationsIntoI18n` nằm trong `@i18n-micro/astro/node` (chỉ Node).
+
+### Tùy chọn middleware {#middleware-options}
+
+| Tùy chọn | Mặc định | Ghi chú |
+| --- | --- | --- |
+| `i18n` | bắt buộc | Instance toàn cục; mỗi request nhận `i18n.fork(locale)`, chi phí như nhau bất kể có bao nhiêu từ điển. |
+| `defaultLocale` | bắt buộc | |
+| `locales` | bắt buộc | Mã locale. |
+| `localeObjects` | `locales` dưới dạng `{ code }` | Đối tượng `Locale` đầy đủ cho component và SEO. |
+| `autoDetect` | `true` | Chuyển hướng trang chủ, xem [Phát hiện locale](#locale-detection). |
+| `redirectToDefault` | `false` | `/` cũng chuyển hướng khi không có gì ưu tiên locale khác, tới trang chủ của locale mặc định theo cách chiến lược định tuyến phân giải. |
+| `localeCookie` | `'i18n-locale'` | `null` vô hiệu hóa cookie. |
+| `routingStrategy` | tiền tố trừ mặc định | Router adapter. Các phương thức nó bỏ qua được lấy từ adapter mặc định. |
+| `base` | không có | `base` của Astro: `config.base`. |
+
+Các tệp trang (`src/locales/pages/blog/post/de.json`) là route `blog-post`: đường dẫn trang được nối bằng `-`.
+
+## Dịch {#translate}
+
+```astro
+---
+// src/pages/index.astro
+import { useI18n } from '@i18n-micro/astro'
+import I18nT from '@i18n-micro/astro/i18n-t'
+
+const { t, tc, locale } = useI18n(Astro)
+---
+
+<h1>{t('greeting', { name: 'Ada' })}</h1>
+<p>{tc('apples', 3)}</p>
+<I18nT keypath="welcome" tag="p" />
+<p>{locale}</p>
+```
+
+`useI18n(Astro)` trả về `locale`, `defaultLocale`, `locales`, `t`, `ts`, `tc`, `tn`, `td`, `tdr`, `has`, `getRoute`, `getRouteName(path?)`, `getLocaleFromPath(path?)`, `switchLocalePath(locale)`, `localizePath(path, locale?)`, `getBasePath(url?)`, `getI18n`, `addTranslations`, `addRouteTranslations`, `mergeTranslations` và `clearCache`. Nó ném lỗi khi middleware chưa chạy. Các helper `getI18n`, `getLocale`, `getDefaultLocale` và `getLocales` đọc cùng `Astro.locals`.
+
+Tên route được lấy từ route không có locale: `/fr/blog/post` → `blog-post`, và mọi URL của `src/pages/blog/[slug].astro` → `blog-slug`, nên một thư mục `locales/pages/blog-slug/` phục vụ tất cả. `[...path]` là `path`. Dưới `base` của Astro, các helper nhận và trả về URL của site: `switchLocalePath` và `localizePath` bao gồm nó, `getBasePath` thì không, vì `Astro.rewrite` nhận đường dẫn không có nó.
+
+### Component {#components}
+
+Import chúng từ `@i18n-micro/astro/<name>` (hoặc `@i18n-micro/astro/components/<name>.astro`):
+
+| Component | Props |
+| --- | --- |
+| `i18n-t` | `keypath`, `params`, `plural`, `number`, `date`, `relativeDate`, `tag` (`span`, bất kỳ thẻ nào), `html`, `hideIfEmpty`, `defaultValue`; các thuộc tính khác được truyền qua. Với `html`, kết quả của mọi nhánh được render dưới dạng HTML và `params` được escape. Không có slot |
+| `i18n-link` | `href`, `locale` (locale đích, mặc định là hiện tại), `class`; các thuộc tính khác được truyền qua. URL bên ngoài, `#hash` và `?query` giữ nguyên như khi viết; một route giữ query, hash và dấu gạch chéo cuối của nó |
+| `i18n-switcher` | `class`, `activeClass` (`'active'`), `customLabels`; render các liên kết tới trang hiện tại trong mỗi locale đang bật, kèm query của nó |
+| `i18n-group` | không có prop nào thay đổi đầu ra: một `<div>` bao quanh slot của nó, không có tiền tố |
+
+## Route có tiền tố locale {#locale-prefixed-routes}
+
+Giữ mỗi route một trang trong `src/pages/` và thêm các stub rewrite mỏng dưới `src/pages/[locale]/`:
+
+```
+src/pages/
+  index.astro
+  about.astro
+  [locale]/
+    index.astro
+    about.astro
+```
+
+```astro
+---
+// src/pages/[locale]/about.astro
+import { prepareLocaleRewrite } from '@i18n-micro/astro'
+
+const target = prepareLocaleRewrite(Astro)
+if (target instanceof Response) return target
+return Astro.rewrite(target)
+---
+```
+
+`prepareLocaleRewrite` trả về response `404` cho một `:locale` không xác định, nếu không thì đặt locale trên `Astro.locals` và trả về đường dẫn không có tiền tố. Middleware giữ locale đã có trong `locals`, nên trang được rewrite sẽ render bằng locale đó. `getLocaleRewritePath(Astro)` chỉ trả về đường dẫn, khi bạn tự xác thực locale.
+
+## Phát hiện locale {#locale-detection}
+
+URL quyết định locale của trang:
+
+1. Một tiền tố locale (`/fr/about` → `fr`; `/en/about` cũng là `en`).
+2. Nếu không, giá trị mà `getLocaleFromPath` của router adapter trả về, nếu đó không phải mặc định.
+3. Nếu không, locale mặc định. `/about` luôn là trang của locale mặc định, bất kể cookie nói gì.
+
+`autoDetect` là gợi ý chuyển hướng chỉ trên trang chủ:
+
+- Một request tới `/` có cookie hoặc `Accept-Language` ưu tiên locale khác sẽ nhận `302` tới trang chủ của locale đó (`/de`). Trọng số q được tôn trọng; `de-DE` khớp với locale `de`, và `de` khớp với locale `de-DE`.
+- Với `redirectToDefault`, `/` luôn chuyển hướng: tới trang chủ của locale được ưu tiên, nếu không thì của locale mặc định.
+- Response của `/` mang `Vary: Cookie, Accept-Language` (chỉ `Accept-Language` khi `localeCookie` là `null`).
+- Các trang prerender không bao giờ chuyển hướng.
+
+`detectLocale(pathname, cookies, headers, defaultLocale, locales, localeCookie?, routingStrategy?, autoDetect?)` trả về cùng locale ưu tiên cho logic của riêng bạn.
+
+Cookie ghi nhớ một lựa chọn. Một lượt xem trang đến từ một trang cùng origin thuộc locale khác được coi là khách truy cập đang chuyển ngôn ngữ, bất kể liên kết nào đưa họ đến: response HTML đặt cookie thành locale mới, và `/` không chuyển hướng, nên một bộ chuyển ngôn ngữ có thể tới trang chủ của locale mặc định. Một endpoint, một hình ảnh, một trang 404, một form post và một prefetch không thay đổi gì. "Cùng origin" là điều trình duyệt cho biết trong `Sec-Fetch-Site`; khi không có header đó, host của `Referer` được so sánh với host của request, nên khi đứng sau proxy hãy đặt `security.allowedDomains` của Astro.
+
+Một [server island](https://docs.astro.build/en/guides/server-islands/) hoặc một action không có locale trong URL. Nó được render cho trang đã yêu cầu, đọc từ `Referer`, trong đó chỉ đường dẫn là quan trọng, nên một proxy đứng trước server không thay đổi gì, và nó không bao giờ chuyển hướng. Response của nó mang `Vary: Referer`. Khi không có `Referer` (chính sách `no-referrer`), nó dùng locale mặc định, và trên một trang động, route của nó lấy từ URL, nên từ điển trang không đến được nó.
+
+## Router adapter {#router-adapter}
+
+`createAstroRouterAdapter(locales, defaultLocale)` thêm tiền tố cho mọi locale trừ locale mặc định. Một adapter Astro chỉ cần `getCurrentPath`; các thành viên khác là tùy chọn và quay về adapter mặc định: `getRouteName(path, locales, routePattern?)`, `getLocaleFromPath`, `switchLocalePath`, `localizePath`, `removeLocaleFromPath`, `resolvePath` (đích chuyển hướng trang chủ), `push`, `replace`, `getRoute`. Hãy tự viết adapter cho URL dạng subdomain hoặc hậu tố và truyền nó cho `createI18nMiddleware`.
+
+## SEO {#seo}
+
+```astro
+---
+// src/layouts/Layout.astro
+import { useLocaleHead } from '@i18n-micro/astro'
+
+const head = useLocaleHead(Astro, { baseUrl: 'https://example.com' })
+---
+
+<html lang={head.htmlAttrs.lang} dir={head.htmlAttrs.dir}>
+  <head>
+    {head.link.map((l) => <link rel={l.rel} href={l.href} hreflang={l.hreflang} />)}
+    {head.meta.map((m) => <meta property={m.property} content={m.content} />)}
+  </head>
+  <body><slot /></body>
+</html>
+```
+
+Nó trả về `htmlAttrs` (`lang` từ `iso`, `dir`), một liên kết canonical (đường dẫn không có query), các alternate `hreflang` cho mọi locale đang bật có `seo !== false` cùng với `x-default`, `og:locale`, `og:locale:alternate` và `og:url`. Tùy chọn: `baseUrl` (`site` từ cấu hình Astro, nếu không thì URL tương đối với gốc), `addDirAttribute` (`true`), `addSeoAttributes` (`true`), `hreflangBaseLanguage` (`false`).
+
+## Liên quan {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Astro island" icon="book-open" href="/vi/integrations/astro-islands">
+
+Bản dịch bên trong các island Vue, React, Preact và Svelte
+
+</Card>
+
+<Card title="Framework" icon="book-open" href="/vi/integrations/overview">
+
+Tùy chọn instance và định dạng
+
+</Card>
+
+<Card title="Tham chiếu package" icon="brackets-curly" href="/vi/api/packages/astro">
+
+</Card>
+
+</CardGroup>

@@ -1,0 +1,327 @@
+---
+title: "CLI"
+description: "在命令行中于 CI 里检查翻译、查找未使用的键、通过翻译服务补全缺失内容，并与译者交换文件。"
+---
+
+`@i18n-micro/cli` 用于管理 Nuxt 项目的语言环境文件。它会从 `nuxt.config` 中读取 `locales`、`defaultLocale`、`translationDir` 以及你的层，因此无需单独配置。
+
+![A terminal running i18n-micro check, which lists a missing, an undefined and four unused keys and fails, then extract, which adds the undefined key, then clean --dryRun, which lists the four keys it would remove](/images/cli/demo.gif)
+
+| 命令 | 用途 |
+| --- | --- |
+| `check` | 当语言环境文件存在任何问题时让构建失败 |
+| `translate` | 通过翻译服务补全缺失的键 |
+| `clean` | 删除没有任何地方使用的键 |
+| `rename` | 一次性在所有位置移动某个键或整个命名空间 |
+
+```bash
+npm install -D @i18n-micro/cli
+npx i18n-micro --help
+```
+
+请在应用根目录运行，或通过 `--cwd` 指定根目录。每个命令的所有参数都列在[命令参考](/zh-CN/api/cli)中。
+
+<Tip>
+
+**从 nuxt-i18n-micro-cli 迁移？** `@i18n-micro/cli` 取代了它；可执行文件 `i18n-micro` 和 `i18n-micro-cli` 保持不变。参见[旧命令对照表](#moving-from-nuxt-i18n-micro-cli)。
+
+</Tip>
+
+## 在 CI 中使用 {#use-it-in-ci}
+
+```bash
+i18n-micro check
+```
+
+`check` 是质量关卡。它会报告：
+
+| 检查项 | 含义 |
+| --- | --- |
+| `missing` | 默认语言环境中的某个键在某个语言环境中缺失 |
+| `empty` | 某个值为 `''`。应用会显示空白，而不是回退内容 |
+| `extra` | 某个语言环境中有默认语言环境所没有的键 |
+| `placeholders` | `{name}` 丢失或多出，或复数丢失了某些形式 |
+| `undefined` | 代码使用了默认语言环境中不存在的键 |
+| `unused` | 项目中没有任何地方使用某个键 |
+| `duplicates` | 相同的文本出现在不同的键下。默认关闭：需传入 `--duplicates` |
+
+- `--only missing,placeholders` 只运行部分检查；`--only` 中指定但无法运行的检查会判定为失败。
+- `--json` 会输出供工具使用的报告。
+- `--ignore` 用于跳过源文件。
+- 当键在运行时计算时，会跳过 `unused` 检查，并在报告中说明原因。
+
+每个命令都会以三种退出码之一结束，因此流水线可以区分是翻译出了问题还是工具出了问题：
+
+| 退出码 | 含义 |
+| --- | --- |
+| `0` | 没有需要报告的内容 |
+| `1` | 发现问题 |
+| `2` | 命令无法运行：用法错误、文件损坏、请求失败 |
+
+其他值得加入 CI 步骤的命令：
+
+```bash
+i18n-micro format --check      # fails if a file is not formatted
+i18n-micro lint                # stray spaces, empty values, your own regex rules
+i18n-micro stats --baseRef main
+```
+
+## 保持各语言环境同步 {#keep-locales-in-step}
+
+| 命令 | 作用 |
+| --- | --- |
+| `extract` | 列出代码中使用但尚无文本的键。默认文本（如 `$t('key', {}, 'Welcome')` 中的文本）会写入默认语言环境。 |
+| `sync` | 删除默认语言环境中没有的键。请先尝试 `--dryRun`。 |
+| `clean` | 删除没有任何地方使用的键。请先尝试 `--dryRun`。 |
+| `search` | 查找键和值，并显示每个键的使用位置。 |
+| `stats` | 每个语言环境的完成度；`--baseRef main` 可与某个 git ref 进行比较。 |
+
+当 `sync` 将要删除一个无法证明未被使用的键时，它会像 `clean` 一样停止；当默认语言环境没有可比较的内容时也会停止。没有需要删除的内容时它永远不会停止，因此仅仅出现 `$t(item.label)` 并不构成使用 `--force` 的理由。
+
+<Note>
+
+`extract` 和 `sync` 绝不会为没有翻译的键写入 `''`。该键保持缺失，因此运行时会应用 `fallbackLocale`，`check` 也会报告它。空字符串会被视为已定义的值并显示为空白。
+
+</Note>
+
+### 命令读取哪些内容 {#what-the-commands-read}
+
+`check`、`extract`、`sync`、`clean`、`search` 和 `rename` 会读取整个项目的源代码，而不是固定的文件夹列表：
+
+- **读取：** 通过解析器读取模板和脚本，以文本方式读取 `.html` 和 Pug，读取每个层，以及别名或 `components` 指向的根目录之外的文件夹。
+- **跳过：** `node_modules`、构建输出和语言环境文件。可通过 `--ignore 'legacy/**,*.stories.ts'` 添加你自己的规则。
+- **测试代码** 也算作使用，因此 `clean` 和 `check --only unused` 会保留仅被测试读取的键。它永远不会添加键：`extract` 会跳过这类键，`check` 也不会将它们报告为 undefined。
+
+测试代码指根目录下的 `tests`、`test`、`__tests__`、`e2e`、`cypress` 和 `playwright` 文件夹，以及任意位置的 `.spec` 和 `.test` JavaScript 与 TypeScript 文件（`.ts`、`.tsx`、`.mts`、`.js`、`.jsx`、`.mjs` 等）。只有这些根目录文件夹不受下文所述疑点的影响：`pages/tests/[id].vue` 和其他页面一样是普通页面，`public/` 和压缩文件也是如此，它们的代码不属于应用的一部分。
+
+这些命令能识别：
+
+- `$t`、`$ts`、`$tc`、`$has` 和 `$_t(route)`；
+- 来自 `useI18n()` 和 `useTranslationServerMiddleware()` 的 `t()`；
+- 模板和 JSX 中的 `<i18n-t keypath>`，以及 `<i18n-group prefix>`；
+- 别名，如 `const { t: tr } = useI18n()`。
+
+### `clean` 如何判断 {#how-clean-decides}
+
+`clean` 宁可保留一个失效的键，也不会删除一个仍在使用的键。只要满足以下任一条件，键就会被保留：
+
+- 有调用使用了它，或使用了它下级或上级的键；
+- 代码中有字符串与它相等：`const key = 'menu.home'`、`<Item label="menu.home" />`；
+- 项目中的某个 JSON、YAML 或 Markdown 文件包含它；
+- 某个计算出的键具有覆盖它的静态开头：`` $t(`status.${state}`) `` 会保留 `status.` 下的所有内容；
+- 某个层定义了它。
+
+当 `clean` 无法确定时，它会在不做任何更改的情况下停止，并列出原因：
+
+- 某个键完全是计算出来的，如 `$t(name)`、`<i18n-t :keypath="name" />` 或 `<i18n-t v-bind="props" />`；
+- `$t` 被作为值传递，如 `items.map($t)`；
+- 某个名为 `t` 的函数接收了计算出的参数，并且它来自参数、导入或调用：它可能是对真正函数的封装。在同一文件中定义的函数不算，因为封装函数内部会有自己的调用；
+- 某个源文件无法解析；
+- 没有任何文件使用任何键，这通常意味着它找错了地方；
+- 某个语言环境文件是指向项目之外的符号链接，因此可能有其他应用在读取它。
+
+<Steps>
+
+<Step title="预览">
+
+运行 `i18n-micro clean --dryRun` 并检查它列出的内容。
+
+</Step>
+
+<Step title="保护键">
+
+使用 `--exclude '^errors\.'` 保留那些只是看起来未被使用的键。
+
+</Step>
+
+<Step title="删除">
+
+加上 `--force` 再次运行。
+
+</Step>
+
+</Steps>
+
+## 翻译缺失的键 {#translate-missing-keys}
+
+```bash
+i18n-micro translate --dryRun                     # keys and characters per locale, nothing sent
+export I18N_TRANSLATE_TOKEN=...                   # or put it in .env
+i18n-micro translate --service deepl --locale de,fr
+```
+
+- `translate` 会补全缺失或为空的键；`--replace` 会重新翻译所有内容。
+- 占位符和复数形式受到保护。丢失了占位符的翻译不会被写入：该键会被列出，命令以 `1` 退出。
+- 每一批结果都会在发出下一个请求之前保存，因此失败只会损失失败的那个请求。
+
+| `--service` | 服务 | `--token` | 常用 `--options` |
+| --- | --- | --- | --- |
+| `ai` | Vercel AI Gateway、OpenAI、Anthropic 或任何兼容 OpenAI 的服务器 | API 密钥，或 `AI_GATEWAY_API_KEY`、`OPENAI_API_KEY`、`ANTHROPIC_API_KEY` | `provider`, `model`, `baseUrl`, `maxTokens` |
+| `azure` | Azure Translator | 订阅密钥 | `region` |
+| `deepl` | DeepL，包括免费密钥 | 认证密钥 | `formality`, `glossaryId`, `context` |
+| `google` | Google Cloud Translation v2 | API 密钥 | `model` |
+| `libretranslate` | LibreTranslate | 可选 | `baseUrl` |
+| `yandexcloud` | Yandex Cloud Translate | API 密钥，或配合 `authScheme:Bearer` 使用的 IAM 令牌 | `folderId`, `model` |
+
+选项为 `key:value` 键值对：`--options provider:openai,model:gpt-4o-mini`。所有服务还接受 `baseUrl`、`retries`、`retryDelayMs` 和 `timeoutMs`。翻译请求可能已经产生费用，因此只有在收到 `429` 或 `503` 后才会重试，并且当服务要求等待超过一分钟时不会重试。
+
+<Warning>
+
+命令行参数会出现在 shell 历史记录和进程列表中，因此请通过环境变量传递令牌。CLI 在任何输出中（包括 `--debug`）都会遮蔽它已知的机密信息：令牌、服务商密钥、Basic 凭据，以及你配置的 URL 中的查询参数和凭据。如果服务器在回显密钥之前对其进行了格式变换，CLI 就无法处理，因此请谨慎对待失败运行的日志。
+
+</Warning>
+
+`ai` 服务会遵循术语表。当存在 `.i18n-glossary.json` 时，无需任何参数即可使用它；`--glossaryFile` 可指定其他文件。
+
+```json .i18n-glossary.json
+{ "entries": [{ "source": "Cart", "target": "Warenkorb", "to": "de" }] }
+```
+
+## 将硬编码文本转换为键 {#turn-hardcoded-text-into-keys}
+
+```bash
+i18n-micro text-to-i18n --dryRun   # list what would change
+i18n-micro text-to-i18n            # rewrite the templates
+```
+
+```vue
+<!-- before -->
+<h1>Welcome to our site</h1>
+<!-- after -->
+<h1>{{ $t('pages.index.welcome-to-our') }}</h1>
+```
+
+只会重写项目本身的 `.vue` 模板，不会重写层或别名目标中的模板。每个被重写的文件在写入之前都会重新解析一次。以下内容会被列出并保留原文本：
+
+- `.ts` 文件和脚本中的文本，因为 `$t` 并非在所有地方都可用；
+- 与标记或插值相邻的文本，例如 `<p>Hello <b>world</b> today</p>`：半个句子无法单独翻译；
+- 生成的键会与另一个键冲突的情况，例如父页面与其子页面之间可能出现的冲突；
+- 无法放入引号之间的已知键。
+
+<Warning>
+
+请先提交代码，并检查 diff。
+
+</Warning>
+
+## 重命名键 {#rename-a-key}
+
+```bash
+i18n-micro rename --from common.save --to actions.save
+i18n-micro rename --from settings --to account.settings   # a whole namespace
+```
+
+`rename` 直接编辑语法树，因此注释和无关的字符串都会保持原样，并且会跟踪别名和 `:keypath`。层自身的文件永远不会被修改。对于它无法重写的内容，它会给出警告并保持不变：
+
+- 旧名称下计算出的键；
+- 每个与之相等的普通字符串；
+- Pug 模板；
+- 位于层中或项目之外文件夹中的源文件。
+
+`--to` 必须是可以写在代码中的键：不能包含引号、反斜杠、空段，也不能是 `__proto__`。
+
+## 与译者交换文件 {#exchange-files-with-translators}
+
+```bash
+i18n-micro export --format csv
+i18n-micro import --format csv --dryRun
+```
+
+**`export`** 会写出每个语言环境的所有键（包括未翻译的键），并以默认语言环境的文本作为源文本：在 CSV 中为 `Source` 列，在 PO 中为 `#.` 注释。
+
+- 未指定 `--dir` 时，PO 输出到 `pots`，CSV 输出到 `csv_exports`。
+- 它会在输出文件夹的 `.i18n-export.json` 中记录写出的内容。如果某个文件自那以后被修改过，并且包含语言环境文件中没有的翻译（包括 fuzzy 的 PO 条目），它会停止；`--force` 会覆盖这些文件。对语言环境文件的普通编辑不会使其停止。
+
+**`import`** 会进行合并，跳过空单元格，并跳过标记为 `fuzzy` 的 PO 条目。
+
+- 会覆盖已有值的键，或覆盖整组键的值，会被列出并跳过，命令以 `1` 退出。
+- 遇到以下情况时会以退出码 `2` 停止：目录文件位于意外的位置、上次导出未写出的页面目录文件、CSV 中引号位置错误，或在 `disablePageLocales` 下出现页面条目。
+
+对于翻译平台，请使用其自身的 CLI：[Crowdin](/zh-CN/guide/crowdin) 配置会同步 JSON 文件，包括页面文件。
+
+## 与你自己的端点同步 {#sync-with-your-own-endpoint}
+
+`sync-remote` 会与你运行的 HTTP 端点交换全局语言环境文件。页面文件保留在本地，命令也会对此作出说明。在 `.i18n-remote.json` 中描述该端点：
+
+```json .i18n-remote.json
+{ "url": "https://translations.example.com", "path": "translations" }
+```
+
+该端点使用 `{ locale: messages }` 对象响应 `GET` 和 `PUT`。可以通过 `auth: { username, password }` 进行认证，或将 bearer 令牌放在 `I18N_REMOTE_TOKEN` 中。
+
+| | Pull | Push |
+| --- | --- | --- |
+| 传输内容 | 补全你没有的内容，并保留只有你才有的键 | 发送项目自身的键（不包括层的键），并忽略你的空值 |
+| 冲突 | 两侧不同的键：不写入任何内容，以 `1` 退出；`--force` 采用远端的值 | PUT 会替换整个文档，因此 push 会先读取端点，若其中包含你没有的文本则以 `1` 退出；`--force` 会覆盖它。返回 `404` 的端点没有可丢失的内容 |
+| `--dryRun` | 从端点读取，列出变更，不写入任何内容 | 说明将发送哪些内容，但不联系端点 |
+
+未配置的语言环境会被跳过，远端的空值不会清除任何内容。
+
+## 从 nuxt-i18n-micro-cli 迁移 {#moving-from-nuxt-i18n-micro-cli}
+
+| 旧命令 | 现在 |
+| --- | --- |
+| `validate` | `check` |
+| `diff` | `check --only missing` |
+| `check-duplicates` | `check --only duplicates` |
+| `export-csv`, `import-csv` | `export --format csv`, `import --format csv` |
+| `--potsDir`, `--csvDir` | `--dir` |
+| `estimate` | `translate --dryRun` |
+| `glossary` | 编辑 `.i18n-glossary.json`；`translate` 会自动读取它 |
+| `backup`, `restore` | Git，它已经保存了你的语言环境文件 |
+| `init` | `nuxi init`，然后将 `nuxt-i18n-micro` 添加到 `modules` |
+| `split` | 已移除：模块不会读取拆分的文件 |
+| `optimize` | `check --only duplicates` |
+| `replace-values` | 你的编辑器或 `sed` |
+| `stats --full` | `stats`；详细信息见 [DevTools](/zh-CN/guide/devtools) |
+| `search --hardcodedOnly` | `text-to-i18n --dryRun` |
+| `search --preferUnused`, `--onlyVue` | 已移除 |
+| `lint` 规则 `no-html-tags`、`no-special-chars`、`no-mixed-case`、`no-missing-punctuation`、`no-inconsistent-pluralization` | 已移除：它们会误报正常文本。如有需要，请编写一个 `customRegexRules` 条目 |
+| `text-to-i18n --extractOnlyDirs`, `--extractOnlyPatterns`, `--verbose` | 已移除：代码永远不会被重写 |
+| `--logLevel verbose` | 已移除：它没有任何作用 |
+
+**已移除的服务：** `googlefree`、`yandex`（请使用 `yandexcloud`）、`ibm`、`lingvatranslate`、`modernmt`、`lilt`、`unbabel`、`reverso`、`baidu`、`papago`、`tencent`、`systran`、`mymemory`。
+
+**已移除的 `sync-remote` 类型：** `github`、`gitlab`、`crowdin`、`lokalise`、`tolgee`、`weblate`。请使用平台自身的 CLI，或使用 `custom`，它现在不再需要 `type`。
+
+### 行为变更 {#changed-behaviour}
+
+- `extract` 和 `sync` 不再写入 `''`。键保持缺失，`check` 会报告它们。只有当代码提供了文本时，`extract` 才会写入键。
+- `extract` 会将页面键写入 `locales/pages/<route name>/`（模块从这里读取），并在 Nuxt 4 中扫描 `app/`。请将 `pages/_about`、`pages/blog_` 等目录中的内容迁移出来，并删除多余的 `locales/pages/<locale>.json`。
+- 现在会遵循 `nuxt.config` 中的 `translationDir`；以前每个命令都会悄悄使用 `locales`。
+- 未设置 `defaultLocale` 时，默认值为 `en`（与模块一致），并会遵循 `DEFAULT_LOCALE`。以前默认值是第一个语言环境。
+- `check` 和 `sync` 以默认语言环境为参照，并检查页面文件。`"a.b"` 和 `a: { b }` 视为同一个键。
+- `clean` 会保留在任何地方、任何作用域中使用的键，并在无法证明使用情况时停止。`--include` 和 `--exclude` 用于选择哪些键可以被删除。
+- `sync` 也会以同样的方式停止，并且当默认语言环境没有可比较的键时也会停止。`--force` 可强制执行。当 `DEFAULT_LOCALE` 选择了与 `nuxt.config` 不同的参照时，它同样会停止。
+- 单短横线的长参数和多余的参数都会报错：`clean -dryRun` 不再会运行 `clean`。
+- 只读文件或非 UTF-8 文件无法保存：命令会在做出任何更改之前停止。读取这类文件没有问题。重复的键、名为 `__proto__` 的键以及大于 2^53 的整数会使命令停止，因为保存时会丢失它们。
+- 需要值的参数后面紧跟另一个参数会报错；对于以短横线开头的值，请写成 `--flag=--value`。布尔参数只接受 `true` 或 `false`。
+- `export` 会停止，而不是覆盖从未导入过的翻译。
+- 退出码为 `0`、`1` 和 `2`；以前失败时为 `1`，而 `diff` 和 `check-duplicates` 总是返回 `0`。
+- `lint --fix` 不再留下 `.bak` 文件。
+- 保存时会保留文件的缩进、换行符、末尾换行、符号链接和硬链接，并且不会触碰未更改的文件。
+- 拼错或已移除的参数现在会报错，而不会被悄悄忽略。
+- `--dir` 等路径是相对于项目的，而不是相对于 shell 的。
+- `ai` 不再加载 `@ai-sdk/*` 包：请使用 `provider` 为 `gateway`、`openai` 或 `anthropic`，或者对兼容 OpenAI 的服务器使用 `baseUrl`。
+
+## 相关内容 {#related}
+
+<CardGroup cols={2}>
+
+<Card title="CLI 命令" icon="brackets-curly" href="/zh-CN/api/cli">
+
+</Card>
+
+<Card title="翻译文件" icon="book-open" href="/zh-CN/guide/translations">
+
+</Card>
+
+<Card title="Crowdin" icon="book-open" href="/zh-CN/guide/crowdin">
+
+</Card>
+
+<Card title="DevTools" icon="book-open" href="/zh-CN/guide/devtools">
+
+</Card>
+
+</CardGroup>

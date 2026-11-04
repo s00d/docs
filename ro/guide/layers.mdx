@@ -1,0 +1,128 @@
+---
+title: "Straturi și domenii"
+description: "Partajați configurația i18n și fișierele de traducere prin straturi Nuxt și serviți limbile pe propriile domenii."
+---
+
+Un strat (layer) Nuxt poate conține configurația i18n și folderul `locales/` pentru mai multe aplicații, iar fiecare aplicație adaugă sau suprascrie ce îi trebuie. Această pagină arată acest lucru, precum și modul în care un singur build servește mai multe domenii.
+
+## Partajarea configurației și a traducerilor {#share-config-and-translations}
+
+```ts
+// base/nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    locales: [
+      { code: 'en', iso: 'en-US' },
+      { code: 'de', iso: 'de-DE' },
+      { code: 'fr', iso: 'fr-FR' },
+    ],
+    defaultLocale: 'en',
+  },
+})
+```
+
+```ts
+// shop/nuxt.config.ts
+export default defineNuxtConfig({
+  extends: ['../base'], // a layer directory or package, not a nuxt.config file
+  i18n: {
+    locales: [
+      { code: 'es', iso: 'es-ES' }, // added
+      { code: 'fr', disabled: true }, // the base layer's fr, switched off here
+    ],
+  },
+})
+```
+
+- **Configurație:** opțiunile scalare din aplicație le înlocuiesc pe cele ale stratului. Array-urile `locales` din toate straturile sunt combinate, iar intrările cu același `code` sunt îmbinate într-una singură, câmpurile aplicației având prioritate, astfel încât o aplicație poate adăuga o limbă sau poate seta câmpuri precum `disabled: true` pe una moștenită.
+- **Traduceri:** folderele `locales/` ale fiecărui strat sunt îmbinate cheie cu cheie, mai întâi stratul și la final aplicația, astfel încât o cheie din `shop/locales/en.json` suprascrie aceeași cheie din `base/locales/en.json`. Fișierele de pagină (`locales/pages/<page>/`) se îmbină la fel.
+- **Pagini:** `$defineI18nRoute` este citit din paginile fiecărui strat.
+
+Pentru a îmbina foldere care nu fac parte dintr-un strat, listați-le în [`additionalTranslationDirs`](/ro/api/module-options#additionaltranslationdirs).
+
+## Domenii multiple {#multiple-domains}
+
+Un singur build servește fiecare domeniu. Listați fiecare limbă cu domeniul ei; `baseDefault` o face limba implicită a acelui host:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    strategy: 'prefix_except_default',
+    defaultLocale: 'en',
+    locales: [
+      { code: 'en', iso: 'en-US', baseUrl: 'https://example.com', baseDefault: true },
+      { code: 'de', iso: 'de-DE', baseUrl: 'https://example.de', baseDefault: true },
+      { code: 'nl', iso: 'nl-NL', baseUrl: 'https://example.de' },
+      { code: 'fr', iso: 'fr-FR' },
+    ],
+  },
+})
+```
+
+Direcționați ambele domenii către același server. Host-ul cererii decide restul:
+
+- **Implicit:** limba `baseDefault` a host-ului. Fără una, limba implicită de la build dacă host-ul o servește, altfel prima limbă a host-ului.
+- **Limbi servite:** limbile acelui host, plus fiecare limbă fără `baseUrl`. Pe `example.de` acestea sunt `de`, `nl` și `fr`.
+- **Limbile altor domenii** sunt ținte de link. `$localePath`, `$localeRoute`, `$switchLocalePath`, `<i18n-switcher>` și `hreflang` oferă URL-uri absolute pe `baseUrl`-ul lor, iar `$switchLocale` navighează acolo. Pe acest host URL-urile lor returnează 404, iar un cookie sau `Accept-Language` nu le poate alege.
+- **Un link către alt domeniu** trece prin `$localePath` sau `<i18n-link>`: `<NuxtLink :to="$localePath('/contact', 'de')">`, `<i18n-link :to="$localeRoute('/contact', 'de')">`. Router-ul nu acceptă un obiect absolut, așa că `<NuxtLink :to="$localeRoute(...)">` și `router.push($localeRoute(...))` rămân pe această origine. Pe `localhost` sau pe un host de previzualizare, fiecare limbă cu un `baseUrl` este un astfel de link, inclusiv cea curentă. În cod folosiți `navigateTo($localePath('/contact', 'de'), { external: true })` sau `$switchRoute`.
+- **Orice alt host** primește configurația de la build, cu fiecare limbă cu `baseUrl` ca țintă de link. Nimic din cerere nu este reflectat: canonical și `hreflang` folosesc `metaBaseUrl`, altfel `baseUrl`-ul limbii implicite de la build (o limbă implicită fără `baseUrl` necesită `metaBaseUrl` sau `site.url`, vedeți [SEO](/ro/guide/seo#set-the-public-origin)).
+- **Fișierele de payload** din `public/` sunt statice: orice host returnează fișierul oricărei limbi. [Generarea](/ro/guide/deployment#static-site-(nuxi-generate)) per domeniu publică doar fișierele acelui domeniu.
+
+`example.de` sub fiecare strategie, cu `de: '/kontakt'` drept cale personalizată pentru `contact`:
+
+| Strategie | `/` | Pagina limbii implicite | Alte URL-uri |
+| --- | --- | --- | --- |
+| `prefix_except_default` | `de` | `/kontakt` | `/de/kontakt` și `/en/contact` returnează 404, `/contact` redirecționează către `/kontakt` |
+| `prefix_and_default` | `de` | `/kontakt` și `/de/kontakt`, linkurile folosesc `/kontakt` | `/en/contact` și `/contact` returnează 404 |
+| `prefix` | redirecționează către `/de` | `/de/kontakt` | `/kontakt` redirecționează către `/de/kontakt`, `/en/contact` returnează 404 |
+| `no_prefix` | `de` | `/kontakt` | o cale personalizată a unei limbi de pe alt domeniu returnează 404 |
+
+Sub `prefix`, un link de pe alt domeniu păstrează prefixul, deoarece URL-ul fără prefix ar face doar o redirecționare. Sub `no_prefix`, un link către alt domeniu ajunge la limba implicită a acelui host: URL-ul nu poate numi o a doua limbă.
+
+De reținut:
+
+- **În spatele unui proxy**, host-ul provine din `Host`. Dacă proxy-ul pune host-ul public în `X-Forwarded-Host`, setați [`trustForwardedHost`](/ro/api/module-options#trustforwardedhost), și doar atunci când proxy-ul suprascrie acel header. Un proxy care nu trimite niciunul nu poate servi un build pe domenii. Vedeți [În spatele unui proxy sau CDN](/ro/guide/deployment#behind-a-proxy-or-cdn).
+- **`app.baseURL`** trebuie inclus și în `baseUrl`: `baseUrl: 'https://example.de/shop'` cu `app.baseURL: '/shop'`.
+- **Host-urile se potrivesc exact.** `www.example.de` este un alt host: redirecționați-l la edge sau setați acel `baseUrl` pe limbă. Doar un host per limbă.
+- **Cache-urile trebuie să folosească host-ul în cheie.** Un CDN face asta de obicei. Cache-ul de rute al Nitro folosește calea drept cheie, așa că într-un build pe domenii modulul adaugă `host` la `cache.varies` pentru fiecare regulă `swr` și `cache`, plus `x-forwarded-host` cu `trustForwardedHost`. O regulă cu `cache: false` rămâne așa cum este scrisă. `isr` este cache-ul platformei: verificați că folosește host-ul în cheie.
+- **Căile personalizate ale limbilor implicite a două host-uri nu trebuie să se suprapună.** Înregistrările fără prefix împart un singur router, deci `/x` nu poate fi o pagină pe `example.de` și alta pe `example.com`.
+- **Pagini prerandate:** o regulă de rută `prerender: true` în `nuxt build` randează o singură dată, fără host, iar fișierul răspunde pentru fiecare domeniu. Lăsați paginile care diferă per domeniu în seama serverului sau [generați per domeniu](/ro/guide/deployment#static-site-(nuxi-generate)).
+- **`noPrefixRedirect`** se ghidează după limba host-ului și a vizitatorului, pe fiecare host.
+- **`hashMode`:** host-ul alege randarea ca mai sus, iar linkurile către alt domeniu poartă ruta în hash (`https://example.com/#/contact`).
+- **`ssr: false`:** browserul citește domeniul din `location.host`, așa că un host fără server se rezolvă totuși.
+- **[Suprascrierile la runtime](/ro/guide/runtime-overrides)** se aplică primele. Un `disabledLocales` la runtime se aplică pe fiecare host, cu o excepție: sub `prefix_except_default` și `prefix_and_default`, limba implicită a unui host rămâne activată pe host-ul său, deoarece paginile ei sunt înregistrările fără prefix. Sub `prefix` și `no_prefix`, host-ul trece la următoarea limbă pe care o servește. Un `defaultLocale` la runtime se aplică doar host-urilor necunoscute.
+
+Pentru un [site static](/ro/guide/deployment#static-site-(nuxi-generate)), generați câte o dată pentru fiecare domeniu.
+
+### O aplicație per domeniu {#one-app-per-domain}
+
+Un strat partajat cu câte o aplicație mică per domeniu funcționează în continuare, atunci când domeniile au nevoie de pagini sau module diferite. Fiecare aplicație își setează propriul `defaultLocale` peste aceeași listă `locales`. O limbă de pe alt domeniu returnează 404 în acea aplicație, ca mai sus.
+
+### Alegerea limbii în cod {#choosing-the-locale-in-code}
+
+Pentru o singură instanță care răspunde fiecărui domeniu cu originea proprie a cererii în etichetele SEO, vedeți [SEO](/ro/guide/seo#set-the-public-origin); pentru a alege limba din host în cod, vedeți [Detectarea personalizată a limbii](/ro/guide/custom-auto-detect).
+
+## Conexe {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Fișiere de traducere" icon="book-open" href="/ro/guide/translations">
+
+</Card>
+
+<Card title="Suprascrieri la runtime" icon="book-open" href="/ro/guide/runtime-overrides">
+
+</Card>
+
+<Card title="SEO" icon="book-open" href="/ro/guide/seo">
+
+</Card>
+
+<Card title="Straturi Nuxt" icon="arrow-up-right-from-square" href="https://nuxt.com/docs/getting-started/layers">
+
+</Card>
+
+</CardGroup>

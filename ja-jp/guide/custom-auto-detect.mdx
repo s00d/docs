@@ -1,0 +1,111 @@
+---
+title: "カスタムロケール検出"
+description: "サーバープラグインと useI18nLocale().setLocale() を使い、ドメイン、ヘッダー、ユーザープロフィールなどから自分でロケールを選びます。"
+---
+
+組み込みの検出は、URL、Cookie、`Accept-Language` を読み取ります。ロケールがそれ以外のもの（ドメイン、CDN が設定する地域ヘッダー、ユーザープロフィールなど）に依存する場合は、i18n プラグインより前に実行されるプラグインで自分で設定してください。すると、モジュールはそのロケールの翻訳を読み込み、自分で検出した場合とまったく同じようにリダイレクトに使用します。選択したロケールが URL より優先されるタイミングを決めるルールは [ロケール検出](/ja-jp/guide/locale-detection) にあります。このページでは、独自のソースを組み込む方法を説明します。
+
+## サーバープラグインでロケールを設定する {#set-the-locale-in-a-server-plugin}
+
+```ts
+// plugins/i18n-locale.server.ts
+export default defineNuxtPlugin({
+  name: 'i18n-custom-locale',
+  enforce: 'pre',
+  order: -10, // before the i18n plugin (order -5)
+  setup() {
+    const { setLocale } = useI18nLocale()
+    const host = (useRequestHeaders(['host']).host ?? '').split(':')[0]! // without the port
+
+    if (host.endsWith('.de')) setLocale('de')
+    else if (host.endsWith('.fr')) setLocale('fr')
+  },
+})
+```
+
+`setLocale(code)` はロケールの state（`useState('i18n-locale')`）を書き込み、ロケール Cookie が設定されている場合は Cookie も書き込みます。`useState` や `useCookie` を自分で書き込む代わりにこれを使ってください。有効なロケールコードのみを渡してください。
+
+リクエストヘッダーを読み取るプラグインは `.server.ts` のままにしてください。ヘッダーはブラウザーには存在しません。`localStorage` のようなブラウザー専用のソースには `.client.ts` プラグインを使います。
+
+## 組み込みの Accept-Language ステップを無効にする {#turn-off-the-built-in-accept-language-step}
+
+あなたのプラグインと `Accept-Language` の結果が食い違うことがあります。あなたのコード（と URL および Cookie）だけで決めるには、ヘッダーを無効にします：
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    autoDetectLanguage: false,
+  },
+})
+```
+
+[`autoDetectLanguage`](/ja-jp/api/module-options#autodetectlanguage) はヘッダーのステップだけを制御します。URL と有効な Cookie は引き続き考慮されます。
+
+## その後の動作 {#what-happens-next}
+
+`setLocale` の効果は[戦略](/ja-jp/guide/strategy)によって異なります：
+
+| 戦略 | プラグインでの `setLocale('de')` の効果 |
+| --- | --- |
+| `no_prefix` | ページはドイツ語で描画され、URL は変わりません。 |
+| `prefix`, `prefix_except_default` | [`autoDetectPath`](/ja-jp/api/module-options#autodetectpath) がリダイレクトを許可するプレフィックスなしのパス（デフォルトでは `/` のみ）では、サーバーはドイツ語の URL への `302` を返します。ロケールプレフィックス付きの URL はそのまま維持されます。 |
+| `prefix_and_default` | リダイレクトしません。プレフィックスなしの URL は有効なデフォルトロケールのページです。 |
+
+プレフィックス系の戦略では、URL 内のロケールはユーザーの選択であり、プラグインはそれを上書きしません。例外は `autoDetectPath: '*'` です。この場合、サーバーはプレフィックス付きの URL を Cookie と `Accept-Language` に基づいて移動させ、state は無視します。ただし `setLocale()` は Cookie が設定されていればそれも書き込むため、次のリクエストからはプラグインの選択がプレフィックス付き URL をリダイレクトさせる可能性があります。明示的なロケール URL を優先させる必要がある場合は、`'/'` のままにするか `'no_prefix'` を使ってください。プラグインは、訪問者がたどったリンクを書き換えるためではなく、訪問者がどこに着地するかを選ぶために使いましょう。
+
+## ユーザーが選んだロケールを尊重する {#respect-a-locale-the-user-picked}
+
+ユーザーが言語を切り替えると、その切り替えによって Cookie が書き込まれます。すでに有効な設定がある場合は、独自の検出をスキップしてください：
+
+```ts
+// plugins/i18n-locale.server.ts
+import { detectLocaleFromAcceptLanguage } from '@i18n-micro/utils/accept-language'
+
+export default defineNuxtPlugin({
+  name: 'i18n-custom-locale',
+  enforce: 'pre',
+  order: -10,
+  setup() {
+    const { getPreferredLocale, setLocale, validLocales } = useI18nLocale()
+    if (getPreferredLocale()) return // valid state or cookie: keep it
+
+    const country = useRequestHeaders(['x-country'])['x-country']
+    if (country === 'JP') return setLocale('ja')
+
+    const header = useRequestHeaders(['accept-language'])['accept-language']
+    setLocale(detectLocaleFromAcceptLanguage(header, validLocales))
+  },
+})
+```
+
+`getPreferredLocale()` は、state または Cookie が有効なロケールである場合にのみそれを返すため、古い Cookie が検出を妨げることはありません。`detectLocaleFromAcceptLanguage` は、モジュール自身が使用している q 値を考慮するマッチャーです（インポートするには `@i18n-micro/utils` をインストールしてください）。`setLocale(null)` は何もしません。
+
+## ロケールごとに 1 つのドメイン {#one-domain-per-locale}
+
+各ドメインが独自のロケールを提供する場合、プラグインは不要です。各ロケールに `baseUrl` を指定し、各ドメインのデフォルトロケールに `baseDefault: true` を設定して、1 回ビルドします（静的サイトでは引き続きドメインごとに `nuxi generate` を実行します）。[レイヤーとドメイン](/ja-jp/guide/layers#multiple-domains) を参照してください。
+
+## 関連 {#related}
+
+<CardGroup cols={2}>
+
+<Card title="ロケール検出" icon="book-open" href="/ja-jp/guide/locale-detection">
+
+優先順位とリダイレクトの完全なルール
+
+</Card>
+
+<Card title="useI18nLocale" icon="brackets-curly" href="/ja-jp/composables/useI18nLocale">
+
+</Card>
+
+<Card title="ルーティング戦略" icon="book-open" href="/ja-jp/guide/strategy">
+
+</Card>
+
+<Card title="レイヤーとドメイン" icon="book-open" href="/ja-jp/guide/layers">
+
+</Card>
+
+</CardGroup>

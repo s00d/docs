@@ -1,0 +1,249 @@
+---
+title: "Astro"
+description: "@i18n-micro/astro による Astro 向けのサーバーサイド翻訳、ロケールプレフィックス付きルート、ホームページでの検出、SEO タグ。"
+---
+
+`@i18n-micro/astro` は Astro のページをサーバー上で翻訳します。ミドルウェアが URL からロケールを選び、リクエストごとのインスタンスを `Astro.locals` に格納し、`useI18n(Astro)` がそれを読み取ります。ロケールプレフィックス付きの URL(`/about`、`/fr/about`)と共有の JSON 辞書が必要な Astro サイトで使ってください。`.astro` コンポーネント、訪問者の言語へのホームページリダイレクト、`hreflang` タグ、そして [アイランド](/ja/integrations/astro-islands) 用の props が手に入ります。
+
+## インストール {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add @i18n-micro/astro
+```
+
+```bash npm
+npm install @i18n-micro/astro
+```
+
+```bash yarn
+yarn add @i18n-micro/astro
+```
+
+</CodeGroup>
+
+ピア依存関係: `astro` `^5.0.0 || ^6.0.0 || ^7.0.0`。[アイランド](/ja/integrations/astro-islands) を使う場合のみ必要なオプション: `vue` `^3.3.0`、`react` `^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0`、`preact` `^10.0.0 || ^11.0.0`、`svelte` `^4.0.0 || ^5.0.0`。
+
+## セットアップ {#setup}
+
+インテグレーションを追加します。辞書をサーバーにバンドルし、ミドルウェアをインストールするため、`src/middleware.ts` は不要です:
+
+```ts
+// astro.config.mjs
+import { defineConfig } from 'astro/config'
+import node from '@astrojs/node'
+import { i18nIntegration } from '@i18n-micro/astro'
+
+export default defineConfig({
+  output: 'server',
+  adapter: node({ mode: 'standalone' }),
+  integrations: [
+    i18nIntegration({
+      locale: 'en',
+      fallbackLocale: 'en',
+      locales: [
+        { code: 'en', iso: 'en-US', displayName: 'English' },
+        { code: 'de', iso: 'de-DE', displayName: 'Deutsch' },
+        { code: 'fr', iso: 'fr-FR', displayName: 'Français' },
+      ],
+      translationDir: 'src/locales',
+    }),
+  ],
+})
+```
+
+辞書はビルド時にコードになります。サーバーはディスクを読まないため、エッジ(Cloudflare、Vercel Edge)でも動作します。`astro dev` では、ファイルの編集は次のリクエストで反映されます。
+
+### インテグレーションのオプション {#integration-options}
+
+| オプション | デフォルト | 備考 |
+| --- | --- | --- |
+| `locale` | 必須 | デフォルトロケール。 |
+| `fallbackLocale` | `locale` | |
+| `locales` | `[]` | 完全な `Locale` オブジェクト。`disabled` のものはどの URL のロケールにもならず、リダイレクト先にもなりません。`iso` は、コードがタグとして有効でない場合に複数形の判定に使われるタグです(`ua` → `uk-UA`)。 |
+| `translationDir` | なし | サーバーにバンドルされるフォルダー。プロジェクトルートからの相対パス。 |
+| `disablePageLocales` | `false` | ページファイルをルートの翻訳として扱います。 |
+| `autoDetect` | `true` | ホームページのリダイレクト。[ロケール検出](#locale-detection) を参照。 |
+| `redirectToDefault` | `false` | 他のロケールを優先するものがない場合にも `/` をリダイレクトします。 |
+| `localeCookie` | `'i18n-locale'` | `null` で Cookie を無効にします。 |
+| `missingWarn` | `false` | |
+| `middleware` | `true` | `false`: ミドルウェアを自分で書きます。以下を参照。 |
+
+ランタイム設定は `virtual:i18n-micro/config` で公開され(`config.base` は Astro の `base`、`config.localeCodes` は有効なコード)、辞書は `virtual:i18n-micro/messages` で公開されます。
+
+### 独自のミドルウェア {#your-own-middleware}
+
+複数形ルール、欠落キーのハンドラー、ルーターアダプターは、設定プロセスからサーバーバンドルへ渡すことができません。これらが必要な場合は `middleware: false` を指定し、`src/middleware.ts` を書いてください。その場合、Astro の `i18n` 設定が `routing: 'manual'` で自動的に設定されるため、`Astro.currentLocale` と `astro:i18n` が動作します。Astro は `src/middleware.ts` なしではこの設定を許可しないため、インテグレーション自身のミドルウェアを使う場合はこれらは動作しません。
+
+```ts
+// src/middleware.ts
+import { config } from 'virtual:i18n-micro/config'
+import { messages } from 'virtual:i18n-micro/messages'
+import { createAstroRouterAdapter, createI18n, createI18nMiddleware, localeIsoMap } from '@i18n-micro/astro'
+
+const i18n = createI18n({
+  locale: config.defaultLocale,
+  fallbackLocale: config.fallbackLocale,
+  localeIso: localeIsoMap(config.locales),
+  messages: messages.root,
+  routeMessages: messages.routes,
+  plural: myPluralRule,
+})
+
+export const onRequest = createI18nMiddleware({
+  i18n,
+  defaultLocale: config.defaultLocale,
+  locales: config.localeCodes,
+  localeObjects: config.locales,
+  autoDetect: config.autoDetect,
+  redirectToDefault: config.redirectToDefault,
+  localeCookie: config.localeCookie,
+  base: config.base,
+  routingStrategy: createAstroRouterAdapter(config.locales, config.defaultLocale),
+})
+```
+
+代わりにランタイムでフォルダーを読み取る場合は、`@i18n-micro/astro/node` にある `loadTranslationsFromDir` と `loadTranslationsIntoI18n` を使います(Node のみ)。
+
+### ミドルウェアのオプション {#middleware-options}
+
+| オプション | デフォルト | 備考 |
+| --- | --- | --- |
+| `i18n` | 必須 | グローバルインスタンス。各リクエストは `i18n.fork(locale)` を受け取り、そのコストは辞書の数に関係なく一定です。 |
+| `defaultLocale` | 必須 | |
+| `locales` | 必須 | ロケールコード。 |
+| `localeObjects` | `{ code }` としての `locales` | コンポーネントと SEO 用の完全な `Locale` オブジェクト。 |
+| `autoDetect` | `true` | ホームページのリダイレクト。[ロケール検出](#locale-detection) を参照。 |
+| `redirectToDefault` | `false` | 他のロケールを優先するものがない場合にも `/` を、ルーティング戦略が解決するデフォルトロケールのホームへリダイレクトします。 |
+| `localeCookie` | `'i18n-locale'` | `null` で Cookie を無効にします。 |
+| `routingStrategy` | デフォルト以外にプレフィックス | ルーターアダプター。省略されたメソッドはデフォルトのアダプターから補われます。 |
+| `base` | なし | Astro の `base`: `config.base`。 |
+
+ページファイル(`src/locales/pages/blog/post/de.json`)はルート `blog-post` になります。ページのパスを `-` で連結したものです。
+
+## 翻訳する {#translate}
+
+```astro
+---
+// src/pages/index.astro
+import { useI18n } from '@i18n-micro/astro'
+import I18nT from '@i18n-micro/astro/i18n-t'
+
+const { t, tc, locale } = useI18n(Astro)
+---
+
+<h1>{t('greeting', { name: 'Ada' })}</h1>
+<p>{tc('apples', 3)}</p>
+<I18nT keypath="welcome" tag="p" />
+<p>{locale}</p>
+```
+
+`useI18n(Astro)` は `locale`、`defaultLocale`、`locales`、`t`、`ts`、`tc`、`tn`、`td`、`tdr`、`has`、`getRoute`、`getRouteName(path?)`、`getLocaleFromPath(path?)`、`switchLocalePath(locale)`、`localizePath(path, locale?)`、`getBasePath(url?)`、`getI18n`、`addTranslations`、`addRouteTranslations`、`mergeTranslations`、`clearCache` を返します。ミドルウェアが実行されていない場合は例外をスローします。ヘルパーの `getI18n`、`getLocale`、`getDefaultLocale`、`getLocales` も同じ `Astro.locals` を読み取ります。
+
+ルート名はロケールを除いたルートから決まります。`/fr/blog/post` → `blog-post`、そして `src/pages/blog/[slug].astro` のすべての URL → `blog-slug` となるため、1 つのフォルダー `locales/pages/blog-slug/` ですべてをまかなえます。`[...path]` は `path` になります。Astro の `base` のもとでは、ヘルパーはサイトの URL を受け取り、返します。`switchLocalePath` と `localizePath` はそれを含みますが、`getBasePath` は含みません。`Astro.rewrite` は `base` を含まないパスを受け取るためです。
+
+### コンポーネント {#components}
+
+`@i18n-micro/astro/<name>`(または `@i18n-micro/astro/components/<name>.astro`)からインポートします:
+
+| コンポーネント | Props |
+| --- | --- |
+| `i18n-t` | `keypath`、`params`、`plural`、`number`、`date`、`relativeDate`、`tag`(`span`、任意のタグ)、`html`、`hideIfEmpty`、`defaultValue`。その他の属性はそのまま渡されます。`html` を指定すると、すべての分岐の結果が HTML として描画され、`params` はエスケープされます。スロットはありません |
+| `i18n-link` | `href`、`locale`(対象ロケール、デフォルトは現在のロケール)、`class`。その他の属性はそのまま渡されます。外部 URL、`#hash`、`?query` は書いたとおりのままです。ルートはクエリ、ハッシュ、末尾のスラッシュを保持します |
+| `i18n-switcher` | `class`、`activeClass`(`'active'`)、`customLabels`。有効な各ロケールでの現在のページへのリンクを、クエリ付きで描画します |
+| `i18n-group` | 出力を変える props はありません。スロットを `<div>` で囲み、プレフィックスは付けません |
+
+## ロケールプレフィックス付きルート {#locale-prefixed-routes}
+
+`src/pages/` にはルートごとに 1 つのページを置き、`src/pages/[locale]/` の下に薄いリライト用スタブを追加します:
+
+```
+src/pages/
+  index.astro
+  about.astro
+  [locale]/
+    index.astro
+    about.astro
+```
+
+```astro
+---
+// src/pages/[locale]/about.astro
+import { prepareLocaleRewrite } from '@i18n-micro/astro'
+
+const target = prepareLocaleRewrite(Astro)
+if (target instanceof Response) return target
+return Astro.rewrite(target)
+---
+```
+
+`prepareLocaleRewrite` は、未知の `:locale` に対しては `404` レスポンスを返し、それ以外の場合は `Astro.locals` にロケールを設定して、プレフィックスを除いたパスを返します。ミドルウェアは `locals` にすでにあるロケールを維持するため、リライトされたページはそのロケールで描画されます。ロケールを自分で検証する場合は、パスだけを返す `getLocaleRewritePath(Astro)` を使います。
+
+## ロケール検出 {#locale-detection}
+
+ページのロケールは URL で決まります:
+
+1. ロケールプレフィックス(`/fr/about` → `fr`。`/en/about` も `en`)。
+2. それ以外の場合は、ルーターアダプターの `getLocaleFromPath` が返すもの(デフォルトでない場合)。
+3. それ以外の場合はデフォルトロケール。`/about` は、Cookie の内容にかかわらず常にデフォルトロケールのページです。
+
+`autoDetect` はホームページでのみ有効なリダイレクトのヒントです:
+
+- Cookie または `Accept-Language` が別のロケールを優先する `/` へのリクエストは、そのロケールのホーム(`/de`)への `302` を受け取ります。q 値は考慮されます。`de-DE` は `de` ロケールに一致し、`de` は `de-DE` ロケールに一致します。
+- `redirectToDefault` を指定すると、`/` は常にリダイレクトされます。優先ロケールのホームへ、なければデフォルトロケールのホームへ。
+- `/` のレスポンスには `Vary: Cookie, Accept-Language` が付きます(`localeCookie` が `null` の場合は `Accept-Language` のみ)。
+- プリレンダリングされたページはリダイレクトしません。
+
+`detectLocale(pathname, cookies, headers, defaultLocale, locales, localeCookie?, routingStrategy?, autoDetect?)` は、独自のロジック用に同じ優先ロケールを返します。
+
+Cookie は選択を記憶します。別ロケールの同一オリジンのページから来たページビューは、どのリンクを経由したかにかかわらず、訪問者による切り替えとみなされます。HTML レスポンスは Cookie を新しいロケールに設定し、`/` はリダイレクトしないため、スイッチャーでデフォルトロケールのホームに到達できます。エンドポイント、画像、404、フォームの POST、プリフェッチでは何も変わりません。"同一オリジン" かどうかはブラウザーが `Sec-Fetch-Site` で示すものです。このヘッダーがない場合は `Referer` のホストとリクエストのホストが比較されるため、プロキシの背後では Astro の `security.allowedDomains` を設定してください。
+
+[サーバーアイランド](https://docs.astro.build/en/guides/server-islands/) やアクションの URL にはロケールがありません。それらは要求元のページ向けに描画され、そのページは `Referer` から読み取られます。考慮されるのはそのパスだけなので、サーバーの前にプロキシがあっても何も変わらず、リダイレクトもしません。そのレスポンスには `Vary: Referer` が付きます。`Referer` がない場合(`no-referrer` ポリシー)はデフォルトロケールになり、動的なページではルートが URL から決まるため、ページの辞書は届きません。
+
+## ルーターアダプター {#router-adapter}
+
+`createAstroRouterAdapter(locales, defaultLocale)` は、デフォルト以外のすべてのロケールにプレフィックスを付けます。Astro のアダプターに必要なのは `getCurrentPath` だけです。その他のメンバーは任意で、省略するとデフォルトのアダプターにフォールバックします: `getRouteName(path, locales, routePattern?)`、`getLocaleFromPath`、`switchLocalePath`、`localizePath`、`removeLocaleFromPath`、`resolvePath`(ホームのリダイレクト先)、`push`、`replace`、`getRoute`。サブドメインやサフィックス形式の URL には独自のアダプターを書き、`createI18nMiddleware` に渡してください。
+
+## SEO {#seo}
+
+```astro
+---
+// src/layouts/Layout.astro
+import { useLocaleHead } from '@i18n-micro/astro'
+
+const head = useLocaleHead(Astro, { baseUrl: 'https://example.com' })
+---
+
+<html lang={head.htmlAttrs.lang} dir={head.htmlAttrs.dir}>
+  <head>
+    {head.link.map((l) => <link rel={l.rel} href={l.href} hreflang={l.hreflang} />)}
+    {head.meta.map((m) => <meta property={m.property} content={m.content} />)}
+  </head>
+  <body><slot /></body>
+</html>
+```
+
+`htmlAttrs`(`iso` から得た `lang`、`dir`)、canonical リンク(クエリなしのパス)、`seo !== false` の有効な各ロケールの `hreflang` alternate と `x-default`、`og:locale`、`og:locale:alternate`、`og:url` を返します。オプション: `baseUrl`(Astro 設定の `site`、なければルート相対 URL)、`addDirAttribute`(`true`)、`addSeoAttributes`(`true`)、`hreflangBaseLanguage`(`false`)。
+
+## 関連 {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Astro アイランド" icon="book-open" href="/ja/integrations/astro-islands">
+
+Vue、React、Preact、Svelte のアイランド内での翻訳
+
+</Card>
+
+<Card title="フレームワーク" icon="book-open" href="/ja/integrations/overview">
+
+インスタンスのオプションとフォーマット
+
+</Card>
+
+<Card title="パッケージリファレンス" icon="brackets-curly" href="/ja/api/packages/astro">
+
+</Card>
+
+</CardGroup>

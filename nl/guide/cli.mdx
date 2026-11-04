@@ -1,0 +1,327 @@
+---
+title: "CLI"
+description: "Controleer vertalingen in CI, vind ongebruikte sleutels, vul gaten via een vertaaldienst en wissel bestanden uit met vertalers vanaf de commandline."
+---
+
+`@i18n-micro/cli` beheert de locale-bestanden van een Nuxt-project. Hij leest `locales`, `defaultLocale`, `translationDir` en je layers uit `nuxt.config`, dus heeft geen eigen configuratie nodig.
+
+![Een terminal die i18n-micro check uitvoert, dat een ontbrekende, een ongedefinieerde en vier ongebruikte sleutels toont en faalt, daarna extract, dat de ongedefinieerde sleutel toevoegt, en daarna clean --dryRun, dat de vier sleutels toont die het zou verwijderen](/images/cli/demo.gif)
+
+| Commando | Gebruik het om |
+| --- | --- |
+| `check` | Een build te laten falen bij alles wat mis is met de locale-bestanden |
+| `translate` | Ontbrekende sleutels te vullen via een vertaaldienst |
+| `clean` | Sleutels te verwijderen die niets gebruikt |
+| `rename` | Een sleutel, of een hele namespace, overal tegelijk te verplaatsen |
+
+```bash
+npm install -D @i18n-micro/cli
+npx i18n-micro --help
+```
+
+Voer het uit vanuit de root van de app, of wijs ernaar met `--cwd`. Elke flag van elk commando staat in de [commandoreferentie](/nl/api/cli).
+
+<Tip>
+
+**Stap je over van nuxt-i18n-micro-cli?** `@i18n-micro/cli` vervangt het; de bins `i18n-micro` en `i18n-micro-cli` blijven. Zie de [tabel met oude commando's](#moving-from-nuxt-i18n-micro-cli).
+
+</Tip>
+
+## Gebruik in CI {#use-it-in-ci}
+
+```bash
+i18n-micro check
+```
+
+`check` is de poortwachter. Het rapporteert:
+
+| Check | Betekent |
+| --- | --- |
+| `missing` | Een sleutel van de standaard-locale ontbreekt in een locale |
+| `empty` | Een waarde is `''`. De app toont een lege tekst, niet de fallback |
+| `extra` | Een locale heeft een sleutel die de standaard-locale niet heeft |
+| `placeholders` | `{name}` is verloren gegaan of toegevoegd, of een meervoud is zijn vormen kwijt |
+| `undefined` | De code gebruikt een sleutel die de standaard-locale niet heeft |
+| `unused` | Niets in het project gebruikt een sleutel |
+| `duplicates` | Dezelfde tekst onder verschillende sleutels. Standaard uit: geef `--duplicates` mee |
+
+- `--only missing,placeholders` voert sommige checks uit; een check die in `--only` wordt genoemd maar niet kon draaien, faalt.
+- `--json` geeft een rapport voor tooling.
+- `--ignore` slaat bronbestanden over.
+- Zolang sleutels tijdens runtime worden berekend, wordt `unused` overgeslagen en vermeldt het rapport waarom.
+
+Elk commando eindigt met een van drie codes, zodat een pipeline een probleem met je vertalingen kan onderscheiden van een probleem met de tool:
+
+| Exitcode | Betekenis |
+| --- | --- |
+| `0` | Niets te melden |
+| `1` | Bevindingen |
+| `2` | Het commando kon niet draaien: een gebruiksfout, een kapot bestand, een mislukt request |
+
+Andere commando's die een CI-stap waard zijn:
+
+```bash
+i18n-micro format --check      # fails if a file is not formatted
+i18n-micro lint                # stray spaces, empty values, your own regex rules
+i18n-micro stats --baseRef main
+```
+
+## Locales gelijk houden {#keep-locales-in-step}
+
+| Commando | Wat het doet |
+| --- | --- |
+| `extract` | Toont de sleutels die de code gebruikt en die nog geen tekst hebben. Een standaardtekst, zoals in `$t('key', {}, 'Welcome')`, gaat naar de standaard-locale. |
+| `sync` | Verwijdert sleutels die de standaard-locale niet heeft. Probeer eerst `--dryRun`. |
+| `clean` | Verwijdert sleutels die niets gebruikt. Probeer eerst `--dryRun`. |
+| `search` | Vindt sleutels en waarden, en toont waar elke sleutel wordt gebruikt. |
+| `stats` | Voltooiing per locale; `--baseRef main` vergelijkt met een git-ref. |
+
+`sync` stopt net als `clean` wanneer het een sleutel zou verwijderen waarvan het niet kan bewijzen dat die ongebruikt is, en ook wanneer de standaard-locale niets heeft om mee te vergelijken. Als er niets te verwijderen is, stopt het nooit, dus `$t(item.label)` alleen is geen reden voor `--force`.
+
+<Note>
+
+`extract` en `sync` schrijven nooit `''` voor een sleutel zonder vertaling. De sleutel blijft afwezig, zodat `fallbackLocale` tijdens runtime geldt en `check` hem rapporteert. Een lege string zou een gedefinieerde waarde zijn en een lege tekst tonen.
+
+</Note>
+
+### Wat de commando's lezen {#what-the-commands-read}
+
+`check`, `extract`, `sync`, `clean`, `search` en `rename` lezen broncode in het hele project, niet in een vaste lijst mappen:
+
+- **Gelezen:** templates en scripts via een parser, `.html` en Pug als tekst, elke layer, en mappen buiten de root waar een alias of `components` naar wijst.
+- **Overgeslagen:** `node_modules`, build-output en de locale-bestanden. Voeg je eigen toe met `--ignore 'legacy/**,*.stories.ts'`.
+- **Testcode** telt als gebruik, dus `clean` en `check --only unused` behouden een sleutel die alleen een test leest. Het voegt nooit een sleutel toe: `extract` slaat zulke sleutels over, en `check` rapporteert ze niet als ongedefinieerd.
+
+Testcode betekent de rootmappen `tests`, `test`, `__tests__`, `e2e`, `cypress` en `playwright`, plus `.spec`- en `.test`-bestanden in JavaScript en TypeScript (`.ts`, `.tsx`, `.mts`, `.js`, `.jsx`, `.mjs` en dergelijke) waar dan ook. Alleen de rootmappen zijn vrijgesteld van de twijfels hieronder: `pages/tests/[id].vue` is een pagina als elke andere, en dat geldt ook voor `public/` en geminificeerde bestanden, waarvan de code geen deel uitmaakt van de app.
+
+De commando's herkennen:
+
+- `$t`, `$ts`, `$tc`, `$has` en `$_t(route)`;
+- `t()` uit `useI18n()` en `useTranslationServerMiddleware()`;
+- `<i18n-t keypath>` in templates en JSX, en `<i18n-group prefix>`;
+- aliassen zoals `const { t: tr } = useI18n()`.
+
+### Hoe `clean` beslist {#how-clean-decides}
+
+`clean` laat liever een dode sleutel staan dan een levende te verwijderen. Een sleutel blijft wanneer een van deze dingen waar is:
+
+- een aanroep gebruikt hem, of een sleutel eronder of erboven;
+- een string in de code is eraan gelijk: `const key = 'menu.home'`, `<Item label="menu.home" />`;
+- een JSON-, YAML- of Markdown-bestand in het project bevat hem;
+- een berekende sleutel heeft een statisch begin dat hem dekt: `` $t(`status.${state}`) `` behoudt alles onder `status.`;
+- een layer definieert hem.
+
+`clean` stopt zonder iets te veranderen wanneer het het niet kan weten, en vermeldt waarom:
+
+- een sleutel is volledig berekend, zoals in `$t(name)`, `<i18n-t :keypath="name" />` of `<i18n-t v-bind="props" />`;
+- `$t` wordt als waarde doorgegeven, zoals in `items.map($t)`;
+- een functie met de naam `t` krijgt een berekend argument en komt uit een parameter, een import of een aanroep: het kan een wrapper rond de echte zijn. Een functie die hetzelfde bestand definieert telt niet, omdat een wrapper zelf een eigen aanroep zou bevatten;
+- een bronbestand kan niet worden geparsed;
+- geen enkel bestand gebruikt ook maar één sleutel, wat meestal betekent dat het op de verkeerde plek zoekt;
+- een locale-bestand is een symlink naar buiten het project, dus een andere app kan het lezen.
+
+<Steps>
+
+<Step title="Voorbeeld bekijken">
+
+Voer `i18n-micro clean --dryRun` uit en bekijk wat het toont.
+
+</Step>
+
+<Step title="Sleutels beschermen">
+
+Behoud sleutels die alleen ongebruikt lijken met `--exclude '^errors\.'`.
+
+</Step>
+
+<Step title="Verwijderen">
+
+Voer het opnieuw uit met `--force`.
+
+</Step>
+
+</Steps>
+
+## Ontbrekende sleutels vertalen {#translate-missing-keys}
+
+```bash
+i18n-micro translate --dryRun                     # keys and characters per locale, nothing sent
+export I18N_TRANSLATE_TOKEN=...                   # or put it in .env
+i18n-micro translate --service deepl --locale de,fr
+```
+
+- `translate` vult sleutels die ontbreken of leeg zijn; `--replace` vertaalt alles opnieuw.
+- Placeholders en meervoudsvormen worden beschermd. Een vertaling die een placeholder is kwijtgeraakt, wordt niet geschreven: de sleutel wordt vermeld en het commando eindigt met `1`.
+- Elke batch wordt opgeslagen voordat het volgende request vertrekt, dus een fout kost alleen het mislukte request.
+
+| `--service` | Dienst | `--token` | Nuttige `--options` |
+| --- | --- | --- | --- |
+| `ai` | Vercel AI Gateway, OpenAI, Anthropic of elke OpenAI-compatibele server | API-sleutel, of `AI_GATEWAY_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` | `provider`, `model`, `baseUrl`, `maxTokens` |
+| `azure` | Azure Translator | Abonnementssleutel | `region` |
+| `deepl` | DeepL, inclusief Free-sleutels | Auth-sleutel | `formality`, `glossaryId`, `context` |
+| `google` | Google Cloud Translation v2 | API-sleutel | `model` |
+| `libretranslate` | LibreTranslate | Optioneel | `baseUrl` |
+| `yandexcloud` | Yandex Cloud Translate | API-sleutel, of IAM-token met `authScheme:Bearer` | `folderId`, `model` |
+
+Opties zijn `key:value`-paren: `--options provider:openai,model:gpt-4o-mini`. Alle diensten accepteren ook `baseUrl`, `retries`, `retryDelayMs` en `timeoutMs`. Een vertaalrequest kan al gefactureerd zijn, dus het wordt alleen herhaald na een `429` of `503`, en niet wanneer de dienst vraagt om langer dan een minuut te wachten.
+
+<Warning>
+
+Flags zijn zichtbaar in de shellgeschiedenis en proceslijsten, dus geef de token door via de omgevingsvariabele. De CLI maskeert wat hij als geheim kent overal waar hij het afdrukt, ook met `--debug`: tokens, providersleutels, Basic-credentials, en de query en credentials van een URL die je hebt geconfigureerd. Een server die een sleutel herformatteert voordat hij hem terugstuurt, valt buiten zijn bereik, dus ga voorzichtig om met logs van een mislukte run.
+
+</Warning>
+
+De `ai`-dienst volgt een glossarium. Wanneer `.i18n-glossary.json` bestaat, wordt het zonder flag gebruikt; `--glossaryFile` kiest een ander bestand.
+
+```json .i18n-glossary.json
+{ "entries": [{ "source": "Cart", "target": "Warenkorb", "to": "de" }] }
+```
+
+## Hardgecodeerde tekst omzetten in sleutels {#turn-hardcoded-text-into-keys}
+
+```bash
+i18n-micro text-to-i18n --dryRun   # list what would change
+i18n-micro text-to-i18n            # rewrite the templates
+```
+
+```vue
+<!-- before -->
+<h1>Welcome to our site</h1>
+<!-- after -->
+<h1>{{ $t('pages.index.welcome-to-our') }}</h1>
+```
+
+Alleen `.vue`-templates van het project zelf worden herschreven, niet die van een layer of een alias-doel. Elk herschreven bestand wordt opnieuw geparsed voordat het wordt geschreven. Deze worden vermeld en behouden hun tekst:
+
+- tekst in `.ts`-bestanden en scripts, omdat `$t` niet overal in scope is;
+- tekst naast markup of een interpolatie, zoals `<p>Hello <b>world</b> today</p>`: een halve zin kan niet op zichzelf worden vertaald;
+- een gegenereerde sleutel die met een andere zou botsen, zoals bij een bovenliggende pagina en haar child kan gebeuren;
+- een bekende sleutel die niet tussen aanhalingstekens kan.
+
+<Warning>
+
+Commit eerst, en bekijk de diff.
+
+</Warning>
+
+## Een sleutel hernoemen {#rename-a-key}
+
+```bash
+i18n-micro rename --from common.save --to actions.save
+i18n-micro rename --from settings --to account.settings   # a whole namespace
+```
+
+`rename` bewerkt de syntaxboom, dus commentaar en niet-gerelateerde strings blijven zoals ze zijn, en aliassen en `:keypath` worden gevolgd. Het eigen bestand van een layer wordt nooit gewijzigd. Het waarschuwt voor wat het niet kan herschrijven, en laat dat ongemoeid:
+
+- een berekende sleutel onder de oude naam;
+- elke gewone string die eraan gelijk is;
+- een Pug-template;
+- een bron in een layer of in een map buiten het project.
+
+`--to` moet een sleutel zijn die in code kan worden geschreven: geen aanhalingstekens, geen backslash, geen leeg segment, geen `__proto__`.
+
+## Bestanden uitwisselen met vertalers {#exchange-files-with-translators}
+
+```bash
+i18n-micro export --format csv
+i18n-micro import --format csv --dryRun
+```
+
+**`export`** schrijft elke sleutel van elke locale, inclusief onvertaalde, met de tekst van de standaard-locale als bron: een `Source`-kolom in CSV, een `#.`-commentaar in PO.
+
+- Zonder `--dir` gaat PO naar `pots` en CSV naar `csv_exports`.
+- Het registreert wat het schreef in `.i18n-export.json`, in de outputmap. Het stopt wanneer een bestand sindsdien is gewijzigd en vertalingen bevat die de locale-bestanden niet hebben, inclusief fuzzy PO-entries; `--force` overschrijft ze. Gewone wijzigingen in de locale-bestanden houden het niet tegen.
+
+**`import`** voegt samen, slaat lege cellen over, en slaat PO-entries over die als `fuzzy` zijn gemarkeerd.
+
+- Een sleutel die een waarde zou overschrijven, of een waarde over een hele groep sleutels, wordt vermeld en weggelaten, en het commando eindigt met `1`.
+- Het stopt met exitcode `2` bij een catalogus op een onverwachte locatie, een catalogus van een pagina die de laatste export niet schreef, een verkeerd geplaatst aanhalingsteken in een CSV, of een pagina-entry onder `disablePageLocales`.
+
+Gebruik voor een vertaalplatform de eigen CLI ervan: de [Crowdin](/nl/guide/crowdin)-setup synchroniseert de JSON-bestanden, inclusief paginabestanden.
+
+## Synchroniseren met je eigen endpoint {#sync-with-your-own-endpoint}
+
+`sync-remote` wisselt de globale locale-bestanden uit met een HTTP-endpoint dat je zelf draait. Paginabestanden blijven lokaal, en het commando meldt dat. Beschrijf het endpoint in `.i18n-remote.json`:
+
+```json .i18n-remote.json
+{ "url": "https://translations.example.com", "path": "translations" }
+```
+
+Het endpoint beantwoordt `GET` en `PUT` met een `{ locale: messages }`-object. Authenticeer met `auth: { username, password }`, of zet een bearer-token in `I18N_REMOTE_TOKEN`.
+
+| | Pull | Push |
+| --- | --- | --- |
+| Wat er verplaatst | Vult aan wat je niet hebt en behoudt sleutels die alleen jij hebt | Stuurt de eigen sleutels van het project, niet die van een layer, en laat je lege waarden weg |
+| Conflicten | Een sleutel die aan beide kanten verschilt: er wordt niets geschreven, exitcode `1`; `--force` neemt de remote waarde | Een PUT vervangt het document, dus een push leest eerst het endpoint en stopt met exitcode `1` wanneer het tekst bevat die jij niet hebt; `--force` overschrijft het. Een endpoint dat `404` antwoordt, heeft niets te verliezen |
+| `--dryRun` | Leest van het endpoint, toont de wijzigingen, schrijft niets | Zegt wat er verstuurd zou worden, zonder contact met het endpoint |
+
+Een locale die je niet hebt geconfigureerd, wordt overgeslagen, en een lege remote waarde wist niets.
+
+## Overstappen van nuxt-i18n-micro-cli {#moving-from-nuxt-i18n-micro-cli}
+
+| Oud commando | Nu |
+| --- | --- |
+| `validate` | `check` |
+| `diff` | `check --only missing` |
+| `check-duplicates` | `check --only duplicates` |
+| `export-csv`, `import-csv` | `export --format csv`, `import --format csv` |
+| `--potsDir`, `--csvDir` | `--dir` |
+| `estimate` | `translate --dryRun` |
+| `glossary` | Bewerk `.i18n-glossary.json`; `translate` leest het zelf |
+| `backup`, `restore` | Git, dat je locale-bestanden al bewaart |
+| `init` | `nuxi init`, voeg daarna `nuxt-i18n-micro` toe aan `modules` |
+| `split` | Verwijderd: de module leest geen gesplitste bestanden |
+| `optimize` | `check --only duplicates` |
+| `replace-values` | Je editor of `sed` |
+| `stats --full` | `stats`; [DevTools](/nl/guide/devtools) heeft de details |
+| `search --hardcodedOnly` | `text-to-i18n --dryRun` |
+| `search --preferUnused`, `--onlyVue` | Verwijderd |
+| `lint`-regels `no-html-tags`, `no-special-chars`, `no-mixed-case`, `no-missing-punctuation`, `no-inconsistent-pluralization` | Verwijderd: ze markeerden normale tekst. Schrijf een `customRegexRules`-entry als je er een nodig hebt |
+| `text-to-i18n --extractOnlyDirs`, `--extractOnlyPatterns`, `--verbose` | Verwijderd: code wordt nooit herschreven |
+| `--logLevel verbose` | Verwijderd: het deed niets |
+
+**Verwijderde diensten:** `googlefree`, `yandex` (gebruik `yandexcloud`), `ibm`, `lingvatranslate`, `modernmt`, `lilt`, `unbabel`, `reverso`, `baidu`, `papago`, `tencent`, `systran`, `mymemory`.
+
+**Verwijderde `sync-remote`-types:** `github`, `gitlab`, `crowdin`, `lokalise`, `tolgee`, `weblate`. Gebruik de eigen CLI van het platform, of `custom`, dat geen `type` meer nodig heeft.
+
+### Gewijzigd gedrag {#changed-behaviour}
+
+- `extract` en `sync` schrijven niet langer `''`. Sleutels blijven afwezig, en `check` rapporteert ze. `extract` schrijft een sleutel alleen wanneer de code de tekst ervan geeft.
+- `extract` schrijft paginasleutels naar `locales/pages/<route name>/`, waar de module ze leest, en scant `app/` op Nuxt 4. Verplaats alles uit mappen zoals `pages/_about` en `pages/blog_`, en verwijder een verdwaalde `locales/pages/<locale>.json`.
+- `translationDir` uit `nuxt.config` wordt gerespecteerd; voorheen gebruikte elk commando stilzwijgend `locales`.
+- Zonder `defaultLocale` is de standaard `en`, zoals in de module, en `DEFAULT_LOCALE` wordt gerespecteerd. Vroeger was het de eerste locale.
+- `check` en `sync` gebruiken de standaard-locale als referentie en controleren paginabestanden. `"a.b"` en `a: { b }` tellen als één sleutel.
+- `clean` behoudt een sleutel die ergens wordt gebruikt, in elke scope, en stopt wanneer gebruik niet kan worden bewezen. `--include` en `--exclude` kiezen wat mag worden verwijderd.
+- `sync` stopt op dezelfde manier, en wanneer de standaard-locale geen sleutels heeft om mee te vergelijken. `--force` overschrijft dat. Het stopt ook wanneer `DEFAULT_LOCALE` een andere referentie koos dan `nuxt.config`.
+- Lange flags met één streepje en losse argumenten zijn fouten: `clean -dryRun` voert `clean` niet langer uit.
+- Een alleen-lezen bestand, of een bestand dat geen UTF-8 is, kan niet worden opgeslagen: het commando stopt voordat het iets verandert. Zo'n bestand lezen is prima. Een herhaalde sleutel, een sleutel met de naam `__proto__` en een geheel getal boven 2^53 stoppen een commando, omdat een opslag ze zou kwijtraken.
+- Een flag die een waarde nodig heeft en gevolgd wordt door een andere flag, is een fout; schrijf `--flag=--value` voor een waarde die met een streepje begint. Een booleaanse flag accepteert alleen `true` of `false`.
+- `export` stopt in plaats van vertalingen te overschrijven die nooit zijn geïmporteerd.
+- Exitcodes zijn `0`, `1` en `2`; fouten waren vroeger `1`, en `diff` en `check-duplicates` altijd `0`.
+- `lint --fix` laat geen `.bak`-bestanden meer achter.
+- Een opslag behoudt de inspringing, regeleinden, afsluitende newline, symlink en hard link van een bestand, en laat bestanden die het niet heeft gewijzigd ongemoeid.
+- Een verkeerd getypte of verwijderde flag is nu een fout, en wordt niet stilzwijgend genegeerd.
+- Paden zoals `--dir` zijn relatief aan het project, niet aan de shell.
+- `ai` laadt niet langer `@ai-sdk/*`-packages: gebruik `provider` `gateway`, `openai` of `anthropic`, of `baseUrl` voor een OpenAI-compatibele server.
+
+## Gerelateerd {#related}
+
+<CardGroup cols={2}>
+
+<Card title="CLI-commando's" icon="brackets-curly" href="/nl/api/cli">
+
+</Card>
+
+<Card title="Vertaalbestanden" icon="book-open" href="/nl/guide/translations">
+
+</Card>
+
+<Card title="Crowdin" icon="book-open" href="/nl/guide/crowdin">
+
+</Card>
+
+<Card title="DevTools" icon="book-open" href="/nl/guide/devtools">
+
+</Card>
+
+</CardGroup>

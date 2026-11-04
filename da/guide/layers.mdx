@@ -1,0 +1,128 @@
+---
+title: "Lag og domæner"
+description: "Del i18n-konfiguration og oversættelsesfiler gennem Nuxt-lag, og server locales på deres egne domæner."
+---
+
+Et Nuxt-lag kan indeholde i18n-konfigurationen og `locales/`-mappen for flere apps, og hver app tilføjer eller overstyrer, hvad den har brug for. Denne side viser det, og hvordan ét build betjener flere domæner.
+
+## Del konfiguration og oversættelser {#share-config-and-translations}
+
+```ts
+// base/nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    locales: [
+      { code: 'en', iso: 'en-US' },
+      { code: 'de', iso: 'de-DE' },
+      { code: 'fr', iso: 'fr-FR' },
+    ],
+    defaultLocale: 'en',
+  },
+})
+```
+
+```ts
+// shop/nuxt.config.ts
+export default defineNuxtConfig({
+  extends: ['../base'], // a layer directory or package, not a nuxt.config file
+  i18n: {
+    locales: [
+      { code: 'es', iso: 'es-ES' }, // added
+      { code: 'fr', disabled: true }, // the base layer's fr, switched off here
+    ],
+  },
+})
+```
+
+- **Konfiguration:** skalare indstillinger i appen erstatter lagets. `locales`-arrays fra alle lag kombineres, og poster med samme `code` flettes til én, hvor appens felter vinder, så en app kan tilføje en locale eller sætte felter som `disabled: true` på en nedarvet.
+- **Oversættelser:** `locales/` i hvert lag flettes nøgle for nøgle, laget først og appen sidst, så en nøgle i `shop/locales/en.json` overstyrer samme nøgle i `base/locales/en.json`. Sidefiler (`locales/pages/<page>/`) flettes på samme måde.
+- **Sider:** `$defineI18nRoute` læses fra siderne i hvert lag.
+
+For at flette mapper, der ikke er en del af et lag, så angiv dem i [`additionalTranslationDirs`](/da/api/module-options#additionaltranslationdirs).
+
+## Flere domæner {#multiple-domains}
+
+Ét build betjener alle domæner. Angiv hver locale med dens domæne; `baseDefault` gør den til standard for den host:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    strategy: 'prefix_except_default',
+    defaultLocale: 'en',
+    locales: [
+      { code: 'en', iso: 'en-US', baseUrl: 'https://example.com', baseDefault: true },
+      { code: 'de', iso: 'de-DE', baseUrl: 'https://example.de', baseDefault: true },
+      { code: 'nl', iso: 'nl-NL', baseUrl: 'https://example.de' },
+      { code: 'fr', iso: 'fr-FR' },
+    ],
+  },
+})
+```
+
+Peg begge domæner på den samme server. Forespørgslens host afgør resten:
+
+- **Standard:** hostens `baseDefault`-locale. Uden en sådan build-standarden, hvis hosten betjener den, ellers hostens første locale.
+- **Betjente locales:** den hosts locales plus alle locales uden `baseUrl`. På `example.de` er det `de`, `nl` og `fr`.
+- **Locales på andre domæner** er linkmål. `$localePath`, `$localeRoute`, `$switchLocalePath`, `<i18n-switcher>` og `hreflang` giver absolutte URL'er på deres `baseUrl`, og `$switchLocale` navigerer derhen. På denne host giver deres URL'er 404, og en cookie eller `Accept-Language` kan ikke vælge dem.
+- **Et link til et andet domæne** går gennem `$localePath` eller `<i18n-link>`: `<NuxtLink :to="$localePath('/contact', 'de')">`, `<i18n-link :to="$localeRoute('/contact', 'de')">`. Routeren tager ikke imod et absolut objekt, så `<NuxtLink :to="$localeRoute(...)">` og `router.push($localeRoute(...))` bliver på denne origin. På `localhost` eller en preview-host er alle locales med en `baseUrl` et sådant link, også den aktuelle. I kode, brug `navigateTo($localePath('/contact', 'de'), { external: true })` eller `$switchRoute`.
+- **Enhver anden host** får build-konfigurationen med alle `baseUrl`-locales som linkmål. Intet fra forespørgslen gentages: canonical og `hreflang` bruger `metaBaseUrl`, ellers build-standardens `baseUrl` (en standard uden `baseUrl` kræver `metaBaseUrl` eller `site.url`, se [SEO](/da/guide/seo#set-the-public-origin)).
+- **Payload-filer** i `public/` er statiske: enhver host returnerer enhver locales fil. [Generate](/da/guide/deployment#static-site-(nuxi-generate)) pr. domæne udgiver kun det domænes.
+
+`example.de` under hver strategi, med `de: '/kontakt'` som brugerdefineret sti for `contact`:
+
+| Strategi | `/` | Standard-locales side | Andre URL'er |
+| --- | --- | --- | --- |
+| `prefix_except_default` | `de` | `/kontakt` | `/de/kontakt` og `/en/contact` giver 404, `/contact` omdirigerer til `/kontakt` |
+| `prefix_and_default` | `de` | `/kontakt` og `/de/kontakt`, links bruger `/kontakt` | `/en/contact` og `/contact` giver 404 |
+| `prefix` | omdirigerer til `/de` | `/de/kontakt` | `/kontakt` omdirigerer til `/de/kontakt`, `/en/contact` giver 404 |
+| `no_prefix` | `de` | `/kontakt` | en brugerdefineret sti for en locale på et andet domæne giver 404 |
+
+Under `prefix` beholder et link fra et andet domæne præfikset, da URL'en uden præfiks blot ville omdirigere. Under `no_prefix` lander et link til et andet domæne på den hosts standard-locale: URL'en kan ikke angive en anden.
+
+Ting at vide:
+
+- **Bag en proxy** kommer hosten fra `Host`. Hvis proxyen i stedet lægger den offentlige host i `X-Forwarded-Host`, så sæt [`trustForwardedHost`](/da/api/module-options#trustforwardedhost), og kun når proxyen overskriver den header. En proxy, der ikke sender nogen af dem, kan ikke betjene et domæne-build. Se [Bag en proxy eller CDN](/da/guide/deployment#behind-a-proxy-or-cdn).
+- **`app.baseURL`** hører også til i `baseUrl`: `baseUrl: 'https://example.de/shop'` med `app.baseURL: '/shop'`.
+- **Hosts matcher præcist.** `www.example.de` er en anden host: omdiriger den ved edge, eller sæt den `baseUrl` på locale. Kun én host pr. locale.
+- **Caches skal nøgles på hosten.** Et CDN gør det normalt. Nitros route-cache nøgler på stien, så i et domæne-build tilføjer modulet `host` til `cache.varies` for hver `swr`- og `cache`-regel, og `x-forwarded-host` med `trustForwardedHost`. En regel med `cache: false` forbliver som skrevet. `isr` er platformens cache: tjek at den nøgler på hosten.
+- **Brugerdefinerede stier for to host-standarder må ikke kollidere.** Posterne uden præfiks deler én router, så `/x` kan ikke være én side på `example.de` og en anden på `example.com`.
+- **Prerenderede sider:** en `prerender: true`-route-regel i `nuxt build` renderer én gang uden host, og filen besvarer alle domæner. Overlad sider, der varierer pr. domæne, til serveren, eller [generer pr. domæne](/da/guide/deployment#static-site-(nuxi-generate)).
+- **`noPrefixRedirect`** går efter hostens og den besøgendes locale på alle hosts.
+- **`hashMode`:** hosten vælger renderingen som ovenfor, links til et andet domæne bærer routen i hashen (`https://example.com/#/contact`).
+- **`ssr: false`:** browseren læser domænet fra `location.host`, så en host uden server afgøres stadig.
+- **[Runtime-overstyringer](/da/guide/runtime-overrides)** anvendes først. En runtime-`disabledLocales` gælder på alle hosts med én undtagelse: under `prefix_except_default` og `prefix_and_default` forbliver en hosts standard aktiveret på dens host, da dens sider er posterne uden præfiks. Under `prefix` og `no_prefix` falder hosten til den næste locale, den betjener. En runtime-`defaultLocale` gælder kun for ukendte hosts.
+
+For et [statisk site](/da/guide/deployment#static-site-(nuxi-generate)), generer én gang pr. domæne.
+
+### Én app pr. domæne {#one-app-per-domain}
+
+Et delt lag med én lille app pr. domæne virker stadig, når domænerne kræver forskellige sider eller moduler. Hver app sætter sin egen `defaultLocale` oven på den samme `locales`-liste. En locale på et andet domæne giver 404 i den app, som ovenfor.
+
+### Valg af locale i kode {#choosing-the-locale-in-code}
+
+For en enkelt instans, der besvarer alle domæner med forespørgslens egen origin i SEO-tags, se [SEO](/da/guide/seo#set-the-public-origin); for at vælge locale ud fra hosten i kode, se [Brugerdefineret locale-detektion](/da/guide/custom-auto-detect).
+
+## Relateret {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Oversættelsesfiler" icon="book-open" href="/da/guide/translations">
+
+</Card>
+
+<Card title="Runtime-overstyringer" icon="book-open" href="/da/guide/runtime-overrides">
+
+</Card>
+
+<Card title="SEO" icon="book-open" href="/da/guide/seo">
+
+</Card>
+
+<Card title="Nuxt-lag" icon="arrow-up-right-from-square" href="https://nuxt.com/docs/getting-started/layers">
+
+</Card>
+
+</CardGroup>

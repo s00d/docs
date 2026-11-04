@@ -1,0 +1,249 @@
+---
+title: "Astro"
+description: "使用 @i18n-micro/astro 为 Astro 提供服务端翻译、带 locale 前缀的路由、首页检测和 SEO 标签。"
+---
+
+`@i18n-micro/astro` 在服务端翻译 Astro 页面：中间件从 URL 中选出 locale，并将每个请求独立的实例放入 `Astro.locals`，`useI18n(Astro)` 则读取它。适用于需要带 locale 前缀的 URL（`/about`、`/fr/about`）和共享 JSON 字典的 Astro 站点。你将获得 `.astro` 组件、将首页重定向到访客语言的功能、`hreflang` 标签，以及用于 [islands](/zh-CN/integrations/astro-islands) 的 props。
+
+## 安装 {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add @i18n-micro/astro
+```
+
+```bash npm
+npm install @i18n-micro/astro
+```
+
+```bash yarn
+yarn add @i18n-micro/astro
+```
+
+</CodeGroup>
+
+对等依赖：`astro` `^5.0.0 || ^6.0.0 || ^7.0.0`。可选，仅用于 [islands](/zh-CN/integrations/astro-islands)：`vue` `^3.3.0`、`react` `^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0`、`preact` `^10.0.0 || ^11.0.0`、`svelte` `^4.0.0 || ^5.0.0`。
+
+## 设置 {#setup}
+
+添加该集成。它会将你的字典打包进服务端并安装中间件，因此不需要 `src/middleware.ts`：
+
+```ts
+// astro.config.mjs
+import { defineConfig } from 'astro/config'
+import node from '@astrojs/node'
+import { i18nIntegration } from '@i18n-micro/astro'
+
+export default defineConfig({
+  output: 'server',
+  adapter: node({ mode: 'standalone' }),
+  integrations: [
+    i18nIntegration({
+      locale: 'en',
+      fallbackLocale: 'en',
+      locales: [
+        { code: 'en', iso: 'en-US', displayName: 'English' },
+        { code: 'de', iso: 'de-DE', displayName: 'Deutsch' },
+        { code: 'fr', iso: 'fr-FR', displayName: 'Français' },
+      ],
+      translationDir: 'src/locales',
+    }),
+  ],
+})
+```
+
+字典在构建时会变成代码：服务端不读取磁盘，因此也能在边缘环境（Cloudflare、Vercel Edge）中运行。在 `astro dev` 中，对文件的修改会在下一次请求时生效。
+
+### 集成选项 {#integration-options}
+
+| 选项 | 默认值 | 说明 |
+| --- | --- | --- |
+| `locale` | 必需 | 默认 locale。 |
+| `fallbackLocale` | `locale` | |
+| `locales` | `[]` | 完整的 `Locale` 对象。`disabled` 的 locale 不会成为任何 URL 的 locale，也不会成为重定向目标。当代码本身不是语言标签时，`iso` 是复数规则所依据的标签（`ua` → `uk-UA`）。 |
+| `translationDir` | 无 | 打包进服务端的文件夹，相对于项目根目录。 |
+| `disablePageLocales` | `false` | 页面文件被视为根翻译。 |
+| `autoDetect` | `true` | 首页重定向，参见 [Locale 检测](#locale-detection)。 |
+| `redirectToDefault` | `false` | 即使没有偏好其他 locale，`/` 也会重定向。 |
+| `localeCookie` | `'i18n-locale'` | `null` 会禁用 cookie。 |
+| `missingWarn` | `false` | |
+| `middleware` | `true` | `false`：自行编写中间件，见下文。 |
+
+运行时设置发布在 `virtual:i18n-micro/config` 中（`config.base` 是 Astro 的 `base`，`config.localeCodes` 是已启用的代码），字典发布在 `virtual:i18n-micro/messages` 中。
+
+### 自定义中间件 {#your-own-middleware}
+
+复数规则、缺失键处理函数和路由适配器无法从配置进程传递到服务端包中。对于这些情况，请传入 `middleware: false` 并编写 `src/middleware.ts`。此时 Astro 的 `i18n` 配置会以 `routing: 'manual'` 自动为你设置，因此 `Astro.currentLocale` 和 `astro:i18n` 可以正常工作。Astro 不允许在没有 `src/middleware.ts` 的情况下使用该设置，因此使用集成自带的中间件时它们不可用。
+
+```ts
+// src/middleware.ts
+import { config } from 'virtual:i18n-micro/config'
+import { messages } from 'virtual:i18n-micro/messages'
+import { createAstroRouterAdapter, createI18n, createI18nMiddleware, localeIsoMap } from '@i18n-micro/astro'
+
+const i18n = createI18n({
+  locale: config.defaultLocale,
+  fallbackLocale: config.fallbackLocale,
+  localeIso: localeIsoMap(config.locales),
+  messages: messages.root,
+  routeMessages: messages.routes,
+  plural: myPluralRule,
+})
+
+export const onRequest = createI18nMiddleware({
+  i18n,
+  defaultLocale: config.defaultLocale,
+  locales: config.localeCodes,
+  localeObjects: config.locales,
+  autoDetect: config.autoDetect,
+  redirectToDefault: config.redirectToDefault,
+  localeCookie: config.localeCookie,
+  base: config.base,
+  routingStrategy: createAstroRouterAdapter(config.locales, config.defaultLocale),
+})
+```
+
+如果想在运行时读取文件夹，可使用 `@i18n-micro/astro/node` 中的 `loadTranslationsFromDir` 和 `loadTranslationsIntoI18n`（仅限 Node）。
+
+### 中间件选项 {#middleware-options}
+
+| 选项 | 默认值 | 说明 |
+| --- | --- | --- |
+| `i18n` | 必需 | 全局实例；每个请求获得 `i18n.fork(locale)`，无论有多少字典，其开销都相同。 |
+| `defaultLocale` | 必需 | |
+| `locales` | 必需 | Locale 代码。 |
+| `localeObjects` | 以 `{ code }` 形式的 `locales` | 供组件和 SEO 使用的完整 `Locale` 对象。 |
+| `autoDetect` | `true` | 首页重定向，参见 [Locale 检测](#locale-detection)。 |
+| `redirectToDefault` | `false` | 即使没有偏好其他 locale，`/` 也会重定向到路由策略解析出的默认 locale 首页。 |
+| `localeCookie` | `'i18n-locale'` | `null` 会禁用 cookie。 |
+| `routingStrategy` | 除默认 locale 外均加前缀 | 路由适配器。它未提供的方法来自默认适配器。 |
+| `base` | 无 | Astro 的 `base`：`config.base`。 |
+
+页面文件（`src/locales/pages/blog/post/de.json`）对应路由 `blog-post`：即用 `-` 连接的页面路径。
+
+## 翻译 {#translate}
+
+```astro
+---
+// src/pages/index.astro
+import { useI18n } from '@i18n-micro/astro'
+import I18nT from '@i18n-micro/astro/i18n-t'
+
+const { t, tc, locale } = useI18n(Astro)
+---
+
+<h1>{t('greeting', { name: 'Ada' })}</h1>
+<p>{tc('apples', 3)}</p>
+<I18nT keypath="welcome" tag="p" />
+<p>{locale}</p>
+```
+
+`useI18n(Astro)` 返回 `locale`、`defaultLocale`、`locales`、`t`、`ts`、`tc`、`tn`、`td`、`tdr`、`has`、`getRoute`、`getRouteName(path?)`、`getLocaleFromPath(path?)`、`switchLocalePath(locale)`、`localizePath(path, locale?)`、`getBasePath(url?)`、`getI18n`、`addTranslations`、`addRouteTranslations`、`mergeTranslations` 和 `clearCache`。如果中间件没有运行，它会抛出错误。辅助函数 `getI18n`、`getLocale`、`getDefaultLocale` 和 `getLocales` 读取的是同一个 `Astro.locals`。
+
+路由名称来自去掉 locale 后的路由：`/fr/blog/post` → `blog-post`，而 `src/pages/blog/[slug].astro` 的每个 URL → `blog-slug`，因此一个 `locales/pages/blog-slug/` 文件夹即可服务所有这些 URL。`[...path]` 对应 `path`。在 Astro 的 `base` 下，辅助函数接受并返回站点的 URL：`switchLocalePath` 和 `localizePath` 包含 base，`getBasePath` 不包含，因为 `Astro.rewrite` 接受的是不带 base 的路径。
+
+### 组件 {#components}
+
+从 `@i18n-micro/astro/<name>`（或 `@i18n-micro/astro/components/<name>.astro`）导入它们：
+
+| 组件 | Props |
+| --- | --- |
+| `i18n-t` | `keypath`、`params`、`plural`、`number`、`date`、`relativeDate`、`tag`（`span`，任意标签）、`html`、`hideIfEmpty`、`defaultValue`；其他属性会透传。使用 `html` 时，每个分支的结果都会渲染为 HTML，且 `params` 会被转义。没有插槽 |
+| `i18n-link` | `href`、`locale`（目标 locale，默认为当前 locale）、`class`；其他属性会透传。外部 URL、`#hash` 和 `?query` 保持原样；路由会保留其 query、hash 和尾部斜杠 |
+| `i18n-switcher` | `class`、`activeClass`（`'active'`）、`customLabels`；渲染指向当前页面在每个已启用 locale 下的链接，并保留其 query |
+| `i18n-group` | 没有会改变输出的 props：在其插槽外包裹一个 `<div>`，不带前缀 |
+
+## 带 locale 前缀的路由 {#locale-prefixed-routes}
+
+在 `src/pages/` 中每个路由保留一个页面，并在 `src/pages/[locale]/` 下添加精简的重写桩文件：
+
+```
+src/pages/
+  index.astro
+  about.astro
+  [locale]/
+    index.astro
+    about.astro
+```
+
+```astro
+---
+// src/pages/[locale]/about.astro
+import { prepareLocaleRewrite } from '@i18n-micro/astro'
+
+const target = prepareLocaleRewrite(Astro)
+if (target instanceof Response) return target
+return Astro.rewrite(target)
+---
+```
+
+对于未知的 `:locale`，`prepareLocaleRewrite` 返回 `404` 响应；否则它会在 `Astro.locals` 上设置 locale，并返回去掉前缀的路径。中间件会保留 `locals` 中已有的 locale，因此重写后的页面会以该 locale 渲染。当你自行校验 locale 时，`getLocaleRewritePath(Astro)` 只返回路径。
+
+## Locale 检测 {#locale-detection}
+
+URL 决定页面的 locale：
+
+1. locale 前缀（`/fr/about` → `fr`；`/en/about` 也是 `en`）。
+2. 否则，取路由适配器的 `getLocaleFromPath` 返回的值（如果它不是默认 locale）。
+3. 否则，使用默认 locale。无论 cookie 如何，`/about` 始终是默认 locale 的页面。
+
+`autoDetect` 只是首页上的重定向提示：
+
+- 对 `/` 的请求，如果其 cookie 或 `Accept-Language` 偏好另一个 locale，会收到指向该 locale 首页（`/de`）的 `302`。q 权重会被遵循；`de-DE` 匹配 `de` locale，`de` 也匹配 `de-DE` locale。
+- 启用 `redirectToDefault` 时，`/` 总是会重定向：重定向到偏好 locale 的首页，否则到默认 locale 的首页。
+- `/` 的响应带有 `Vary: Cookie, Accept-Language`（当 `localeCookie` 为 `null` 时只有 `Accept-Language`）。
+- 预渲染的页面永远不会重定向。
+
+`detectLocale(pathname, cookies, headers, defaultLocale, locales, localeCookie?, routingStrategy?, autoDetect?)` 会返回相同的偏好 locale，供你自己的逻辑使用。
+
+cookie 会记住用户的选择。来自另一个 locale 的同源页面的页面访问，无论通过哪个链接到达，都被视为访客在切换语言：HTML 响应会将 cookie 设置为新的 locale，并且 `/` 不会重定向，因此切换器可以到达默认 locale 的首页。端点、图片、404、表单提交和预取不会改变任何内容。"同源"以浏览器在 `Sec-Fetch-Site` 中的声明为准；没有该请求头时，会将 `Referer` 的主机与请求的主机进行比较，因此在代理之后请设置 Astro 的 `security.allowedDomains`。
+
+[服务端 island](https://docs.astro.build/en/guides/server-islands/) 或 action 的 URL 中没有 locale。它会为发起请求的页面渲染，locale 从 `Referer` 中读取，且只看其路径，因此服务器前面的代理不会产生影响，并且它永远不会重定向。其响应带有 `Vary: Referer`。没有 `Referer` 时（`no-referrer` 策略），它使用默认 locale；在动态页面上其路由来自 URL，因此页面字典无法到达它。
+
+## 路由适配器 {#router-adapter}
+
+`createAstroRouterAdapter(locales, defaultLocale)` 会为除默认 locale 外的每个 locale 添加前缀。Astro 适配器只需要 `getCurrentPath`；其他成员都是可选的，会回退到默认适配器：`getRouteName(path, locales, routePattern?)`、`getLocaleFromPath`、`switchLocalePath`、`localizePath`、`removeLocaleFromPath`、`resolvePath`（首页重定向目标）、`push`、`replace`、`getRoute`。如需子域名或后缀形式的 URL，请自行编写适配器并将其传给 `createI18nMiddleware`。
+
+## SEO {#seo}
+
+```astro
+---
+// src/layouts/Layout.astro
+import { useLocaleHead } from '@i18n-micro/astro'
+
+const head = useLocaleHead(Astro, { baseUrl: 'https://example.com' })
+---
+
+<html lang={head.htmlAttrs.lang} dir={head.htmlAttrs.dir}>
+  <head>
+    {head.link.map((l) => <link rel={l.rel} href={l.href} hreflang={l.hreflang} />)}
+    {head.meta.map((m) => <meta property={m.property} content={m.content} />)}
+  </head>
+  <body><slot /></body>
+</html>
+```
+
+它返回 `htmlAttrs`（来自 `iso` 的 `lang`，以及 `dir`）、canonical 链接（不含 query 的路径）、针对每个 `seo !== false` 的已启用 locale 的 `hreflang` alternates 以及 `x-default`、`og:locale`、`og:locale:alternate` 和 `og:url`。选项：`baseUrl`（Astro 配置中的 `site`，否则使用相对于根的 URL）、`addDirAttribute`（`true`）、`addSeoAttributes`（`true`）、`hreflangBaseLanguage`（`false`）。
+
+## 相关内容 {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Astro islands" icon="book-open" href="/zh-CN/integrations/astro-islands">
+
+在 Vue、React、Preact 和 Svelte islands 中使用翻译
+
+</Card>
+
+<Card title="框架" icon="book-open" href="/zh-CN/integrations/overview">
+
+实例选项和格式化
+
+</Card>
+
+<Card title="包参考" icon="brackets-curly" href="/zh-CN/api/packages/astro">
+
+</Card>
+
+</CardGroup>

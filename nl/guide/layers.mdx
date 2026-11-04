@@ -1,0 +1,128 @@
+---
+title: "Layers en domeinen"
+description: "Deel i18n-config en vertaalbestanden via Nuxt-layers, en serveer locales op hun eigen domeinen."
+---
+
+Een Nuxt-layer kan de i18n-config en de map `locales/` voor meerdere apps bevatten, en elke app voegt toe of overschrijft wat hij nodig heeft. Deze pagina laat dat zien, en hoe één build meerdere domeinen serveert.
+
+## Config en vertalingen delen {#share-config-and-translations}
+
+```ts
+// base/nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    locales: [
+      { code: 'en', iso: 'en-US' },
+      { code: 'de', iso: 'de-DE' },
+      { code: 'fr', iso: 'fr-FR' },
+    ],
+    defaultLocale: 'en',
+  },
+})
+```
+
+```ts
+// shop/nuxt.config.ts
+export default defineNuxtConfig({
+  extends: ['../base'], // a layer directory or package, not a nuxt.config file
+  i18n: {
+    locales: [
+      { code: 'es', iso: 'es-ES' }, // added
+      { code: 'fr', disabled: true }, // the base layer's fr, switched off here
+    ],
+  },
+})
+```
+
+- **Config:** scalaire opties in de app vervangen die van de layer. `locales`-arrays van alle layers worden gecombineerd, en entries met dezelfde `code` worden samengevoegd tot één, waarbij de velden van de app winnen, zodat een app een locale kan toevoegen of velden zoals `disabled: true` op een overgeërfde locale kan zetten.
+- **Vertalingen:** de `locales/` van elke layer worden sleutel voor sleutel samengevoegd, eerst de layer en als laatste de app, zodat een sleutel in `shop/locales/en.json` dezelfde sleutel in `base/locales/en.json` overschrijft. Paginabestanden (`locales/pages/<page>/`) worden op dezelfde manier samengevoegd.
+- **Pagina's:** `$defineI18nRoute` wordt gelezen uit de pagina's van elke layer.
+
+Om mappen samen te voegen die geen deel uitmaken van een layer, vermeld je ze in [`additionalTranslationDirs`](/nl/api/module-options#additionaltranslationdirs).
+
+## Meerdere domeinen {#multiple-domains}
+
+Eén build serveert elk domein. Vermeld elke locale met haar domein; `baseDefault` maakt haar de standaard van die host:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    strategy: 'prefix_except_default',
+    defaultLocale: 'en',
+    locales: [
+      { code: 'en', iso: 'en-US', baseUrl: 'https://example.com', baseDefault: true },
+      { code: 'de', iso: 'de-DE', baseUrl: 'https://example.de', baseDefault: true },
+      { code: 'nl', iso: 'nl-NL', baseUrl: 'https://example.de' },
+      { code: 'fr', iso: 'fr-FR' },
+    ],
+  },
+})
+```
+
+Laat beide domeinen naar dezelfde server wijzen. De host van het request bepaalt de rest:
+
+- **Standaard:** de `baseDefault`-locale van de host. Zonder die, de build-standaard als de host die serveert, anders de eerste locale van de host.
+- **Geserveerde locales:** de locales van die host, plus elke locale zonder `baseUrl`. Op `example.de` zijn dat `de`, `nl` en `fr`.
+- **Locales van andere domeinen** zijn linkdoelen. `$localePath`, `$localeRoute`, `$switchLocalePath`, `<i18n-switcher>` en `hreflang` geven absolute URL's op hun `baseUrl`, en `$switchLocale` navigeert daarheen. Op deze host zijn hun URL's een 404, en een cookie of `Accept-Language` kan ze niet kiezen.
+- **Een link naar een ander domein** gaat via `$localePath` of `<i18n-link>`: `<NuxtLink :to="$localePath('/contact', 'de')">`, `<i18n-link :to="$localeRoute('/contact', 'de')">`. De router accepteert geen absoluut object, dus `<NuxtLink :to="$localeRoute(...)">` en `router.push($localeRoute(...))` blijven op deze origin. Op `localhost` of een preview-host is elke locale met een `baseUrl` zo'n link, ook de huidige. Gebruik in code `navigateTo($localePath('/contact', 'de'), { external: true })`, of `$switchRoute`.
+- **Elke andere host** krijgt de build-config, met elke `baseUrl`-locale als linkdoel. Niets uit het request wordt teruggegeven: canonical en `hreflang` gebruiken `metaBaseUrl`, anders de `baseUrl` van de build-standaard (een standaard zonder `baseUrl` heeft `metaBaseUrl` of `site.url` nodig, zie [SEO](/nl/guide/seo#set-the-public-origin)).
+- **Payload-bestanden** in `public/` zijn statisch: elke host geeft het bestand van elke locale terug. [Generate](/nl/guide/deployment#static-site-(nuxi-generate)) per domein publiceert alleen die van dat domein.
+
+`example.de` onder elke strategie, met `de: '/kontakt'` als aangepast pad van `contact`:
+
+| Strategie | `/` | Pagina van de standaard-locale | Andere URL's |
+| --- | --- | --- | --- |
+| `prefix_except_default` | `de` | `/kontakt` | `/de/kontakt` en `/en/contact` zijn een 404, `/contact` stuurt door naar `/kontakt` |
+| `prefix_and_default` | `de` | `/kontakt` en `/de/kontakt`, links gebruiken `/kontakt` | `/en/contact` en `/contact` zijn een 404 |
+| `prefix` | stuurt door naar `/de` | `/de/kontakt` | `/kontakt` stuurt door naar `/de/kontakt`, `/en/contact` is een 404 |
+| `no_prefix` | `de` | `/kontakt` | een aangepast pad van een locale op een ander domein is een 404 |
+
+Onder `prefix` behoudt een link vanaf een ander domein de prefix, omdat de URL zonder prefix alleen zou doorsturen. Onder `no_prefix` komt een link naar een ander domein uit op de standaard-locale van die host: de URL kan geen tweede noemen.
+
+Goed om te weten:
+
+- **Achter een proxy** komt de host uit `Host`. Als de proxy de publieke host in plaats daarvan in `X-Forwarded-Host` zet, zet dan [`trustForwardedHost`](/nl/api/module-options#trustforwardedhost), en alleen wanneer de proxy die header overschrijft. Een proxy die geen van beide stuurt, kan geen domein-build serveren. Zie [Achter een proxy of CDN](/nl/guide/deployment#behind-a-proxy-or-cdn).
+- **`app.baseURL`** hoort ook in `baseUrl`: `baseUrl: 'https://example.de/shop'` met `app.baseURL: '/shop'`.
+- **Hosts matchen exact.** `www.example.de` is een andere host: stuur hem aan de edge door, of zet die `baseUrl` op de locale. Slechts één host per locale.
+- **Caches moeten op de host sleutelen.** Een CDN doet dat normaal. De routecache van Nitro sleutelt op het pad, dus in een domein-build voegt de module `host` toe aan `cache.varies` van elke `swr`- en `cache`-regel, en `x-forwarded-host` met `trustForwardedHost`. Een regel met `cache: false` blijft zoals geschreven. `isr` is de cache van het platform: controleer dat die op de host sleutelt.
+- **Aangepaste paden van twee host-standaarden mogen niet botsen.** De records zonder prefix delen één router, dus `/x` kan niet de ene pagina op `example.de` zijn en een andere op `example.com`.
+- **Geprerenderde pagina's:** een `prerender: true`-route rule in `nuxt build` rendert één keer, zonder host, en het bestand beantwoordt elk domein. Laat pagina's die per domein verschillen over aan de server, of [genereer per domein](/nl/guide/deployment#static-site-(nuxi-generate)).
+- **`noPrefixRedirect`** gaat op elke host volgens de locale van de host en de bezoeker.
+- **`hashMode`:** de host kiest de render zoals hierboven, links naar een ander domein dragen de route in de hash (`https://example.com/#/contact`).
+- **`ssr: false`:** de browser leest het domein uit `location.host`, dus een host zonder server lost nog steeds op.
+- **[Runtime-overrides](/nl/guide/runtime-overrides)** worden eerst toegepast. Een runtime-`disabledLocales` geldt op elke host, met één uitzondering: onder `prefix_except_default` en `prefix_and_default` blijft de standaard van een host ingeschakeld op die host, omdat zijn pagina's de records zonder prefix zijn. Onder `prefix` en `no_prefix` valt de host terug op de volgende locale die hij serveert. Een runtime-`defaultLocale` geldt alleen voor onbekende hosts.
+
+Genereer voor een [statische site](/nl/guide/deployment#static-site-(nuxi-generate)) één keer per domein.
+
+### Eén app per domein {#one-app-per-domain}
+
+Een gedeelde layer met één kleine app per domein werkt nog steeds, wanneer de domeinen verschillende pagina's of modules nodig hebben. Elke app zet zijn eigen `defaultLocale` bovenop dezelfde `locales`-lijst. Een locale op een ander domein is in die app een 404, zoals hierboven.
+
+### De locale in code kiezen {#choosing-the-locale-in-code}
+
+Zie voor één instantie die elk domein beantwoordt met de eigen origin van het request in SEO-tags [SEO](/nl/guide/seo#set-the-public-origin); om de locale in code op basis van de host te kiezen, zie [Aangepaste locale-detectie](/nl/guide/custom-auto-detect).
+
+## Gerelateerd {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Vertaalbestanden" icon="book-open" href="/nl/guide/translations">
+
+</Card>
+
+<Card title="Runtime-overrides" icon="book-open" href="/nl/guide/runtime-overrides">
+
+</Card>
+
+<Card title="SEO" icon="book-open" href="/nl/guide/seo">
+
+</Card>
+
+<Card title="Nuxt-layers" icon="arrow-up-right-from-square" href="https://nuxt.com/docs/getting-started/layers">
+
+</Card>
+
+</CardGroup>

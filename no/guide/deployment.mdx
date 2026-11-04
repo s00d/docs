@@ -1,0 +1,440 @@
+---
+title: "Distribusjon"
+description: "Distribuer til en Node-server, serverless eller Edge, eller som et statisk nettsted — hvor oversettelses-payloads havner, hva hver plattform trenger, proxyer og hurtigbufring."
+---
+
+Modulen fungerer med alle Nitro-presets uten ekstra konfigurasjon: den velger hvor oversettelsesfilene skal ligge ut fra presetet du bygger for. Standardverdiene passer for de fleste apper; les avsnittet for din plattform. Denne siden forklarer:
+
+- hva som havner i `.output/` og hvilke headere payloadene får;
+- hva du må endre for statisk hosting, store kataloger, en understi, en proxy eller et CDN.
+
+<Note>
+
+Distribuert og kontrollert på ekte verter: Cloudflare Workers og Pages, Vercel og Vercel Edge, Netlify og Netlify Edge, Cloud Run og Deno Deploy, hver med det [Plattformer](#platforms) lister opp. De andre presetene ble bygget og kjørt lokalt.
+
+</Note>
+
+## Hvordan oversettelser leveres {#how-translations-are-delivered}
+
+Ved byggetid gjør modulen `locales/` (alle lag slått sammen) om til **payloads**: én JSON-fil per side og språk. To konsumenter leser dem:
+
+- **SSR** laster payloaden for den gjengitte siden i prosessen — ingen HTTP-forespørsel, og ordboken bygges ikke inn i HTML-en.
+- **Nettleseren** henter `/_locales/<page>/<locale>/data.json?v=<dateBuild>` ved hydrering og ved navigering.
+
+`_locales` er [`apiBaseUrl`](/no/api/module-options#apibaseurl). Den innebygde serverruten svarer på den URL-en; den statiske kopien i `public/` svarer på den uten server.
+
+## Node-server {#node-server}
+
+```bash
+npx nuxi build
+node .output/server/index.mjs
+```
+
+Med `node-server` (standardpresetet), `node-cluster`, `bun`, `deno-server` eller et hvilket som helst annet preset som leverer `public/` fra disk, med `public/` ved siden av `server/`-mappen:
+
+- payloads kopieres til `.output/public/_locales/<page>/<locale>/data.json`;
+- SSR leser dem fra den mappen med `fs` (ingenting pakkes inn i serveren);
+- nettleseren får dem som statiske filer, eller fra serverruten.
+
+Distribuer hele `.output/`-mappen. Modulen krever Node 20 eller nyere, og Nuxt har sitt eget minimum: Nuxt 4.5 deklarerer `^22.19.0 || ^24.11.0 || >=26.0.0`.
+
+En prosess under jevn belastning kan holde mye mer minne enn sin levende heap. Se [Minne på en Node-server](/no/guide/performance#memory-on-a-node-server) før du setter en containergrense.
+
+Med et annet oppsett bygger modulen inn payloadene som beskrevet i neste avsnitt. Det dekker:
+
+- en egendefinert `nitro.output.publicDir`, som bygget leser én gang;
+- `serveStatic: true` på et preset som holder statiske filer et annet sted.
+
+<Warning>
+
+Hvis et bygg leser `public/` og mappen ikke når serveren, som med `aws-lambda` og `serveStatic: true`, logger serveren én feil og sidene viser rå nøkler. Sett `nitro.serveStatic: false` for å bygge inn payloadene.
+
+</Warning>
+
+## Serverless og Edge {#serverless-and-edge}
+
+Disse presetene kan ikke lese `public/` ved kjøretid:
+
+- funksjons-presets som sender `public/` til et CDN eller ikke leverer den: `vercel`, `netlify`, `aws-lambda`, `aws-amplify`, `azure-swa`, `firebase`, `stormkit`, `zeabur`, `node-listener`;
+- Edge-presets uten filsystem: `cloudflare-module`, `cloudflare-pages`, `vercel-edge`, `netlify-edge`, `deno_deploy`;
+- `serveStatic: 'inline'`, som `winterjs`.
+
+Der bygger modulen payloadene inn i server-bundlen som Nitro-serverressurser (`assets:i18n`) og skriver fortsatt den offentlige kopien for nettleseren.
+
+Å bygge inn hele matrisen av sider × språk gjør bundlen stor. Over grensen til en Edge-plattform advarer bygget og navngir den, se [Bundle-grenser](#bundle-limits-on-edge). For store kataloger bytter du til `source`-modus, som bygger inn de kompakte kildefilene og slår sammen rot-, side- og fallback-oversettelser ved kjøretid:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    translationPayloads: {
+      mode: 'source',
+    },
+  },
+})
+```
+
+I `source`-modus henter nettleseren alltid payloads fra serverruten, som slår dem sammen ved forespørsel (en eventuell offentlig kopi inneholder det kompakte kildetreet som bare serveren leser). Det krever en kjørende server, så ikke bruk `source` for et rent statisk nettsted.
+
+### Bundle-grenser på Edge {#bundle-limits-on-edge}
+
+| Plattform          | Grense                                                                                 |
+| ------------------ | -------------------------------------------------------------------------------------- |
+| Cloudflare Workers | 64 MiB ukomprimert, på Free og Paid. Ingen komprimert grense. 1 s oppstart, 128 MB minne |
+| Vercel Edge        | 1 MB gzip på Hobby, 2 MB på Pro, 4 MB på Enterprise                                    |
+| Netlify Edge       | 20 MB komprimert                                                                       |
+
+Bygget summerer ordbøkene det bygger inn og advarer bare over plattformens laveste grense. Det teller bare ordbøker, så appen kommer i tillegg. For eksempel bygger 120 sider × 4 språk med en rotfil på 60 KB inn:
+
+| Modus | Innebygd | Passer |
+| --- | --- | --- |
+| `premerged` | 34.9 MiB | Cloudflare; ikke Vercel Edge eller Netlify Edge |
+| `source` | 5.7 MiB | Fortsatt 3 MB gzip på Vercel Edge |
+
+En katalog av den størrelsen på Vercel Edge trenger en [payload-vert](#app-baseurl-and-payload-hosts).
+
+`source` betaler for en sammenslåing per side og språk i hvert isolat, omtrent 1 ms i det eksemplet og 7 ms CPU i et kaldt isolat. Det vokser med størrelsen på fallback-kjeden: omtrent 43 ms for 4 MB med kjedefiler. Netlify Edge tillater 50 ms CPU per forespørsel og Cloudflares Free-plan 10 ms.
+
+### Datoer på Edge-kjøretider {#dates-on-edge-runtimes}
+
+`$td` bruker kjøretidens `Intl`, og ICU-dataene der kan avvike fra nettleserens. På Netlify Edge kan en formatert dato inneholde U+202F (smalt hardt mellomrom) der Chrome har et vanlig mellomrom, så Vue logger én hydreringsmismatch og teksten retter seg selv ved hydrering. Ren Nuxt med ren `Intl` gjør det samme der; Deno Deploy gjør det ikke.
+
+<Tip>
+
+`<i18n-t>` med `date` eller `relativeDate` tillater allerede mismatchen. For `$td` i en mal setter du `data-allow-mismatch="text"` på elementet.
+
+</Tip>
+
+## Statisk nettsted (nuxi generate) {#static-site-nuxi-generate}
+
+```bash
+npx nuxi generate
+```
+
+`nuxi build --preset <static preset>` gjør det samme.
+
+- Standardmodusen `premerged` skriver hver payload til `.output/public/_locales/`, så enhver statisk vert kan levere dem.
+- Sidene forhåndsgjengis for hvert språk: under `prefix` legger modulen inn hver lokaliserte rot (`/en`, `/de`), og `/` beholdes som en omdirigeringsstubb.
+- La [`prerenderRoutes`](/no/api/module-options#translationpayloads) være av: den offentlige kopien inneholder allerede payload-filene.
+- Med `source`-modus eller `publicAssets: false` er det ingenting for nettleseren å lese, og bygget advarer.
+
+<Note>
+
+Det finnes ingen server som kan lese en informasjonskapsel eller `Accept-Language`, så et lagret språk omdirigerer ikke `/` ved første innlasting. Under `no_prefix` inneholder HTML-en standardspråket, og en lagret informasjonskapsel tas ikke i bruk ved innlasting: `$switchLocale` fungerer fortsatt på den åpne siden.
+
+</Note>
+
+For Cloudflare Pages, se [Cloudflare Pages](#cloudflare-pages).
+
+For et bygg med [språkdomener](/no/guide/layers#multiple-domains) kjører du generate én gang per domene, med `NUXT_I18N_DOMAIN` som verten for kjøringen. Hvert tre inneholder da det domenets sider og payloads. Nitro har ingen variabel for utdatamappen, så les din egen fra konfigurasjonen:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: { output: { publicDir: process.env.PUBLIC_DIR } },
+})
+```
+
+```bash
+NUXT_I18N_DOMAIN=example.de PUBLIC_DIR=sites/example.de npx nuxi generate
+NUXT_I18N_DOMAIN=example.com PUBLIC_DIR=sites/example.com npx nuxi generate
+```
+
+- Hold mappene utenfor `.output`: hver kjøring tømmer den.
+- Absolutte lenker til de andre domenene crawles ikke.
+- Uten variabelen advarer et bygg med et `baseUrl`-språk og genererer byggekonfigurasjonen, der disse språkene er lenker og ikke får noen sider.
+- På en Node-server låser den samme variabelen prosessen til ett domene, uansett hva `Host` sier.
+
+En statisk vert bruker sine egne headere på disse filene; konfigurer hurtigbufring i vertens konfigurasjon. Modulens `/_locales/*`-regel når likevel Cloudflare Pages via `_headers` og Vercel via `config.json`, som `public, max-age=60`. For å levere `.gz`- / `.br`-søskenfiler slår du på `nitro.compressPublicAssets`: modulen komprimerer payload-kopien med de samme innstillingene.
+
+## Cache-headere og dateBuild {#cache-headers-and-datebuild}
+
+| Forespørsel                                                                              | `Cache-Control`                                                                                                 |
+| ---------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Node-server eller rute, `?v=` lik gjeldende `dateBuild`, en ikke-tom ordbok              | `private, max-age=<httpCacheDuration>, immutable`                                                               |
+| Node-server eller rute, uten `?v=`, med en gammel, eller en tom ordbok                   | `public, max-age=0, must-revalidate`                                                                            |
+| En verts kopi av `public/`, hvilken som helst `?v=`                                      | `public, max-age=60` ([`httpCacheControl`](/no/api/module-options#other)) |
+| `source`-modus, `cacheTtl` eller `apiBaseServerHost`: en ordbok kan endres uten bygg     | `httpCacheControl`-headeren, alltid                                                                             |
+| Serverrute, ordboken kunne ikke leses                                                    | `503`, `no-store`                                                                                               |
+| utviklingsserver                                                                         | ingen                                                                                                           |
+
+Hvorfor tabellen ser slik ut:
+
+- URL-en med gjeldende `v` låses som en hashet ressurs, og bare det som ser query-en kan si det: serverruten, og en Node-server, som setter headeren på sine statiske filer.
+- Den er `private`, så et CDN som ignorerer query-en ikke kan besvare neste `v` med dette svaret.
+- En verts statiske filer får en header for hele stien fra en `/_locales/**`-ruteregel, som ikke kan se query-en, så den forblir kort; en gjentatt innlasting blokkerer likevel ikke på noe.
+- En gammel `v` kan fortsatt leveres, siden hurtigbufret HTML refererer til den.
+
+`httpCacheControl: false` holder alle statiske filer på `max-age=0, must-revalidate`. [`httpCacheDuration`](/no/api/module-options#httpcacheduration) er som standard ett år; `0` sender ingen header. `$clearCache()` revaliderer det den laster neste gang.
+
+Safari ber om en forhåndslastet payload på nytt når den kanskje ikke kan gjenbruke svaret: med `no-cache` og en `ETag` er den andre forespørselen en `304`, uten verken cache-header eller validator er den en ny fullstendig nedlasting. En `max-age` over `0` gir én forespørsel. Bare `httpCacheDuration: 0` på en vert som ikke legger til noen validator, betaler for dette.
+
+[`dateBuild`](/no/api/module-options#datebuild) er `?v=`-verdien. Som standard er den en hash av oversettelsesfilene dine, så den endres bare når oversettelsene endres, og nettlesere beholder sine hurtigbufrede payloads på tvers av distribusjoner som ikke rørte dem. Den flytter seg også med fallback-kjeden.
+
+- Sett den selv for å låse en verdi.
+- Sett `0` eller `''` for å fjerne `?v=` helt; payloads blir da aldri `immutable`.
+
+<Tip>
+
+Etter å ha erstattet en ordbok på stedet på en Node-server, start på nytt med `NUXT_I18N_DATE_BUILD=<new value>`: ingenting annet flytter `v` uten et nytt bygg.
+
+</Tip>
+
+### Rot- og deltafiler {#root-and-delta-files}
+
+`premerged` skriver én rot per språk, `__root/<locale>/data.json`, og i hver sides fil bare det som avviker fra den.
+
+- Sidefilen merker roten den ble laget mot med en `__i18n_root`-nøkkel.
+- Nettleseren henter begge, siden viser ingenting før begge er på plass, og SSR slår dem sammen én gang per chunk.
+- En fil uten merke er en hel ordbok og står alene: dev, `source`-modus, serverruten og en vert som fortsatt har eldre filer, svarer alle med en slik, uten noen innstilling.
+
+Så alle som leser `_locales/*/data.json` direkte, leser en delta. Sett `translationPayloads.rootDelta: false` for å beholde hele filer.
+
+En fane som er åpen på tvers av en distribusjon og ber om en ny delta, ser at den ble laget mot en annen rot, og henter den roten før den vises.
+
+### Når en ordbok ikke kan leses {#when-a-dictionary-cannot-be-read}
+
+En mislykket henting fra en vert (alt unntatt en 404), en uleselig eller korrupt fil, eller en 200 som ikke er et JSON-objekt, når ingen cache, og neste forespørsel leser på nytt:
+
+- en sidegjengivelse logger en advarsel, viser rå nøkler for den ordboken og svarer `503` med `Cache-Control: no-store`, det samme i alle CDN-headere (`CDN-Cache-Control`, `Cloudflare-CDN-Cache-Control`, `Netlify-CDN-Cache-Control`, `Vercel-CDN-Cache-Control`, `Surrogate-Control`, over eventuelle fra en ruteregel) og `Retry-After: 60`;
+- `/_locales/...` svarer `503` med `no-store`;
+- `useTranslationServerMiddleware` gir en `t` som svarer med nøkkelen eller standardverdien.
+
+Hva som skjer under avbruddet:
+
+- **Besøkende:** innholdet i den 503-en er selve siden. Ved hydrering leser nettleseren ordboken på nytt, og teksten vises så snart verten er tilbake, med én konsollfeil fra Vue om en hydreringsmismatch, siden serverens HTML hadde nøklene.
+- **Crawlere** får beskjed om å komme tilbake senere.
+- **Cacher:** en `swr`- eller `cache`-ruteregel lagrer ingenting med status 400 eller høyere, og et CDN får `no-store`, så ingen cache beholder de rå nøklene, og den første forespørselen etter gjenoppretting gjengir den ekte teksten.
+- **Sider som allerede er hurtigbufret** av en regel, forblir som de er: revalideringen mislykkes og lagrer ingenting. På Vercel beholder en mislykket `isr`-revalidering den siste siden på samme måte.
+
+Dette dekker hver chunk en gjengivelse laster, inkludert en mislykket side-chunk med roten tilgjengelig, og en chunk som slås sammen senere i gjengivelsen. En side med en frisk ordbok, en omdirigering og en feilside beholder sin status. En [komponent-island](/no/guide/server-side-translations) er unntaket: den forblir en 200, siden en 503 ville tatt den ut av siden, så en side der dens egen ordbok lastes, kan beholdes med en islands rå nøkler. Forespørsler under et avbrudd når hver for seg verten, uten noe eget tidsavbrudd fra modulen utover de 60 sekundene for svarheadere.
+
+En 404 fra verten betyr at den ikke har en slik fil, noe som ikke er en feil. En sidegjengivelse viser rotordboken, slik nettleseren gjør, og `/_locales/...` svarer med samme 404. Ingen cache beholder noen av dem, så en fil som dukker opp, leses ved neste forespørsel, på bekostning av én forespørsel til verten per gjengivelse av en slik side. Uten rotfil heller er ordboken tom, og en [forhåndsgjengivelse](/no/guide/upgrade#server,-build-and-deployment) mislykkes.
+
+Serveren holder lastede payloads i en LRU-cache i prosessen med opptil `cacheMaxSize` oppføringer (1000 som standard) som laster en oppføring på nytt etter `cacheTtl` når den er satt; [Ytelsesjustering](/no/guide/performance) dekker begge, og [`cacheStorage`](/no/guide/performance#shared-cache-for-several-instances) legger til en cache som deles av instanser. Ikke legg i tillegg til en Nitro `cache`-ruteregel på `/_locales/**`: den bruker hele URL-en som nøkkel, query inkludert, og lagrer en tredje kopi.
+
+## App-baseURL og payload-verter {#app-baseurl-and-payload-hosts}
+
+**`app.baseURL`** trenger ingenting annet. Med `app.baseURL: '/shop/'` henter nettleseren `/shop/_locales/...`; kopien forblir i `.output/public/_locales/`, som Nitro leverer under basen (en statisk vert må montere utdataene på `/shop/`). Språkprefikser og [ekskluderte stier](/no/guide/excluding-static-files) matches uten basen.
+
+**`app.cdnURL`** flytter også payloadene, når de er filer i `public/`: nettleseren henter og forhåndslaster `<cdnURL>/_locales/...`.
+
+- CDN-et må ha `_locales/` ved siden av `_nuxt/`, på den stien.
+- Det må tillate nettstedets opprinnelse (CORS), siden filen kommer via `fetch`.
+- En ordbok som bare serverruten svarer på (`source`-modus, ingen offentlig kopi), forblir på appens opprinnelse.
+
+En kjøretids-`NUXT_APP_BASE_URL` på `cloudflare-module` krever Node-kompatibilitet (`nodejs_compat`). Med `nitro.cloudflare.nodeCompat` av, som Nitro også faller tilbake til på en gammel dato uten flagg, ser den ikke variabelen og leverer `/`, ren Nuxt inkludert, mens en språkomdirigering fortsatt går til basen. Sett `app.baseURL` ved byggetid der.
+
+For å levere payloads fra en annen opprinnelse peker du klienten og serveren mot den og slår av de lokale utdataene:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    apiBaseClientHost: 'https://cdn.example.com',
+    apiBaseServerHost: 'https://cdn.example.com',
+    translationPayloads: {
+      serverHandler: false,
+      publicAssets: false,
+      serverAssets: false,
+    },
+  },
+})
+```
+
+- På Node skriver `serverAssets` den samme kopien for serverens egne lesinger, og den filen svarer på `/_locales`: den må også være av, også hvis du beholder serverruten for nettleseren, som den aldri ville nå.
+- Verten må levere det samme oppsettet `<apiBaseUrl>/<page>/<locale>/data.json`.
+- Bygget advarer når alle lokale utdata er av og en vert mangler.
+
+De samme verdiene kan komme fra `NUXT_I18N_APP_BASE_URL`, `NUXT_I18N_APP_BASE_CLIENT_HOST` og `NUXT_I18N_APP_BASE_SERVER_HOST` ved byggetid. `NUXT_I18N_APP_BASE_SERVER_HOST` fungerer også ved kjøretid og vinner over byggeverdien. Se [`apiBaseServerHost`](/no/api/module-options#apibaseserverhost) for detaljer.
+
+## Plattformer {#platforms}
+
+Bare det modulen eller utdataene dens trenger. Kontoer, regioner og CLI-innlogginger finner du i plattformens dokumentasjon.
+
+### Cloudflare Workers {#cloudflare-workers}
+
+Preset `cloudflare_module`. `wrangler deploy` pakker Nitros utdata en gang til med esbuild, og etter det gjengis en rå `defineAsyncComponent(() => import('./X.vue'))` tom på serveren. Nuxts standard feilside er en slik, så en 404 har tomt innhold og nettleseren logger en hydreringsmismatch. Klienten gjengir deretter siden og statusen forblir 404, men uten JavaScript er siden blank. Dette er [nuxt#33270](https://github.com/nuxt/nuxt/issues/33270): ren Nuxt uten modulen gjør det samme. Sideruter påvirkes ikke.
+
+Slå av den andre pakkingen:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: {
+    preset: 'cloudflare_module',
+    cloudflare: {
+      deployConfig: true, // `wrangler` below applies only with it
+      wrangler: {
+        no_bundle: true,
+        find_additional_modules: true,
+        rules: [{ type: 'ESModule', globs: ['**/*.mjs'] }],
+      },
+    },
+  },
+})
+```
+
+```bash
+npx nuxi build
+cd .output/server && npx wrangler deploy -c wrangler.json
+```
+
+Sett `compatibilityDate` til `2024-09-19` eller senere: en eldre dato velger det gamle presetet, som ikke skriver noen `wrangler.json` og ikke gir noen feil. 404-en gjengis da, og opplastingen blir mindre: 190 KiB gzip mot 246 KiB på testappen. Din egen `error.vue` er den andre utveien, men den dekker bare feilsiden.
+
+Modulen selv trenger ikke `nodejs_compat`. For grensene, se [Bundle-grenser](#bundle-limits-on-edge).
+
+### Cloudflare Pages {#cloudflare-pages}
+
+Bruk presetet `cloudflare-pages-static`. `nuxi generate --preset cloudflare-pages` er et serverbygg uten `index.html`.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: {
+    preset: 'cloudflare-pages-static',
+    prerender: { autoSubfolderIndex: false },
+  },
+})
+```
+
+```bash
+npx nuxi generate
+npx wrangler pages project create my-site --production-branch main --force
+npx wrangler pages deploy dist --project-name my-site --branch main
+```
+
+- **Utdata.** Presetet skriver til `dist/`, ikke `.output/public`.
+- **`--force`.** Uten det overlater en ny wrangler (4.156 her) `pages project create` til Workers. Med det får du et klassisk Pages-prosjekt. Det trengs én gang, ved opprettelsen.
+- **`autoSubfolderIndex: false`.** Pages svarer `/de` med en 308 til `/de/` mens canonical og `hreflang` oppgir `/de`, så de peker på en omdirigering. Med dette alternativet er filen `de.html`, og omdirigeringen er borte.
+- **`NUXT_E1005` i konsollen ved en 404** er en vanlig 404. Nuxt rapporterer det slik fordi `404.html` starter på klienten, før appen er montert. Siden fungerer, og ren Nuxt skriver ut den samme linjen.
+
+### Vercel og Vercel Edge {#vercel-and-vercel-edge}
+
+Presetene `vercel` og `vercel_edge`, uten endringer i appen. Taggene fungerer uten `metaBaseUrl`, ut fra plattformens videresendte headere. Vercel Edge har en liten bundle-grense: se [Bundle-grenser](#bundle-limits-on-edge). For en delt cache, bruk [`upstash`-driveren](/no/guide/performance#upstash-on-vercel-and-vercel-edge).
+
+### Netlify {#netlify}
+
+Presetene `netlify` og `netlify_edge`.
+
+```bash
+npx nuxi build --preset netlify
+npx netlify deploy --prod --no-build --dir dist --functions .netlify/functions-internal
+```
+
+- **La `nitro.output` være usatt.** Presetet skriver `.netlify/` og `dist/` selv.
+- **Ha en `package.json` i mappen du distribuerer fra.** Uten en ser CLI-en i overordnet mappe og distribuerer ingen funksjon, uten feilmelding.
+- **Netlify Edge** distribueres med bare `--dir dist`. Se [Datoer på Edge-kjøretider](#dates-on-edge-runtimes).
+
+### Cloud Run {#cloud-run}
+
+Bruk standardbygget `node-server`. `gcloud run deploy --source` trenger en `Dockerfile` i utdatamappen når docker ikke kjører lokalt:
+
+```dockerfile
+# .output/Dockerfile
+FROM node:22-slim
+WORKDIR /app
+COPY . .
+ENV NODE_ENV=production
+CMD ["node", "server/index.mjs"]
+```
+
+```bash
+cd .output && gcloud run deploy my-app --source .
+```
+
+Taggene fungerer uten `metaBaseUrl`, ut fra plattformens videresendte headere.
+
+### Deno Deploy {#deno-deploy}
+
+Preset `deno_deploy`. `deno deploy` erstatter `deployctl`. Opprett en dynamisk app med inngangspunktet `server/index.ts`, og distribuer fra utdatamappen.
+
+### Firebase {#firebase}
+
+| Produkt | Oppsett |
+| --- | --- |
+| App Hosting | Kjører Node-bygget: bruk standardpresetet eller `firebase-app-hosting`, og Node 20+ |
+| Cloud Functions | `firebase`-presetet bygger inn payloadene og krever `firebase-functions` |
+| Hosting (statisk) | Leverer `.output/public` som filer, så `/_locales/**` får Hostings headere |
+
+På statisk Hosting, hvis JSON kommer tilbake med feil `Content-Type` eller hurtigbufring, legg til en `headers`-oppføring for `/_locales/**` i `firebase.json`. Nuxt `routeRules`-headere gjelder ikke filer Hosting leverer selv; payload-ruten setter sin egen `Content-Type` og `Cache-Control` på svar som faktisk når serveren.
+
+### AWS Amplify {#aws-amplify}
+
+`aws-amplify` holder statiske filer ved siden av compute-mappen sin, ikke ved siden av serveren, så payloadene bygges inn som på en funksjonsplattform.
+
+### Flere instanser av ett bygg {#several-instances-of-one-build}
+
+Ett artefakt kan kjøre med forskjellig standardspråk eller deaktiverte språk per instans via miljøvariabler: se [Kjøretidsoverstyringer](/no/guide/runtime-overrides). Et språk som bare er deaktivert ved kjøretid, har fortsatt sine statiske filer i `public/`; deaktiver det ved byggetid hvis de ikke skal være tilgjengelige.
+
+Instanser som laster ordbøker fra en ekstern vert, kan dele dem i Redis, Upstash, Cloudflare KV eller D1, Deno KV eller annen Nitro-lagring, slik at backend-en får én forespørsel i stedet for én per instans. Det er en cache, ikke en kilde til oversettelser: se [Delt cache for flere instanser](/no/guide/performance#shared-cache-for-several-instances).
+
+## Bak en proxy eller et CDN {#behind-a-proxy-or-cdn}
+
+Appen må lære den offentlige verten og skjemaet fra forespørselen.
+
+| Proxyen sender                               | Vanlig bygg                                      | Bygg med `baseUrl` på språk                                                       |
+| -------------------------------------------- | ------------------------------------------------ | --------------------------------------------------------------------------------- |
+| Den ekte `Host`                              | Ingenting å sette                                | Ingenting å sette                                                                 |
+| Opprinnelsens `Host`, pluss `X-Forwarded-Host` | Ingenting å sette                              | [`trustForwardedHost: true`](/no/api/module-options#trustforwardedhost)           |
+| Ingen av dem                                 | [`metaBaseUrl`](/no/api/module-options#metabaseurl) | Ingen innstilling hjelper: hver forespørsel ser ut som opprinnelsens vert, så endre proxyen |
+
+- **Ruter under `swr` eller `cache`.** Tabellen gjelder ikke der: se [Hurtigbufring av HTML](#caching-html). Sett `metaBaseUrl` eller `site.url`.
+- **`X-Forwarded-Proto`.** Send den, ellers leser canonical-URL-er `http://` bak en HTTPS-proxy. `metaBaseUrl` løser også dette.
+- **I et domenebygg** velger domenet base-URL-en for taggene. `metaTrustForwardedHost` velger ikke domenet der, det gjør bare `trustForwardedHost`.
+- **Omdirigeringer er relative og språkinformasjonskapselen har ikke `Domain`,** så begge forblir på den offentlige verten.
+
+<Warning>
+
+**Lås `metaBaseUrl` når opprinnelsen forblir tilgjengelig** — På et vanlig bygg uten `metaBaseUrl` eller `site.url` henter canonical, `hreflang` og `og:url` verten sin fra forespørselen. [`metaTrustForwardedHost`](/no/api/module-options#metatrustforwardedhost) er på som standard, så en direkte forespørsel med `X-Forwarded-Host: evil.example` får `https://evil.example` i disse taggene, og en cache foran sprer den siden. En plattformvert som `*.workers.dev` er nettopp en slik opprinnelse. `metaBaseUrl` lukker dette også for `Host`. En kjent vert i et domenebygg beholder sin egen `baseUrl`. Med `trustForwardedHost: true` kan en direkte klient velge siden til et annet domene, så slå det bare på bak en proxy som overskriver headeren.
+
+</Warning>
+
+## Hurtigbufring av HTML {#caching-html}
+
+De fleste URL-er er trygge å hurtigbufre, fordi de navngir språket sitt. Disse avhenger av den besøkende:
+
+| Oppsett                        | URL-er                                            |
+| ------------------------------ | ------------------------------------------------- |
+| Standard, `autoDetectPath: '/'` | `/`                                              |
+| `prefix`                       | `/` og alle URL-er uten prefiks, som bare omdirigerer |
+| `autoDetectPath: '*'`          | Alle URL-er                                       |
+| `no_prefix`                    | Alle sider                                        |
+
+- **`Vary`.** Disse svarene har `Vary` med `Cookie` når [`localeCookie`](/no/api/module-options#localecookie) er satt og `Accept-Language` når `autoDetectLanguage` er på. En cache som respekterer det, holder svarene adskilt.
+- **En cache som ignorerer `Vary`,** som "hurtigbufre alt etter URL", må hoppe over disse URL-ene. Ellers når én besøkendes `302 /de` den neste besøkende, og en lagret standardside fjerner omdirigeringen for alle. På `/` kan du også sette `redirects: false`. Nitros rutecache bruker stien og `varies`-listen som nøkkel, så hold `/` utenfor `swr`- og `cache`-regler også.
+- **`Set-Cookie`.** Med `localeCookie` satt har hver servergjengitt side under et prefiks `Set-Cookie`, og et korrekt CDN vil ikke lagre den. For hurtigbufret HTML lar du `localeCookie` være av, eller fjerner headeren på edge.
+- **`swr`- og `cache`-regler krever `metaBaseUrl` eller `site.url`.** Nitro gjengir en slik rute med bare headerne i `cache.varies`, så `Host`, `X-Forwarded-Host` og `X-Forwarded-Proto` er borte og forespørsels-URL-en leser `http://localhost`. Uten en fast opprinnelse peker canonical, `hreflang` og `og:url` på disse rutene på `http://localhost`, på alle plattformer. Ren Nuxts `useRequestURL()` leser det samme der. Å hente verten fra den besøkende i stedet ville sette én besøkendes `X-Forwarded-Host` inn i siden alle besøkende får. Et domenebygg påvirkes ikke: taggene bruker språkenes `baseUrl`.
+
+  Hvis ett bygg betjener flere verter og ingen enkelt opprinnelse passer, la regelen se headerne og behold én kopi per verdi: `'/blog/**': { swr: 60, cache: { varies: ['host', 'x-forwarded-host', 'x-forwarded-proto'] } }`. Hver distinkte verdi er en ny cache-oppføring, så en klient som sender oppdiktede headere, fyller cachen: plasser opprinnelsen bak en proxy som setter dem.
+- **`swr`- og `cache`-regler på et domenebygg.** Modulen legger til `host` i `cache.varies` for hver slik regel, og `x-forwarded-host` med `trustForwardedHost`, slik at ett domene ikke leverer sin side til et annet. En regel med `cache: false` forblir som skrevet. `isr` er plattformens cache: kontroller at den bruker verten som nøkkel. Med verten i nøkkelen legger en klient som sender oppdiktede verter, til cache-oppføringer.
+
+For payload-filene, se [Cache-headere og dateBuild](#cache-headers-and-datebuild).
+
+## Relatert {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Ytelsesjustering" icon="book-open" href="/no/guide/performance">
+
+</Card>
+
+<Card title="Kjøretidsoverstyringer" icon="book-open" href="/no/guide/runtime-overrides">
+
+</Card>
+
+<Card title="translationPayloads-referanse" icon="brackets-curly" href="/no/api/module-options#translationpayloads">
+
+</Card>
+
+<Card title="Lag og domener" icon="book-open" href="/no/guide/layers">
+
+</Card>
+
+<Card title="SEO" icon="book-open" href="/no/guide/seo">
+
+</Card>
+
+</CardGroup>

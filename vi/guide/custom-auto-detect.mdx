@@ -1,0 +1,111 @@
+---
+title: "Phát hiện locale tùy chỉnh"
+description: "Tự chọn locale — theo domain, header hoặc hồ sơ người dùng — bằng một server plugin và useI18nLocale().setLocale()."
+---
+
+Cơ chế phát hiện tích hợp sẵn đọc URL, cookie và `Accept-Language`. Khi locale phụ thuộc vào thứ khác — domain, một header địa lý do CDN của bạn đặt, hồ sơ người dùng — hãy tự đặt nó trong một plugin chạy trước plugin i18n. Module sau đó sẽ tải bản dịch của locale đó và dùng nó cho chuyển hướng y như thể chính module đã phát hiện ra. Các quy tắc quyết định khi nào locale đã chọn thắng URL nằm ở [Phát hiện locale](/vi/guide/locale-detection); trang này hướng dẫn cách cắm nguồn của riêng bạn vào.
+
+## Đặt locale trong một server plugin {#set-the-locale-in-a-server-plugin}
+
+```ts
+// plugins/i18n-locale.server.ts
+export default defineNuxtPlugin({
+  name: 'i18n-custom-locale',
+  enforce: 'pre',
+  order: -10, // before the i18n plugin (order -5)
+  setup() {
+    const { setLocale } = useI18nLocale()
+    const host = (useRequestHeaders(['host']).host ?? '').split(':')[0]! // without the port
+
+    if (host.endsWith('.de')) setLocale('de')
+    else if (host.endsWith('.fr')) setLocale('fr')
+  },
+})
+```
+
+`setLocale(code)` ghi trạng thái locale (`useState('i18n-locale')`) và, khi cookie locale được cấu hình, ghi cả cookie. Hãy dùng nó thay vì tự ghi `useState` hoặc `useCookie`. Chỉ truyền mã của các locale đang được bật.
+
+Giữ plugin ở dạng `.server.ts` khi nó đọc request header: chúng không tồn tại trong trình duyệt. Plugin `.client.ts` là nơi dành cho các nguồn chỉ có trên trình duyệt như `localStorage`.
+
+## Tắt bước Accept-Language tích hợp sẵn {#turn-off-the-built-in-accept-language-step}
+
+Plugin của bạn và `Accept-Language` có thể không thống nhất. Để chỉ mã của bạn (cùng với URL và cookie) quyết định, hãy tắt header:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    autoDetectLanguage: false,
+  },
+})
+```
+
+[`autoDetectLanguage`](/vi/api/module-options#autodetectlanguage) chỉ điều khiển bước header. URL và một cookie hợp lệ vẫn được tính.
+
+## Điều gì xảy ra tiếp theo {#what-happens-next}
+
+Tác dụng của `setLocale` phụ thuộc vào [chiến lược](/vi/guide/strategy):
+
+| Chiến lược | Tác dụng của `setLocale('de')` trong plugin |
+| --- | --- |
+| `no_prefix` | Trang được render bằng tiếng Đức; URL không thay đổi. |
+| `prefix`, `prefix_except_default` | Trên một đường dẫn không có tiền tố mà [`autoDetectPath`](/vi/api/module-options#autodetectpath) cho phép chuyển hướng (mặc định chỉ `/`), server trả về `302` tới URL tiếng Đức. Một URL có tiền tố locale sẽ giữ nguyên tiền tố. |
+| `prefix_and_default` | Không chuyển hướng: URL không có tiền tố là một trang hợp lệ của locale mặc định. |
+
+Với các chiến lược có tiền tố, locale trong URL là lựa chọn của người dùng và plugin của bạn không ghi đè nó. `autoDetectPath: '*'` là ngoại lệ: khi đó server chuyển các URL có tiền tố theo cookie và `Accept-Language` và bỏ qua trạng thái, nhưng `setLocale()` cũng ghi cookie khi cookie được cấu hình, nên từ request tiếp theo lựa chọn của plugin có thể chuyển hướng một URL có tiền tố. Hãy giữ `'/'` hoặc dùng `'no_prefix'` khi các URL locale tường minh phải thắng. Dùng plugin để chọn nơi khách truy cập đến, không phải để viết lại các liên kết họ đã theo.
+
+## Tôn trọng locale người dùng đã chọn {#respect-a-locale-the-user-picked}
+
+Khi người dùng chuyển ngôn ngữ, thao tác chuyển sẽ ghi cookie. Hãy bỏ qua cơ chế phát hiện của riêng bạn khi đã có một lựa chọn hợp lệ:
+
+```ts
+// plugins/i18n-locale.server.ts
+import { detectLocaleFromAcceptLanguage } from '@i18n-micro/utils/accept-language'
+
+export default defineNuxtPlugin({
+  name: 'i18n-custom-locale',
+  enforce: 'pre',
+  order: -10,
+  setup() {
+    const { getPreferredLocale, setLocale, validLocales } = useI18nLocale()
+    if (getPreferredLocale()) return // valid state or cookie: keep it
+
+    const country = useRequestHeaders(['x-country'])['x-country']
+    if (country === 'JP') return setLocale('ja')
+
+    const header = useRequestHeaders(['accept-language'])['accept-language']
+    setLocale(detectLocaleFromAcceptLanguage(header, validLocales))
+  },
+})
+```
+
+`getPreferredLocale()` chỉ trả về trạng thái hoặc cookie khi đó là một locale đang được bật, nên một cookie cũ không làm dừng quá trình phát hiện. `detectLocaleFromAcceptLanguage` là bộ so khớp có tính đến q-value mà chính module sử dụng (cài `@i18n-micro/utils` để import nó); `setLocale(null)` không làm gì cả.
+
+## Mỗi locale một domain {#one-domain-per-locale}
+
+Nếu mỗi domain nên phục vụ các locale riêng, bạn không cần plugin: hãy cho mỗi locale một `baseUrl`, đặt `baseDefault: true` cho locale mặc định của từng domain, và build một lần (một site tĩnh vẫn chạy `nuxi generate` cho từng domain). Xem [Layer và domain](/vi/guide/layers#multiple-domains).
+
+## Liên quan {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Phát hiện locale" icon="book-open" href="/vi/guide/locale-detection">
+
+Toàn bộ quy tắc ưu tiên và chuyển hướng
+
+</Card>
+
+<Card title="useI18nLocale" icon="brackets-curly" href="/vi/composables/useI18nLocale">
+
+</Card>
+
+<Card title="Chiến lược định tuyến" icon="book-open" href="/vi/guide/strategy">
+
+</Card>
+
+<Card title="Layer và domain" icon="book-open" href="/vi/guide/layers">
+
+</Card>
+
+</CardGroup>

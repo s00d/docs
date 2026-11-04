@@ -1,0 +1,327 @@
+---
+title: "CLI"
+description: "コマンドラインから、CI での翻訳チェック、未使用キーの検出、翻訳サービスによる不足分の補完、翻訳者とのファイル交換を行います。"
+---
+
+`@i18n-micro/cli` は Nuxt プロジェクトのロケールファイルを管理します。`nuxt.config` から `locales`、`defaultLocale`、`translationDir` とレイヤーを読み取るため、独自の設定は必要ありません。
+
+![ターミナルで i18n-micro check を実行し、不足キー 1 件、未定義キー 1 件、未使用キー 4 件を一覧表示して失敗した後、extract で未定義キーを追加し、clean --dryRun で削除予定の 4 件のキーを一覧表示する様子](/images/cli/demo.gif)
+
+| コマンド | 用途 |
+| --- | --- |
+| `check` | ロケールファイルに問題があればビルドを失敗させる |
+| `translate` | 翻訳サービスを通じて不足しているキーを埋める |
+| `clean` | どこからも使われていないキーを削除する |
+| `rename` | キー、または名前空間全体を、すべての箇所で一度に移動する |
+
+```bash
+npm install -D @i18n-micro/cli
+npx i18n-micro --help
+```
+
+アプリのルートから実行するか、`--cwd` でそのパスを指定してください。各コマンドのすべてのフラグは [コマンドリファレンス](/ja/api/cli) にあります。
+
+<Tip>
+
+**nuxt-i18n-micro-cli から移行しますか？** `@i18n-micro/cli` がそれを置き換えます。バイナリ `i18n-micro` と `i18n-micro-cli` はそのまま残ります。[旧コマンドの対応表](#moving-from-nuxt-i18n-micro-cli) を参照してください。
+
+</Tip>
+
+## CI で使う {#use-it-in-ci}
+
+```bash
+i18n-micro check
+```
+
+`check` はゲートです。以下を報告します:
+
+| チェック | 意味 |
+| --- | --- |
+| `missing` | デフォルトロケールのキーがあるロケールに存在しない |
+| `empty` | 値が `''`。アプリにはフォールバックではなく空白が表示される |
+| `extra` | デフォルトロケールにないキーがあるロケールに存在する |
+| `placeholders` | `{name}` が失われたか追加された、または複数形の形式が失われた |
+| `undefined` | デフォルトロケールにないキーがコードで使われている |
+| `unused` | プロジェクト内のどこからもキーが使われていない |
+| `duplicates` | 異なるキーに同じテキストがある。デフォルトでは無効: `--duplicates` を渡す |
+
+- `--only missing,placeholders` で一部のチェックのみを実行します。`--only` で指定したチェックが実行できなかった場合は失敗します。
+- `--json` はツール向けのレポートを出力します。
+- `--ignore` でソースファイルをスキップします。
+- キーがランタイムに計算される場合、`unused` はスキップされ、レポートにその理由が示されます。
+
+すべてのコマンドは 3 つのコードのいずれかで終了するため、パイプラインは翻訳の問題とツールの問題を区別できます:
+
+| 終了コード | 意味 |
+| --- | --- |
+| `0` | 報告事項なし |
+| `1` | 検出事項あり |
+| `2` | コマンドを実行できなかった: 使用方法の誤り、壊れたファイル、失敗したリクエスト |
+
+CI のステップに加える価値のある他のコマンド:
+
+```bash
+i18n-micro format --check      # fails if a file is not formatted
+i18n-micro lint                # stray spaces, empty values, your own regex rules
+i18n-micro stats --baseRef main
+```
+
+## ロケールの足並みを揃える {#keep-locales-in-step}
+
+| コマンド | 動作 |
+| --- | --- |
+| `extract` | コードで使われているがまだテキストのないキーを一覧表示します。`$t('key', {}, 'Welcome')` のようなデフォルトテキストはデフォルトロケールに書き込まれます。 |
+| `sync` | デフォルトロケールにないキーを削除します。まず `--dryRun` で試してください。 |
+| `clean` | どこからも使われていないキーを削除します。まず `--dryRun` で試してください。 |
+| `search` | キーと値を検索し、各キーが使われている場所を表示します。 |
+| `stats` | ロケールごとの完了率。`--baseRef main` で git の ref と比較します。 |
+
+`sync` は、未使用であることを証明できないキーを削除しようとする場合に `clean` と同じように停止し、デフォルトロケールに比較対象がない場合にも停止します。削除するものがなければ停止することはないため、`$t(item.label)` があるだけでは `--force` を使う理由にはなりません。
+
+<Note>
+
+`extract` と `sync` は、翻訳のないキーに `''` を書き込むことはありません。キーは存在しないままなので、ランタイムには `fallbackLocale` が適用され、`check` がそれを報告します。空文字列は定義済みの値となり、空白が表示されてしまいます。
+
+</Note>
+
+### コマンドが読み取るもの {#what-the-commands-read}
+
+`check`、`extract`、`sync`、`clean`、`search`、`rename` は、固定されたフォルダのリストではなく、プロジェクト全体のソースコードを読み取ります:
+
+- **読み取り対象:** パーサーを通したテンプレートとスクリプト、テキストとしての `.html` と Pug、すべてのレイヤー、エイリアスや `components` が指すルート外のフォルダ。
+- **スキップ対象:** `node_modules`、ビルド出力、ロケールファイル。独自の除外は `--ignore 'legacy/**,*.stories.ts'` で追加します。
+- **テストコード** は使用としてカウントされるため、`clean` と `check --only unused` はテストだけが読み取るキーも残します。テストコードがキーを追加することはありません。`extract` はそのようなキーをスキップし、`check` はそれらを未定義として報告しません。
+
+テストコードとは、ルートのフォルダ `tests`、`test`、`__tests__`、`e2e`、`cypress`、`playwright` と、任意の場所にある `.spec` および `.test` の JavaScript/TypeScript ファイル（`.ts`、`.tsx`、`.mts`、`.js`、`.jsx`、`.mjs` など）を指します。以下の判断から除外されるのはルートのフォルダのみです。`pages/tests/[id].vue` は他と同じ通常のページであり、`public/` やミニファイされたファイルも同様です（それらのコードはアプリの一部ではありません）。
+
+コマンドが認識するもの:
+
+- `$t`、`$ts`、`$tc`、`$has`、`$_t(route)`
+- `useI18n()` と `useTranslationServerMiddleware()` の `t()`
+- テンプレートおよび JSX 内の `<i18n-t keypath>` と `<i18n-group prefix>`
+- `const { t: tr } = useI18n()` のようなエイリアス
+
+### `clean` の判断方法 {#how-clean-decides}
+
+`clean` は、使われているキーを削除するよりも、使われていないキーを残すことを優先します。次のいずれかに当てはまるキーは残ります:
+
+- 呼び出しがそのキー、またはその下位や上位のキーを使っている
+- コード内の文字列がそのキーと一致する: `const key = 'menu.home'`、`<Item label="menu.home" />`
+- プロジェクト内の JSON、YAML、Markdown ファイルにそのキーが含まれている
+- 計算されたキーの静的な先頭部分がそれをカバーしている: `` $t(`status.${state}`) `` は `status.` 配下のすべてを残します
+- レイヤーがそのキーを定義している
+
+`clean` は判断できない場合、何も変更せずに停止し、その理由を一覧表示します:
+
+- キーが完全に計算されている: `$t(name)`、`<i18n-t :keypath="name" />`、`<i18n-t v-bind="props" />` など
+- `$t` が値として受け渡されている: `items.map($t)` など
+- `t` という名前の関数が計算された引数を受け取り、それがパラメータ、インポート、または呼び出しから来ている: 本物の関数のラッパーである可能性があります。同じファイルで定義された関数はカウントされません。ラッパーであれば内部に独自の呼び出しがあるはずだからです
+- ソースファイルをパースできない
+- どのファイルもキーをまったく使っていない: 通常は間違った場所を探していることを意味します
+- ロケールファイルがプロジェクト外へのシンボリックリンクであり、別のアプリが読み取る可能性がある
+
+<Steps>
+
+<Step title="プレビュー">
+
+`i18n-micro clean --dryRun` を実行し、一覧表示された内容を確認します。
+
+</Step>
+
+<Step title="キーを保護する">
+
+未使用に見えるだけのキーは `--exclude '^errors\.'` で残します。
+
+</Step>
+
+<Step title="削除する">
+
+`--force` を付けて再度実行します。
+
+</Step>
+
+</Steps>
+
+## 不足しているキーを翻訳する {#translate-missing-keys}
+
+```bash
+i18n-micro translate --dryRun                     # keys and characters per locale, nothing sent
+export I18N_TRANSLATE_TOKEN=...                   # or put it in .env
+i18n-micro translate --service deepl --locale de,fr
+```
+
+- `translate` は不足しているキーや空のキーを埋めます。`--replace` はすべてを再翻訳します。
+- プレースホルダーと複数形の形式は保護されます。プレースホルダーが失われた翻訳は書き込まれず、キーが一覧表示されてコマンドは `1` で終了します。
+- 各バッチは次のリクエストを送信する前に保存されるため、失敗しても失われるのは失敗したリクエストの分だけです。
+
+| `--service` | サービス | `--token` | 便利な `--options` |
+| --- | --- | --- | --- |
+| `ai` | Vercel AI Gateway、OpenAI、Anthropic、または任意の OpenAI 互換サーバー | API キー、または `AI_GATEWAY_API_KEY`、`OPENAI_API_KEY`、`ANTHROPIC_API_KEY` | `provider`, `model`, `baseUrl`, `maxTokens` |
+| `azure` | Azure Translator | サブスクリプションキー | `region` |
+| `deepl` | DeepL（Free キーを含む） | 認証キー | `formality`, `glossaryId`, `context` |
+| `google` | Google Cloud Translation v2 | API キー | `model` |
+| `libretranslate` | LibreTranslate | 任意 | `baseUrl` |
+| `yandexcloud` | Yandex Cloud Translate | API キー、または `authScheme:Bearer` 付きの IAM トークン | `folderId`, `model` |
+
+オプションは `key:value` のペアです: `--options provider:openai,model:gpt-4o-mini`。すべてのサービスは `baseUrl`、`retries`、`retryDelayMs`、`timeoutMs` も受け付けます。翻訳リクエストはすでに課金されている可能性があるため、再試行は `429` または `503` の後にのみ行われ、サービスが 1 分を超える待機を求めた場合は行われません。
+
+<Warning>
+
+フラグはシェルの履歴やプロセス一覧から見えるため、トークンは環境変数で渡してください。CLI は、秘密情報と判明しているものを出力するすべての箇所（`--debug` を含む）でマスクします: トークン、プロバイダーキー、Basic 認証情報、設定した URL のクエリと認証情報。キーをエコーする前に整形し直すサーバーには対処できないため、失敗した実行のログは慎重に扱ってください。
+
+</Warning>
+
+`ai` サービスは用語集に従います。`.i18n-glossary.json` が存在する場合はフラグなしで使用されます。`--glossaryFile` で別のファイルを指定できます。
+
+```json .i18n-glossary.json
+{ "entries": [{ "source": "Cart", "target": "Warenkorb", "to": "de" }] }
+```
+
+## ハードコードされたテキストをキーに変換する {#turn-hardcoded-text-into-keys}
+
+```bash
+i18n-micro text-to-i18n --dryRun   # list what would change
+i18n-micro text-to-i18n            # rewrite the templates
+```
+
+```vue
+<!-- before -->
+<h1>Welcome to our site</h1>
+<!-- after -->
+<h1>{{ $t('pages.index.welcome-to-our') }}</h1>
+```
+
+書き換えられるのはプロジェクト自体の `.vue` テンプレートのみで、レイヤーやエイリアス先のものは対象外です。書き換えたファイルはすべて、書き込む前に再度パースされます。以下は一覧表示され、テキストはそのまま残ります:
+
+- `.ts` ファイルやスクリプト内のテキスト（`$t` がどこでもスコープ内にあるとは限らないため）
+- `<p>Hello <b>world</b> today</p>` のように、マークアップや補間に隣接するテキスト（文の半分だけを単独で翻訳することはできません）
+- 親ページとその子ページのように、他のキーと衝突する生成キー
+- 引用符の間に入れられない既知のキー
+
+<Warning>
+
+先にコミットし、差分を確認してください。
+
+</Warning>
+
+## キーの名前を変更する {#rename-a-key}
+
+```bash
+i18n-micro rename --from common.save --to actions.save
+i18n-micro rename --from settings --to account.settings   # a whole namespace
+```
+
+`rename` は構文木を編集するため、コメントや無関係な文字列はそのまま残り、エイリアスと `:keypath` も追跡されます。レイヤー自身のファイルが変更されることはありません。書き換えられないものについては警告を出し、手を加えません:
+
+- 旧名の下にある計算されたキー
+- 旧名と一致する各プレーン文字列
+- Pug テンプレート
+- レイヤー内またはプロジェクト外のフォルダにあるソース
+
+`--to` はコードに書けるキーでなければなりません: 引用符、バックスラッシュ、空のセグメント、`__proto__` は使えません。
+
+## 翻訳者とファイルを交換する {#exchange-files-with-translators}
+
+```bash
+i18n-micro export --format csv
+i18n-micro import --format csv --dryRun
+```
+
+**`export`** は、未翻訳のものも含めすべてのロケールのすべてのキーを、デフォルトロケールのテキストをソースとして書き出します。CSV では `Source` 列、PO では `#.` コメントになります。
+
+- `--dir` を指定しない場合、PO は `pots` に、CSV は `csv_exports` に出力されます。
+- 書き出した内容を出力フォルダ内の `.i18n-export.json` に記録します。それ以降にファイルが変更され、ロケールファイルにない翻訳（fuzzy の PO エントリを含む）を保持している場合は停止します。`--force` で上書きします。ロケールファイルの通常の編集では停止しません。
+
+**`import`** はマージを行い、空のセルと `fuzzy` とマークされた PO エントリをスキップします。
+
+- 値を上書きしてしまうキーや、キーのグループ全体を上書きしてしまう値は一覧表示されて除外され、コマンドは `1` で終了します。
+- 予期しない場所にあるカタログ、前回のエクスポートで書き出されていないページのカタログ、CSV 内の不正な位置の引用符、`disablePageLocales` 下のページエントリがある場合は、終了コード `2` で停止します。
+
+翻訳プラットフォームの場合は、そのプラットフォーム独自の CLI を使用してください。[Crowdin](/ja/guide/crowdin) のセットアップでは、ページファイルを含む JSON ファイルを同期します。
+
+## 独自のエンドポイントと同期する {#sync-with-your-own-endpoint}
+
+`sync-remote` は、グローバルなロケールファイルを自分で運用する HTTP エンドポイントと交換します。ページファイルはローカルに残り、コマンドはその旨を表示します。エンドポイントは `.i18n-remote.json` に記述します:
+
+```json .i18n-remote.json
+{ "url": "https://translations.example.com", "path": "translations" }
+```
+
+エンドポイントは `GET` と `PUT` に `{ locale: messages }` オブジェクトで応答します。認証には `auth: { username, password }` を使うか、Bearer トークンを `I18N_REMOTE_TOKEN` に設定してください。
+
+| | Pull | Push |
+| --- | --- | --- |
+| 移動するもの | 手元にないものを埋め、手元にしかないキーは保持します | レイヤーのものではなくプロジェクト自身のキーを送信し、空白は送信しません |
+| 競合 | 両側で異なるキー: 何も書き込まれず、終了コード `1`。`--force` でリモートの値を採用します | PUT はドキュメントを置き換えるため、push はまずエンドポイントを読み取り、手元にないテキストがあれば終了コード `1` で停止します。`--force` で上書きします。`404` を返すエンドポイントには失うものがありません |
+| `--dryRun` | エンドポイントから読み取り、変更点を一覧表示し、何も書き込みません | エンドポイントに接続せず、送信される内容を表示します |
+
+設定していないロケールはスキップされ、リモートの空の値は何も消去しません。
+
+## nuxt-i18n-micro-cli からの移行 {#moving-from-nuxt-i18n-micro-cli}
+
+| 旧コマンド | 現在 |
+| --- | --- |
+| `validate` | `check` |
+| `diff` | `check --only missing` |
+| `check-duplicates` | `check --only duplicates` |
+| `export-csv`, `import-csv` | `export --format csv`, `import --format csv` |
+| `--potsDir`, `--csvDir` | `--dir` |
+| `estimate` | `translate --dryRun` |
+| `glossary` | `.i18n-glossary.json` を編集します。`translate` が自動で読み取ります |
+| `backup`, `restore` | Git（すでにロケールファイルを管理しています） |
+| `init` | `nuxi init` の後、`modules` に `nuxt-i18n-micro` を追加 |
+| `split` | 削除: モジュールは分割ファイルを読み取りません |
+| `optimize` | `check --only duplicates` |
+| `replace-values` | エディターまたは `sed` |
+| `stats --full` | `stats`。詳細は [DevTools](/ja/guide/devtools) にあります |
+| `search --hardcodedOnly` | `text-to-i18n --dryRun` |
+| `search --preferUnused`, `--onlyVue` | 削除 |
+| `lint` ルール `no-html-tags`、`no-special-chars`、`no-mixed-case`、`no-missing-punctuation`、`no-inconsistent-pluralization` | 削除: 通常のテキストを誤検出していました。必要なら `customRegexRules` のエントリを書いてください |
+| `text-to-i18n --extractOnlyDirs`, `--extractOnlyPatterns`, `--verbose` | 削除: コードが書き換えられることはありません |
+| `--logLevel verbose` | 削除: 何の効果もありませんでした |
+
+**削除されたサービス:** `googlefree`、`yandex`（`yandexcloud` を使用）、`ibm`、`lingvatranslate`、`modernmt`、`lilt`、`unbabel`、`reverso`、`baidu`、`papago`、`tencent`、`systran`、`mymemory`。
+
+**削除された `sync-remote` の種類:** `github`、`gitlab`、`crowdin`、`lokalise`、`tolgee`、`weblate`。プラットフォーム独自の CLI か、`type` が不要になった `custom` を使用してください。
+
+### 変更された動作 {#changed-behaviour}
+
+- `extract` と `sync` は `''` を書き込まなくなりました。キーは存在しないままとなり、`check` がそれを報告します。`extract` は、コードがテキストを与えている場合にのみキーを書き込みます。
+- `extract` はページキーを、モジュールが読み取る `locales/pages/<route name>/` に書き込み、Nuxt 4 では `app/` をスキャンします。`pages/_about` や `pages/blog_` のようなディレクトリにあるものは移動し、不要な `locales/pages/<locale>.json` は削除してください。
+- `nuxt.config` の `translationDir` が尊重されるようになりました。以前はすべてのコマンドが暗黙的に `locales` を使用していました。
+- `defaultLocale` がない場合、モジュールと同様にデフォルトは `en` となり、`DEFAULT_LOCALE` が尊重されます。以前は最初のロケールでした。
+- `check` と `sync` はデフォルトロケールを基準として使用し、ページファイルもチェックします。`"a.b"` と `a: { b }` は 1 つのキーとして扱われます。
+- `clean` は、どのスコープであれどこかで使われているキーを残し、使用状況を証明できない場合は停止します。`--include` と `--exclude` で削除してよいものを選択します。
+- `sync` も同じように停止し、デフォルトロケールに比較対象のキーがない場合も停止します。`--force` で上書きできます。また、`DEFAULT_LOCALE` が `nuxt.config` と異なる基準を選んだ場合も停止します。
+- シングルダッシュの長いフラグや余分な引数はエラーになります: `clean -dryRun` はもう `clean` を実行しません。
+- 読み取り専用のファイルや UTF-8 でないファイルは保存できないため、コマンドは何かを変更する前に停止します。そのようなファイルの読み取りは問題ありません。重複したキー、`__proto__` という名前のキー、2^53 を超える整数があるとコマンドは停止します。保存するとそれらが失われるためです。
+- 値が必要なフラグの後に別のフラグが続くとエラーになります。ダッシュで始まる値には `--flag=--value` と書いてください。真偽値のフラグは `true` または `false` のみを受け付けます。
+- `export` は、一度もインポートされていない翻訳を上書きする代わりに停止します。
+- 終了コードは `0`、`1`、`2` です。以前は失敗が `1` で、`diff` と `check-duplicates` は常に `0` でした。
+- `lint --fix` は `.bak` ファイルを残さなくなりました。
+- 保存時にはファイルのインデント、改行コード、末尾の改行、シンボリックリンク、ハードリンクが維持され、変更しなかったファイルには手を加えません。
+- 入力ミスや削除されたフラグは、黙って無視されるのではなくエラーになりました。
+- `--dir` などのパスは、シェルではなくプロジェクトからの相対パスです。
+- `ai` は `@ai-sdk/*` パッケージを読み込まなくなりました。`provider` に `gateway`、`openai`、`anthropic` を指定するか、OpenAI 互換サーバーには `baseUrl` を使用してください。
+
+## 関連 {#related}
+
+<CardGroup cols={2}>
+
+<Card title="CLI コマンド" icon="brackets-curly" href="/ja/api/cli">
+
+</Card>
+
+<Card title="翻訳ファイル" icon="book-open" href="/ja/guide/translations">
+
+</Card>
+
+<Card title="Crowdin" icon="book-open" href="/ja/guide/crowdin">
+
+</Card>
+
+<Card title="DevTools" icon="book-open" href="/ja/guide/devtools">
+
+</Card>
+
+</CardGroup>

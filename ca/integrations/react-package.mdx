@@ -1,0 +1,291 @@
+---
+title: "React i Preact"
+description: "Traduccions, canvi de locale i integració amb el router per a aplicacions React i Preact amb @i18n-micro/react i @i18n-micro/preact."
+---
+
+`@i18n-micro/react` i `@i18n-micro/preact` embolcallen el [runtime](/ca/integrations/runtime-package) independent del framework en un proveïdor, un hook `useI18n()` i quatre components. Feu-los servir en una aplicació React o Preact que no estigui feta amb Nuxt. Tots dos paquets tenen la mateixa API; el bloc [Preact](#preact) llista les poques diferències, i el model compartit és a [Frameworks](/ca/integrations/overview).
+
+## Instal·lació {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add @i18n-micro/react
+```
+
+```bash npm
+npm install @i18n-micro/react
+```
+
+```bash yarn
+yarn add @i18n-micro/react
+```
+
+</CodeGroup>
+
+Dependències peer: `react` `^18.0.0 || ^19.0.0`; `react-dom` (opcional, per renderitzar); `react-router-dom` `^6.0.0 || ^7.0.0` (opcional, només per a `@i18n-micro/react/router`). Provat amb React 19.3 i 18.3, i React Router 7.18 i 6.30.
+
+## Configuració {#setup}
+
+```tsx
+// src/main.tsx
+import { createRoot } from 'react-dom/client'
+import { createI18n, I18nProvider } from '@i18n-micro/react'
+import App from './App'
+import en from './locales/en.json'
+
+const locales = [
+  { code: 'en', iso: 'en-US', displayName: 'English' },
+  { code: 'de', iso: 'de-DE', displayName: 'Deutsch' },
+]
+
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', messages: { en } })
+
+createRoot(document.getElementById('root')!).render(
+  <I18nProvider i18n={i18n} locales={locales} defaultLocale="en">
+    <App />
+  </I18nProvider>,
+)
+```
+
+<Warning>
+
+Creeu la instància una sola vegada, a nivell de mòdul o en un inicialitzador de `useState`, mai al cos d'un component.
+
+</Warning>
+
+`<I18nProvider>` accepta `i18n`, `locales`, `defaultLocale` i `routingStrategy`:
+
+- Una prop omesa conserva el valor d'un proveïdor exterior, la instància inclosa.
+- Si no hi ha cap instància, en construeix una a partir de les opcions de `createI18n` que hi hagi al costat, de manera que les props continuen sent dades simples: `<I18nProvider locale="de" messages={messages}>`.
+- Una nova prop `locale` construeix una instància nova amb els `messages` d'aquell renderitzat. Aquesta instància viu al component: si alguna cosa per sobre se suspèn durant el muntatge, React la descarta, amb tot el que s'hi hagi afegit.
+
+Totes les opcions de `createI18n`, incloent-hi `routeMessages`, són a [la instància](/ca/integrations/overview#the-instance).
+
+## Traduir {#translate}
+
+```tsx
+import { useI18n } from '@i18n-micro/react'
+
+export function Greeting() {
+  const { t, tc, tn } = useI18n()
+  return (
+    <>
+      <h1>{t('greeting', { name: 'Ada' })}</h1> {/* Hello, Ada! */}
+      <p>{tc('apples', 3)}</p> {/* 3 apples */}
+      <p>{tn(1234.5)}</p>
+    </>
+  )
+}
+```
+
+`useI18n()` retorna:
+
+| Grup | Membres |
+| --- | --- |
+| Traducció | `t`, `ts`, `tc`, `tn`, `td`, `tdr`, `has` |
+| Locale i ruta | `locale`, `fallbackLocale`, `currentRoute`, `setLocale`, `setRoute`, `getRoute`, `getLocales`, `defaultLocale()`, `getLocaleName` |
+| Encaminament | `switchLocale`, `localePath`, `localeRoute` |
+| Diccionaris | `addTranslations`, `addRouteTranslations`, `clearCache` |
+
+- El component es torna a renderitzar quan canvien el locale, la ruta o un diccionari llegible, i quan el proveïdor rep un objecte `locales` o `routingStrategy` nou. Un diccionari d'un locale que no és ni l'actiu ni l'alternatiu no provoca cap renderitzat.
+- `t` i els altres mètodes de traducció només canvien amb el magatzem, així que són segurs a `memo` i a les dependències d'efectes.
+
+`useT` és una sola cadena com a valor. El component només es renderitza quan aquesta cadena canvia, passi el que passi amb les altres props del proveïdor; `<I18nT>` tampoc no en depèn:
+
+```tsx
+const title = useT('page.title')
+```
+
+Carregueu més diccionaris en qualsevol moment:
+
+```tsx
+const { addTranslations, addRouteTranslations, setRoute } = useI18n()
+
+useEffect(() => {
+  import('./locales/de.json').then((m) => addTranslations('de', m.default))
+  addRouteTranslations('en', 'about', { title: 'About us' })
+  setRoute('about') // t('title') now reads the 'about' dictionary first
+}, [])
+```
+
+La instància en si també té `loadFromUrl(url, { locale, routeName })` per a JSON mitjançant `fetch`.
+
+## Canviar de locale {#switch-locale}
+
+```tsx
+const { setLocale, switchLocale } = useI18n()
+
+setLocale('de') // only the locale
+switchLocale('de') // the locale, then the adapter's push to the localized current path
+```
+
+Canviar de locale no carrega res; afegiu primer el diccionari del locale. Una escriptura al magatzem és síncrona per a React, fins i tot dins de `startTransition`, de manera que un component que se suspèn per un diccionari que falta mostraria el seu contingut alternatiu. `useLocaleSwitch` carrega primer i manté la interfície antiga fins que el diccionari és a punt:
+
+```tsx
+const [switchTo, pending] = useLocaleSwitch((locale) => i18n.loadFromUrl(`/locales/${locale}.json`, { locale }))
+
+<button disabled={pending} onClick={() => switchTo('de')}>Deutsch</button>
+```
+
+L'última crida guanya. Una càrrega fallida es rebutja i deixa el locale com estava.
+
+`<I18nGroup>` passa una `t` amb prefix a un fill render-prop. `<I18nT>` i `t()` a dins no porten prefix:
+
+```tsx
+<I18nGroup prefix="profile">{({ t }) => <h2>{t('title')}</h2> /* profile.title */}</I18nGroup>
+```
+
+## Encaminament {#routing}
+
+L'adaptador de React Router és en un subcamí perquè l'entrada principal no importi mai `react-router-dom`. Necessita `useLocation()` i `useNavigate()`, així que creeu-lo dins d'un component sota el router:
+
+```tsx
+// src/App.tsx
+import { useMemo } from 'react'
+import { BrowserRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
+import { I18nLink, I18nProvider, I18nSwitcher } from '@i18n-micro/react'
+import { createReactRouterAdapter } from '@i18n-micro/react/router'
+import { i18n, locales } from './i18n'
+import { About, Home } from './pages'
+
+function Localized() {
+  const location = useLocation()
+  const navigate = useNavigate()
+  // memoized: a new object on every render re-renders every `useI18n()` consumer
+  const routingStrategy = useMemo(() => createReactRouterAdapter(locales, 'en', location, navigate), [location, navigate])
+  return (
+    <I18nProvider i18n={i18n} locales={locales} defaultLocale="en" routingStrategy={routingStrategy}>
+      <I18nLink to="/about">About</I18nLink>
+      <I18nSwitcher />
+      <Routes>
+        <Route path="/:locale?" element={<Home />} />
+        <Route path="/:locale?/about" element={<About />} />
+      </Routes>
+    </I18nProvider>
+  )
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <Localized />
+    </BrowserRouter>
+  )
+}
+```
+
+L'adaptador posa prefix a tots els locales excepte el per defecte (`/about`, `/de/about`) i renderitza `<I18nLink>` com el `<Link>` de React Router. Establiu vosaltres el locale a partir de l'URL (per exemple, a partir de `useParams().locale` en un efecte). Per a qualsevol altre router, escriviu un adaptador amb `getCurrentPath`, `push` i `replace` (tots obligatoris) — vegeu [Adaptador de router](/ca/integrations/overview#router-adapter).
+
+## SSR {#ssr}
+
+`renderToString` funciona: `useI18n()` té una instantània de servidor. Creeu una instància per petició i afegiu-hi els diccionaris abans de renderitzar, perquè les peticions en locales diferents no comparteixin estat, o passeu dades simples al proveïdor.
+
+### Hidratació {#hydration}
+
+Els nombres, els plurals i el text s'hidraten tal com són. Una data depèn de la zona horària i una data relativa del rellotge: establiu `timeZone` al servidor i al navegador, i per a `tdr` passeu al navegador l'hora del servidor amb `now`. `<I18nT>` amb `date` o `relativeDate` estableix `suppressHydrationWarning`, de manera que una diferència no fa fallar la hidratació, però el text del servidor es manté fins que el text canvia. Això només arriba a un nivell: els `children` que embolcallen la traducció en un element continuen fallant si hi ha una diferència, així que doneu-los el mateix `timeZone`.
+
+### Server Components {#server-components}
+
+El paquet marca el seu codi de client amb `'use client'`. `@i18n-micro/react/server` té `createI18n` i un `I18nT` sense hooks que rep la instància com a prop, de manera que el text queda fora del paquet del client. Amb la condició `react-server`, com a l'app router de Next.js, l'entrada principal també s'hi resol, però TypeScript no ho sap per defecte: importeu des de `/server`. `@i18n-micro/react/client` sempre dona l'entrada del client.
+
+```tsx
+// app/[locale]/layout.tsx: a server component
+import { cache } from 'react'
+import { createI18n, I18nT } from '@i18n-micro/react/server'
+import { I18nProvider } from '@i18n-micro/react/client'
+import { loadMessages } from './messages'
+
+const getI18n = cache(async (locale: string) => createI18n({ locale, messages: await loadMessages(locale) }))
+
+export default async function Layout({ params, children }) {
+  const { locale } = await params
+  const i18n = await getI18n(locale)
+  return (
+    <I18nProvider locale={locale} messages={{ [locale]: i18n.resolveTranslations() }}>
+      <h1>
+        <I18nT i18n={i18n} keypath="title" />
+      </h1>
+      {children}
+    </I18nProvider>
+  )
+}
+```
+
+Renderitzat mitjançant `react-server-dom-webpack`; no s'ha provat amb una aplicació Next.js real.
+
+## API {#api}
+
+| Exportació | Entrada |
+| --- | --- |
+| `createI18n`, `ReactI18n`, `I18nProvider`, `useI18n`, `useT`, `useLocaleSwitch` | `@i18n-micro/react` |
+| `I18nT`, `I18nLink`, `I18nSwitcher`, `I18nGroup` | `@i18n-micro/react` |
+| `I18nContext`, `I18nConfigContext`, `useI18nContext`, `useI18nLocales`, `useI18nDefaultLocale`, `useI18nRouter` | `@i18n-micro/react` |
+| `defaultPlural`, `FormatService`, `interpolate` | `@i18n-micro/react` |
+| Tipus: `I18nRoutingStrategy`, `ReactI18nOptions`, `I18nProviderProps`, `UseI18nReturn`, props dels components, `TranslationKey`, `Locale`, `Translations`, `PluralFunc` | `@i18n-micro/react` |
+| `createReactRouterAdapter` | `@i18n-micro/react/router` |
+| `createI18n`, `ReactI18n`, `I18nT` (rep `i18n`) | `@i18n-micro/react/server` |
+
+Signatures completes: [referència de React](/ca/api/packages/react).
+
+## Preact {#preact}
+
+`@i18n-micro/preact` es compila a partir del mateix codi font, sobre el mateix Preact, sense `preact/compat`: la mateixa instància, proveïdor, hooks i components. Diferències:
+
+| | React | Preact |
+| --- | --- | --- |
+| Dependència peer | `react` (+ `react-router-dom` opcional) | `preact` `^10.0.0 \|\| ^11.0.0`, provat amb 10.29 i 11.1 |
+| Classe de la instància | `ReactI18n` | `PreactI18n` |
+| Adaptador de router | `createReactRouterAdapter` de `/router` | `createBrowserHistoryAdapter(locales, defaultLocale, ssrUrl?)` de `/router` |
+| Re-renderitzat | `useSyncExternalStore` | una subscripció amb layout effect que torna a comprovar el magatzem |
+| Server Components | `/server`, `/client` | cap |
+
+`createBrowserHistoryAdapter` funciona amb qualsevol router basat en la History API (wouter, preact-router): `push` i `replace` criden `history.pushState` / `replaceState` i emeten `popstate`, i `<I18nLink>` renderitza un `<a>` simple que navega mitjançant `push`. Un servidor no té barra d'adreces: passeu l'URL de la petició com a `ssrUrl`, o els enllaços i el selector es renderitzaran com a `/`. En un navegador, la barra d'adreces té prioritat.
+
+```tsx
+// src/main.tsx
+import { render } from 'preact'
+import { createI18n, I18nProvider } from '@i18n-micro/preact'
+import { createBrowserHistoryAdapter } from '@i18n-micro/preact/router'
+import { App } from './App'
+import en from './locales/en.json'
+
+const locales = [
+  { code: 'en', iso: 'en-US', displayName: 'English' },
+  { code: 'de', iso: 'de-DE', displayName: 'Deutsch' },
+]
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', messages: { en } })
+
+render(
+  <I18nProvider i18n={i18n} locales={locales} defaultLocale="en" routingStrategy={createBrowserHistoryAdapter(locales, 'en')}>
+    <App />
+  </I18nProvider>,
+  document.getElementById('app')!,
+)
+```
+
+Signatures completes: [referència de Preact](/ca/api/packages/preact).
+
+## Relacionat {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Frameworks" icon="book-open" href="/ca/integrations/overview">
+
+Opcions de la instància, adaptador de router, props dels components
+
+</Card>
+
+<Card title="Runtime" icon="book-open" href="/ca/integrations/runtime-package">
+
+La instància sobre la qual es construeixen aquests paquets
+
+</Card>
+
+<Card title="Generador de tipus" icon="book-open" href="/ca/integrations/types-generator">
+
+Autocompleció per a les claus
+
+</Card>
+
+</CardGroup>

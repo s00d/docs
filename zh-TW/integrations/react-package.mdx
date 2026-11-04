@@ -1,0 +1,291 @@
+---
+title: "React 與 Preact"
+description: "使用 @i18n-micro/react 與 @i18n-micro/preact 為 React 與 Preact app 提供翻譯、locale 切換與路由器整合。"
+---
+
+`@i18n-micro/react` 與 `@i18n-micro/preact` 將不依賴框架的 [runtime](/zh-TW/integrations/runtime-package) 包裝成一個 provider、一個 `useI18n()` hook 與四個元件。請在非以 Nuxt 建置的 React 或 Preact app 中使用它們。兩個套件的 API 相同；[Preact](#preact) 區塊列出少數差異，共用模型請見[框架](/zh-TW/integrations/overview)。
+
+## 安裝 {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add @i18n-micro/react
+```
+
+```bash npm
+npm install @i18n-micro/react
+```
+
+```bash yarn
+yarn add @i18n-micro/react
+```
+
+</CodeGroup>
+
+Peer dependencies：`react` `^18.0.0 || ^19.0.0`；`react-dom`（選用，用於渲染）；`react-router-dom` `^6.0.0 || ^7.0.0`（選用，僅 `@i18n-micro/react/router` 需要）。已在 React 19.3 與 18.3、React Router 7.18 與 6.30 上測試。
+
+## 設定 {#setup}
+
+```tsx
+// src/main.tsx
+import { createRoot } from 'react-dom/client'
+import { createI18n, I18nProvider } from '@i18n-micro/react'
+import App from './App'
+import en from './locales/en.json'
+
+const locales = [
+  { code: 'en', iso: 'en-US', displayName: 'English' },
+  { code: 'de', iso: 'de-DE', displayName: 'Deutsch' },
+]
+
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', messages: { en } })
+
+createRoot(document.getElementById('root')!).render(
+  <I18nProvider i18n={i18n} locales={locales} defaultLocale="en">
+    <App />
+  </I18nProvider>,
+)
+```
+
+<Warning>
+
+實例只需建立一次，放在模組層級或 `useState` 初始化函式中，切勿在元件主體中建立。
+
+</Warning>
+
+`<I18nProvider>` 接受 `i18n`、`locales`、`defaultLocale` 與 `routingStrategy`：
+
+- 省略的 prop 會沿用外層 provider 的值，實例也是如此。
+- 若完全沒有實例，它會依據一併傳入的 `createI18n` 選項建立一個，因此 props 可以維持為純資料：`<I18nProvider locale="de" messages={messages}>`。
+- 新的 `locale` prop 會以該次渲染的 `messages` 建立新的實例。這樣的實例存在於元件中：如果上層元件在掛載期間 suspend，React 會連同加入其中的內容一起丟棄它。
+
+所有 `createI18n` 選項（包括 `routeMessages`）請見[實例](/zh-TW/integrations/overview#the-instance)。
+
+## 翻譯 {#translate}
+
+```tsx
+import { useI18n } from '@i18n-micro/react'
+
+export function Greeting() {
+  const { t, tc, tn } = useI18n()
+  return (
+    <>
+      <h1>{t('greeting', { name: 'Ada' })}</h1> {/* Hello, Ada! */}
+      <p>{tc('apples', 3)}</p> {/* 3 apples */}
+      <p>{tn(1234.5)}</p>
+    </>
+  )
+}
+```
+
+`useI18n()` 會回傳：
+
+| 分類 | 成員 |
+| --- | --- |
+| 翻譯 | `t`, `ts`, `tc`, `tn`, `td`, `tdr`, `has` |
+| Locale 與路由 | `locale`, `fallbackLocale`, `currentRoute`, `setLocale`, `setRoute`, `getRoute`, `getLocales`, `defaultLocale()`, `getLocaleName` |
+| 路由 | `switchLocale`, `localePath`, `localeRoute` |
+| 字典 | `addTranslations`, `addRouteTranslations`, `clearCache` |
+
+- 當 locale、路由或可讀取的字典變更時，以及 provider 收到新的 `locales` 或 `routingStrategy` 物件時，元件會重新渲染。既非作用中也非備援的 locale 字典不會觸發渲染。
+- `t` 與其他翻譯方法只會隨 store 變更，因此可安全用於 `memo` 與 effect 的相依項目中。
+
+`useT` 會將單一字串作為值。無論 provider 的其他 props 如何變化，元件只會在該字串變更時渲染；`<I18nT>` 也不依賴那些 props：
+
+```tsx
+const title = useT('page.title')
+```
+
+隨時可以載入更多字典：
+
+```tsx
+const { addTranslations, addRouteTranslations, setRoute } = useI18n()
+
+useEffect(() => {
+  import('./locales/de.json').then((m) => addTranslations('de', m.default))
+  addRouteTranslations('en', 'about', { title: 'About us' })
+  setRoute('about') // t('title') now reads the 'about' dictionary first
+}, [])
+```
+
+實例本身還提供 `loadFromUrl(url, { locale, routeName })`，可透過 `fetch` 載入 JSON。
+
+## 切換 locale {#switch-locale}
+
+```tsx
+const { setLocale, switchLocale } = useI18n()
+
+setLocale('de') // only the locale
+switchLocale('de') // the locale, then the adapter's push to the localized current path
+```
+
+切換不會載入任何內容；請先加入該 locale 的字典。對 React 而言，store 寫入是同步的，即使在 `startTransition` 中也一樣，因此因缺少字典而 suspend 的元件會顯示其 fallback。`useLocaleSwitch` 會先載入，並在字典就緒前保留舊的 UI：
+
+```tsx
+const [switchTo, pending] = useLocaleSwitch((locale) => i18n.loadFromUrl(`/locales/${locale}.json`, { locale }))
+
+<button disabled={pending} onClick={() => switchTo('de')}>Deutsch</button>
+```
+
+最後一次呼叫為準。載入失敗時會 reject，並維持原本的 locale。
+
+`<I18nGroup>` 會將加上前綴的 `t` 傳給 render-prop 子元素。其中的 `<I18nT>` 與 `t()` 不會加上前綴：
+
+```tsx
+<I18nGroup prefix="profile">{({ t }) => <h2>{t('title')}</h2> /* profile.title */}</I18nGroup>
+```
+
+## 路由 {#routing}
+
+React Router adapter 位於子路徑中，因此主要入口永遠不會匯入 `react-router-dom`。它需要 `useLocation()` 與 `useNavigate()`，因此請在路由器之下的元件中建立它：
+
+```tsx
+// src/App.tsx
+import { useMemo } from 'react'
+import { BrowserRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
+import { I18nLink, I18nProvider, I18nSwitcher } from '@i18n-micro/react'
+import { createReactRouterAdapter } from '@i18n-micro/react/router'
+import { i18n, locales } from './i18n'
+import { About, Home } from './pages'
+
+function Localized() {
+  const location = useLocation()
+  const navigate = useNavigate()
+  // memoized: a new object on every render re-renders every `useI18n()` consumer
+  const routingStrategy = useMemo(() => createReactRouterAdapter(locales, 'en', location, navigate), [location, navigate])
+  return (
+    <I18nProvider i18n={i18n} locales={locales} defaultLocale="en" routingStrategy={routingStrategy}>
+      <I18nLink to="/about">About</I18nLink>
+      <I18nSwitcher />
+      <Routes>
+        <Route path="/:locale?" element={<Home />} />
+        <Route path="/:locale?/about" element={<About />} />
+      </Routes>
+    </I18nProvider>
+  )
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <Localized />
+    </BrowserRouter>
+  )
+}
+```
+
+此 adapter 會為預設以外的每個 locale 加上前綴（`/about`、`/de/about`），並將 `<I18nLink>` 渲染為 React Router 的 `<Link>`。請自行依 URL 設定 locale（例如在 effect 中從 `useParams().locale` 取得）。若使用其他路由器，請撰寫一個包含 `getCurrentPath`、`push` 與 `replace`（皆為必要）的 adapter — 請參閱 [Router adapter](/zh-TW/integrations/overview#router-adapter)。
+
+## SSR {#ssr}
+
+`renderToString` 可以正常運作：`useI18n()` 具有伺服器快照。請為每個請求建立一個實例，並在渲染前加入其字典，讓不同 locale 的請求不會共用狀態，或將純資料傳給 provider。
+
+### Hydration {#hydration}
+
+數字、複數與文字會原樣 hydrate。日期取決於時區，相對日期則取決於時鐘：請在伺服器與瀏覽器上都設定 `timeZone`，並針對 `tdr` 以 `now` 將伺服器的時間交給瀏覽器。帶有 `date` 或 `relativeDate` 的 `<I18nT>` 會設定 `suppressHydrationWarning`，因此差異不會導致 hydration 失敗，但伺服器的文字會一直保留到文字變更為止。這只作用於一層：將翻譯包在元素中的 `children` 在出現差異時仍會失敗，因此請為它們設定相同的 `timeZone`。
+
+### Server Components {#server-components}
+
+套件以 `'use client'` 標記其客戶端程式碼。`@i18n-micro/react/server` 提供 `createI18n` 以及一個不使用 hooks、以 prop 接收實例的 `I18nT`，讓文字不會進入客戶端 bundle。在 `react-server` 條件下（例如 Next.js app router），主要入口也會解析到它，但 TypeScript 預設並不知道這點：請從 `/server` 匯入。`@i18n-micro/react/client` 一律提供客戶端入口。
+
+```tsx
+// app/[locale]/layout.tsx: a server component
+import { cache } from 'react'
+import { createI18n, I18nT } from '@i18n-micro/react/server'
+import { I18nProvider } from '@i18n-micro/react/client'
+import { loadMessages } from './messages'
+
+const getI18n = cache(async (locale: string) => createI18n({ locale, messages: await loadMessages(locale) }))
+
+export default async function Layout({ params, children }) {
+  const { locale } = await params
+  const i18n = await getI18n(locale)
+  return (
+    <I18nProvider locale={locale} messages={{ [locale]: i18n.resolveTranslations() }}>
+      <h1>
+        <I18nT i18n={i18n} keypath="title" />
+      </h1>
+      {children}
+    </I18nProvider>
+  )
+}
+```
+
+已透過 `react-server-dom-webpack` 渲染驗證；尚未在實際的 Next.js app 上執行過。
+
+## API {#api}
+
+| 匯出 | 入口 |
+| --- | --- |
+| `createI18n`, `ReactI18n`, `I18nProvider`, `useI18n`, `useT`, `useLocaleSwitch` | `@i18n-micro/react` |
+| `I18nT`, `I18nLink`, `I18nSwitcher`, `I18nGroup` | `@i18n-micro/react` |
+| `I18nContext`, `I18nConfigContext`, `useI18nContext`, `useI18nLocales`, `useI18nDefaultLocale`, `useI18nRouter` | `@i18n-micro/react` |
+| `defaultPlural`, `FormatService`, `interpolate` | `@i18n-micro/react` |
+| 型別：`I18nRoutingStrategy`, `ReactI18nOptions`, `I18nProviderProps`, `UseI18nReturn`, 元件 props, `TranslationKey`, `Locale`, `Translations`, `PluralFunc` | `@i18n-micro/react` |
+| `createReactRouterAdapter` | `@i18n-micro/react/router` |
+| `createI18n`, `ReactI18n`, `I18nT`（接收 `i18n`） | `@i18n-micro/react/server` |
+
+完整簽章：[React 參考](/zh-TW/api/packages/react)。
+
+## Preact {#preact}
+
+`@i18n-micro/preact` 由相同的原始碼建置，直接基於 Preact 本身，不使用 `preact/compat`：相同的實例、provider、hooks 與元件。差異如下：
+
+| | React | Preact |
+| --- | --- | --- |
+| Peer dependency | `react`（+ 選用的 `react-router-dom`） | `preact` `^10.0.0 \|\| ^11.0.0`，已在 10.29 與 11.1 上測試 |
+| 實例類別 | `ReactI18n` | `PreactI18n` |
+| Router adapter | 來自 `/router` 的 `createReactRouterAdapter` | 來自 `/router` 的 `createBrowserHistoryAdapter(locales, defaultLocale, ssrUrl?)` |
+| 重新渲染 | `useSyncExternalStore` | 以 layout effect 訂閱並重新檢查 store |
+| Server Components | `/server`, `/client` | 無 |
+
+`createBrowserHistoryAdapter` 可搭配任何使用 History API 的路由器（wouter、preact-router）：`push` 與 `replace` 會呼叫 `history.pushState`／`replaceState` 並發送 `popstate`，而 `<I18nLink>` 會渲染一般的 `<a>`，並透過 `push` 導覽。伺服器沒有網址列：請將請求的 URL 作為 `ssrUrl` 傳入，否則連結與切換器會以 `/` 的狀態渲染。在瀏覽器中則以網址列為準。
+
+```tsx
+// src/main.tsx
+import { render } from 'preact'
+import { createI18n, I18nProvider } from '@i18n-micro/preact'
+import { createBrowserHistoryAdapter } from '@i18n-micro/preact/router'
+import { App } from './App'
+import en from './locales/en.json'
+
+const locales = [
+  { code: 'en', iso: 'en-US', displayName: 'English' },
+  { code: 'de', iso: 'de-DE', displayName: 'Deutsch' },
+]
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', messages: { en } })
+
+render(
+  <I18nProvider i18n={i18n} locales={locales} defaultLocale="en" routingStrategy={createBrowserHistoryAdapter(locales, 'en')}>
+    <App />
+  </I18nProvider>,
+  document.getElementById('app')!,
+)
+```
+
+完整簽章：[Preact 參考](/zh-TW/api/packages/preact)。
+
+## 相關內容 {#related}
+
+<CardGroup cols={2}>
+
+<Card title="框架" icon="book-open" href="/zh-TW/integrations/overview">
+
+實例選項、router adapter、元件 props
+
+</Card>
+
+<Card title="Runtime" icon="book-open" href="/zh-TW/integrations/runtime-package">
+
+這些套件所依據的實例
+
+</Card>
+
+<Card title="型別產生器" icon="book-open" href="/zh-TW/integrations/types-generator">
+
+鍵的自動完成
+
+</Card>
+
+</CardGroup>

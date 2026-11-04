@@ -1,0 +1,128 @@
+---
+title: "Rétegek és domainek"
+description: "Oszd meg az i18n-konfigurációt és a fordítási fájlokat Nuxt-rétegeken keresztül, és szolgáld ki a locale-okat saját domainjükön."
+---
+
+Egy Nuxt-réteg több alkalmazás számára is hordozhatja az i18n-konfigurációt és a `locales/` mappát, és minden alkalmazás hozzáadja vagy felülírja, amire szüksége van. Ez az oldal ezt mutatja be, valamint azt, hogyan szolgál ki egyetlen build több domaint.
+
+## Konfiguráció és fordítások megosztása {#share-config-and-translations}
+
+```ts
+// base/nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    locales: [
+      { code: 'en', iso: 'en-US' },
+      { code: 'de', iso: 'de-DE' },
+      { code: 'fr', iso: 'fr-FR' },
+    ],
+    defaultLocale: 'en',
+  },
+})
+```
+
+```ts
+// shop/nuxt.config.ts
+export default defineNuxtConfig({
+  extends: ['../base'], // a layer directory or package, not a nuxt.config file
+  i18n: {
+    locales: [
+      { code: 'es', iso: 'es-ES' }, // added
+      { code: 'fr', disabled: true }, // the base layer's fr, switched off here
+    ],
+  },
+})
+```
+
+- **Konfiguráció:** az alkalmazás skalár opciói felülírják a rétegéit. Az összes réteg `locales` tömbjei egyesülnek, az azonos `code` értékű bejegyzések pedig egybeolvadnak, ahol az alkalmazás mezői nyernek, így egy alkalmazás hozzáadhat egy locale-t, vagy beállíthat mezőket, például `disabled: true`, egy örökölt locale-on.
+- **Fordítások:** minden réteg `locales/` mappája kulcsonként fésülődik össze, először a réteg, végül az alkalmazás, így a `shop/locales/en.json` egy kulcsa felülírja ugyanazt a kulcsot a `base/locales/en.json` fájlban. Az oldalfájlok (`locales/pages/<page>/`) ugyanígy fésülődnek össze.
+- **Oldalak:** a `$defineI18nRoute` minden réteg oldalaiból beolvasásra kerül.
+
+Ha olyan mappákat szeretnél összefésülni, amelyek nem részei egy rétegnek, sorold fel őket az [`additionalTranslationDirs`](/hu/api/module-options#additionaltranslationdirs) opcióban.
+
+## Több domain {#multiple-domains}
+
+Egyetlen build minden domaint kiszolgál. Sorold fel minden locale-t a domainjével; a `baseDefault` az adott host alapértelmezettjévé teszi:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    strategy: 'prefix_except_default',
+    defaultLocale: 'en',
+    locales: [
+      { code: 'en', iso: 'en-US', baseUrl: 'https://example.com', baseDefault: true },
+      { code: 'de', iso: 'de-DE', baseUrl: 'https://example.de', baseDefault: true },
+      { code: 'nl', iso: 'nl-NL', baseUrl: 'https://example.de' },
+      { code: 'fr', iso: 'fr-FR' },
+    ],
+  },
+})
+```
+
+Irányítsd mindkét domaint ugyanarra a szerverre. A többit a kérés hostja dönti el:
+
+- **Alapértelmezett:** a host `baseDefault` locale-ja. Ha nincs ilyen, a build alapértelmezettje, amennyiben a host kiszolgálja, egyébként a host első locale-ja.
+- **Kiszolgált locale-ok:** az adott host locale-jai, valamint minden `baseUrl` nélküli locale. Az `example.de` esetében ez a `de`, az `nl` és az `fr`.
+- **Más domainek locale-jai** linkcélpontok. A `$localePath`, a `$localeRoute`, a `$switchLocalePath`, az `<i18n-switcher>` és a `hreflang` abszolút URL-eket ad a saját `baseUrl` címükön, a `$switchLocale` pedig oda navigál. Ezen a hoston az URL-jeik 404-et adnak, és cookie vagy `Accept-Language` sem választhatja ki őket.
+- **Másik domainre mutató link** a `$localePath` vagy az `<i18n-link>` segítségével készül: `<NuxtLink :to="$localePath('/contact', 'de')">`, `<i18n-link :to="$localeRoute('/contact', 'de')">`. A router nem fogad el abszolút objektumot, így a `<NuxtLink :to="$localeRoute(...)">` és a `router.push($localeRoute(...))` ezen az originen marad. `localhost` vagy előnézeti host esetén minden `baseUrl` értékkel rendelkező locale ilyen link, az aktuális is. Kódban használd a `navigateTo($localePath('/contact', 'de'), { external: true })` hívást vagy a `$switchRoute` függvényt.
+- **Bármely más host** a build-konfigurációt kapja, ahol minden `baseUrl` értékkel rendelkező locale linkcélpont. A kérésből semmi sem kerül visszatükrözésre: a canonical és a `hreflang` a `metaBaseUrl` értéket használja, egyébként a build alapértelmezettjének `baseUrl` címét (egy `baseUrl` nélküli alapértelmezetthez `metaBaseUrl` vagy `site.url` szükséges, lásd: [SEO](/hu/guide/seo#set-the-public-origin)).
+- **A payloadfájlok** a `public/` mappában statikusak: bármely host bármely locale fájlját visszaadja. A domainenkénti [generate](/hu/guide/deployment#static-site-(nuxi-generate)) csak az adott domain fájljait publikálja.
+
+Az `example.de` az egyes stratégiák alatt, ahol a `de: '/kontakt'` a `contact` egyéni útvonala:
+
+| Stratégia | `/` | Az alapértelmezett locale oldala | Egyéb URL-ek |
+| --- | --- | --- | --- |
+| `prefix_except_default` | `de` | `/kontakt` | a `/de/kontakt` és az `/en/contact` 404-et ad, a `/contact` a `/kontakt` címre irányít át |
+| `prefix_and_default` | `de` | `/kontakt` és `/de/kontakt`, a linkek a `/kontakt` címet használják | az `/en/contact` és a `/contact` 404-et ad |
+| `prefix` | a `/de` címre irányít át | `/de/kontakt` | a `/kontakt` a `/de/kontakt` címre irányít át, az `/en/contact` 404-et ad |
+| `no_prefix` | `de` | `/kontakt` | egy másik domainen lévő locale egyéni útvonala 404-et ad |
+
+`prefix` stratégia alatt a másik domainről érkező link megtartja a prefixet, mivel a prefix nélküli URL csak átirányítana. `no_prefix` alatt a másik domainre mutató link az adott host alapértelmezett locale-jára érkezik: az URL nem nevezhet meg egy másodikat.
+
+Tudnivalók:
+
+- **Proxy mögött** a host a `Host` fejlécből származik. Ha a proxy a nyilvános hostot ehelyett az `X-Forwarded-Host` fejlécbe teszi, állítsd be a [`trustForwardedHost`](/hu/api/module-options#trustforwardedhost) opciót, de csak akkor, ha a proxy felülírja ezt a fejlécet. Az a proxy, amely egyiket sem küldi, nem tud domain-buildet kiszolgálni. Lásd: [Proxy vagy CDN mögött](/hu/guide/deployment#behind-a-proxy-or-cdn).
+- **Az `app.baseURL`** a `baseUrl` értékbe is beletartozik: `baseUrl: 'https://example.de/shop'` az `app.baseURL: '/shop'` mellett.
+- **A hostok pontosan egyeznek.** A `www.example.de` egy másik host: irányítsd át az edge-en, vagy állítsd be azt a `baseUrl` értéket a locale-on. Locale-onként csak egy host lehet.
+- **A gyorsítótáraknak a hostot is kulcsként kell használniuk.** Egy CDN általában ezt teszi. A Nitro útvonal-gyorsítótára az útvonalat használja kulcsként, ezért domain-build esetén a modul minden `swr` és `cache` szabály `cache.varies` listájához hozzáadja a `host` értéket, `trustForwardedHost` esetén pedig az `x-forwarded-host` értéket is. A `cache: false` szabály változatlan marad. Az `isr` a platform gyorsítótára: ellenőrizd, hogy a hostot is kulcsként használja.
+- **Két host alapértelmezettjének egyéni útvonalai nem ütközhetnek.** A prefix nélküli rekordok egyetlen routeren osztoznak, így a `/x` nem lehet egy oldal az `example.de` és egy másik az `example.com` domainen.
+- **Előrenderelt oldalak:** a `nuxt build` során egy `prerender: true` útvonalszabály egyszer renderel, host nélkül, és a fájl minden domainnek válaszol. A domainenként eltérő oldalakat hagyd a szerverre, vagy [generálj domainenként](/hu/guide/deployment#static-site-(nuxi-generate)).
+- **A `noPrefixRedirect`** minden hoston a host és a látogató locale-ja szerint működik.
+- **`hashMode`:** a host a fentiek szerint választja ki a renderelést, a másik domainre mutató linkek a hashben hordozzák az útvonalat (`https://example.com/#/contact`).
+- **`ssr: false`:** a böngésző a domaint a `location.host` értékből olvassa ki, így egy szerver nélküli host is feloldódik.
+- **A [futásidejű felülírások](/hu/guide/runtime-overrides)** érvényesülnek először. A futásidejű `disabledLocales` minden hoston érvényes, egy kivétellel: `prefix_except_default` és `prefix_and_default` alatt egy host alapértelmezettje engedélyezve marad a saját hostján, mivel az oldalai a prefix nélküli rekordok. `prefix` és `no_prefix` alatt a host a következő általa kiszolgált locale-ra vált. A futásidejű `defaultLocale` csak ismeretlen hostokra vonatkozik.
+
+[Statikus oldal](/hu/guide/deployment#static-site-(nuxi-generate)) esetén domainenként egyszer generálj.
+
+### Domainenként egy alkalmazás {#one-app-per-domain}
+
+Egy megosztott réteg domainenként egy kis alkalmazással továbbra is működik, ha a domaineknek eltérő oldalakra vagy modulokra van szükségük. Minden alkalmazás a saját `defaultLocale` értékét állítja be ugyanazon `locales` lista felett. Egy másik domainen lévő locale ebben az alkalmazásban 404-et ad, ahogy fent.
+
+### A locale kiválasztása kódban {#choosing-the-locale-in-code}
+
+Ha egyetlen példány válaszol minden domainnek, a kérés saját originjével az SEO-címkékben, lásd: [SEO](/hu/guide/seo#set-the-public-origin); ha a locale-t kódban szeretnéd a hostból kiválasztani, lásd: [Egyéni locale-felismerés](/hu/guide/custom-auto-detect).
+
+## Kapcsolódó {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Fordítási fájlok" icon="book-open" href="/hu/guide/translations">
+
+</Card>
+
+<Card title="Futásidejű felülírások" icon="book-open" href="/hu/guide/runtime-overrides">
+
+</Card>
+
+<Card title="SEO" icon="book-open" href="/hu/guide/seo">
+
+</Card>
+
+<Card title="Nuxt-rétegek" icon="arrow-up-right-from-square" href="https://nuxt.com/docs/getting-started/layers">
+
+</Card>
+
+</CardGroup>

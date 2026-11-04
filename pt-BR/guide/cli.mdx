@@ -1,0 +1,327 @@
+---
+title: "CLI"
+description: "Verifique traduções no CI, encontre chaves não usadas, preencha lacunas por meio de um serviço de tradução e troque arquivos com tradutores pela linha de comando."
+---
+
+`@i18n-micro/cli` gerencia os arquivos de locale de um projeto Nuxt. Ele lê `locales`, `defaultLocale`, `translationDir` e suas camadas do `nuxt.config`, então não precisa de configuração própria.
+
+![Um terminal executando i18n-micro check, que lista uma chave ausente, uma indefinida e quatro não usadas e falha, depois extract, que adiciona a chave indefinida, depois clean --dryRun, que lista as quatro chaves que removeria](/images/cli/demo.gif)
+
+| Comando | Use-o para |
+| --- | --- |
+| `check` | Fazer um build falhar diante de qualquer problema nos arquivos de locale |
+| `translate` | Preencher chaves ausentes por meio de um serviço de tradução |
+| `clean` | Remover chaves que nada usa |
+| `rename` | Mover uma chave, ou um namespace inteiro, em todos os lugares de uma vez |
+
+```bash
+npm install -D @i18n-micro/cli
+npx i18n-micro --help
+```
+
+Execute-o a partir da raiz da aplicação, ou aponte para ela com `--cwd`. Todas as flags de todos os comandos estão na [referência de comandos](/pt-BR/api/cli).
+
+<Tip>
+
+**Vindo do nuxt-i18n-micro-cli?** `@i18n-micro/cli` o substitui; os binários `i18n-micro` e `i18n-micro-cli` continuam. Veja a [tabela de comandos antigos](#moving-from-nuxt-i18n-micro-cli).
+
+</Tip>
+
+## Use no CI {#use-it-in-ci}
+
+```bash
+i18n-micro check
+```
+
+`check` é o portão de verificação. Ele reporta:
+
+| Verificação | Significa |
+| --- | --- |
+| `missing` | Uma chave do locale padrão está ausente em um locale |
+| `empty` | Um valor é `''`. A aplicação mostra um espaço em branco, não o fallback |
+| `extra` | Um locale tem uma chave que o locale padrão não tem |
+| `placeholders` | `{name}` foi perdido ou adicionado, ou um plural perdeu suas formas |
+| `undefined` | O código usa uma chave que o locale padrão não tem |
+| `unused` | Nada no projeto usa uma chave |
+| `duplicates` | O mesmo texto sob chaves diferentes. Desativado por padrão: passe `--duplicates` |
+
+- `--only missing,placeholders` executa algumas verificações; uma verificação citada em `--only` que não pôde ser executada falha.
+- `--json` gera um relatório para ferramentas.
+- `--ignore` ignora arquivos de código-fonte.
+- Enquanto houver chaves computadas em tempo de execução, `unused` é ignorada e o relatório diz o motivo.
+
+Todo comando termina com um de três códigos, para que um pipeline consiga distinguir um problema nas suas traduções de um problema na ferramenta:
+
+| Código de saída | Significado |
+| --- | --- |
+| `0` | Nada a reportar |
+| `1` | Problemas encontrados |
+| `2` | O comando não pôde ser executado: um erro de uso, um arquivo corrompido, uma requisição com falha |
+
+Outros comandos que valem uma etapa no CI:
+
+```bash
+i18n-micro format --check      # fails if a file is not formatted
+i18n-micro lint                # stray spaces, empty values, your own regex rules
+i18n-micro stats --baseRef main
+```
+
+## Mantenha os locales alinhados {#keep-locales-in-step}
+
+| Comando | O que faz |
+| --- | --- |
+| `extract` | Lista as chaves que o código usa e que ainda não têm texto. Um texto padrão, como em `$t('key', {}, 'Welcome')`, vai para o locale padrão. |
+| `sync` | Remove chaves que o locale padrão não tem. Experimente `--dryRun` primeiro. |
+| `clean` | Remove chaves que nada usa. Experimente `--dryRun` primeiro. |
+| `search` | Encontra chaves e valores, e mostra onde cada chave é usada. |
+| `stats` | Percentual de conclusão por locale; `--baseRef main` compara com uma ref do git. |
+
+`sync` para, assim como `clean`, quando removeria uma chave que não consegue provar que está sem uso, e também quando o locale padrão não tem nada com que comparar. Sem nada a remover, ele nunca para, então `$t(item.label)` sozinho não é motivo para usar `--force`.
+
+<Note>
+
+`extract` e `sync` nunca escrevem `''` para uma chave sem tradução. A chave permanece ausente, então `fallbackLocale` se aplica em tempo de execução e `check` a reporta. Uma string vazia seria um valor definido e mostraria um espaço em branco.
+
+</Note>
+
+### O que os comandos leem {#what-the-commands-read}
+
+`check`, `extract`, `sync`, `clean`, `search` e `rename` leem o código-fonte de todo o projeto, não uma lista fixa de pastas:
+
+- **Lido:** templates e scripts por meio de um parser, `.html` e Pug como texto, todas as camadas e pastas fora da raiz para as quais um alias ou `components` aponta.
+- **Ignorado:** `node_modules`, a saída do build e os arquivos de locale. Adicione os seus com `--ignore 'legacy/**,*.stories.ts'`.
+- **Código de teste** conta como uso, então `clean` e `check --only unused` mantêm uma chave que só um teste lê. Ele nunca adiciona uma chave: `extract` ignora essas chaves, e `check` não as reporta como indefinidas.
+
+Código de teste significa as pastas raiz `tests`, `test`, `__tests__`, `e2e`, `cypress` e `playwright`, mais arquivos JavaScript e TypeScript `.spec` e `.test` (`.ts`, `.tsx`, `.mts`, `.js`, `.jsx`, `.mjs` e similares) em qualquer lugar. Apenas as pastas raiz ficam isentas das dúvidas abaixo: `pages/tests/[id].vue` é uma página como qualquer outra, assim como `public/` e arquivos minificados, cujo código não faz parte da aplicação.
+
+Os comandos reconhecem:
+
+- `$t`, `$ts`, `$tc`, `$has` e `$_t(route)`;
+- `t()` de `useI18n()` e `useTranslationServerMiddleware()`;
+- `<i18n-t keypath>` em templates e JSX, e `<i18n-group prefix>`;
+- aliases como `const { t: tr } = useI18n()`.
+
+### Como o `clean` decide {#how-clean-decides}
+
+`clean` prefere deixar uma chave morta a remover uma viva. Uma chave permanece quando qualquer uma destas condições é verdadeira:
+
+- uma chamada a usa, ou usa uma chave abaixo ou acima dela;
+- uma string no código é igual a ela: `const key = 'menu.home'`, `<Item label="menu.home" />`;
+- um arquivo JSON, YAML ou Markdown no projeto a contém;
+- uma chave computada tem um início estático que a cobre: `` $t(`status.${state}`) `` mantém tudo sob `status.`;
+- uma camada a define.
+
+`clean` para sem alterar nada quando não consegue saber, e lista o motivo:
+
+- uma chave é totalmente computada, como em `$t(name)`, `<i18n-t :keypath="name" />` ou `<i18n-t v-bind="props" />`;
+- `$t` é passado adiante como valor, como em `items.map($t)`;
+- uma função chamada `t` recebe um argumento computado e vem de um parâmetro, de um import ou de uma chamada: ela pode ser um wrapper em torno da verdadeira. Uma função definida no próprio arquivo não conta, porque um wrapper teria sua própria chamada dentro dele;
+- um arquivo de código-fonte não pode ser analisado;
+- nenhum arquivo usa chave alguma, o que geralmente significa que ele está procurando no lugar errado;
+- um arquivo de locale é um symlink para fora do projeto, então outra aplicação pode lê-lo.
+
+<Steps>
+
+<Step title="Pré-visualizar">
+
+Execute `i18n-micro clean --dryRun` e revise o que ele lista.
+
+</Step>
+
+<Step title="Proteger chaves">
+
+Mantenha chaves que apenas parecem sem uso com `--exclude '^errors\.'`.
+
+</Step>
+
+<Step title="Remover">
+
+Execute-o novamente com `--force`.
+
+</Step>
+
+</Steps>
+
+## Traduzir chaves ausentes {#translate-missing-keys}
+
+```bash
+i18n-micro translate --dryRun                     # keys and characters per locale, nothing sent
+export I18N_TRANSLATE_TOKEN=...                   # or put it in .env
+i18n-micro translate --service deepl --locale de,fr
+```
+
+- `translate` preenche chaves ausentes ou vazias; `--replace` traduz tudo novamente.
+- Placeholders e formas de plural são protegidos. Uma tradução que perdeu um placeholder não é escrita: a chave é listada e o comando termina com `1`.
+- Cada lote é salvo antes que a próxima requisição seja enviada, então uma falha custa apenas a requisição que falhou.
+
+| `--service` | Serviço | `--token` | `--options` úteis |
+| --- | --- | --- | --- |
+| `ai` | Vercel AI Gateway, OpenAI, Anthropic ou qualquer servidor compatível com OpenAI | Chave de API, ou `AI_GATEWAY_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` | `provider`, `model`, `baseUrl`, `maxTokens` |
+| `azure` | Azure Translator | Chave de assinatura | `region` |
+| `deepl` | DeepL, incluindo chaves Free | Chave de autenticação | `formality`, `glossaryId`, `context` |
+| `google` | Google Cloud Translation v2 | Chave de API | `model` |
+| `libretranslate` | LibreTranslate | Opcional | `baseUrl` |
+| `yandexcloud` | Yandex Cloud Translate | Chave de API, ou token IAM com `authScheme:Bearer` | `folderId`, `model` |
+
+As opções são pares `key:value`: `--options provider:openai,model:gpt-4o-mini`. Todos os serviços também aceitam `baseUrl`, `retries`, `retryDelayMs` e `timeoutMs`. Uma requisição de tradução pode já ter sido cobrada, então ela só é repetida após um `429` ou `503`, e não quando o serviço pede para esperar mais de um minuto.
+
+<Warning>
+
+Flags ficam visíveis no histórico do shell e nas listas de processos, então passe o token pela variável de ambiente. A CLI mascara o que sabe ser secreto onde quer que o imprima, inclusive com `--debug`: tokens, chaves de provedores, credenciais Basic, e a query e as credenciais de uma URL que você configurou. Um servidor que reformata uma chave antes de ecoá-la está fora do seu alcance, então trate com cuidado os logs de uma execução com falha.
+
+</Warning>
+
+O serviço `ai` segue um glossário. Quando `.i18n-glossary.json` existe, ele é usado sem flag; `--glossaryFile` escolhe outro arquivo.
+
+```json .i18n-glossary.json
+{ "entries": [{ "source": "Cart", "target": "Warenkorb", "to": "de" }] }
+```
+
+## Transformar texto fixo em chaves {#turn-hardcoded-text-into-keys}
+
+```bash
+i18n-micro text-to-i18n --dryRun   # list what would change
+i18n-micro text-to-i18n            # rewrite the templates
+```
+
+```vue
+<!-- before -->
+<h1>Welcome to our site</h1>
+<!-- after -->
+<h1>{{ $t('pages.index.welcome-to-our') }}</h1>
+```
+
+Apenas os templates `.vue` do próprio projeto são reescritos, não os de uma camada ou de um destino de alias. Todo arquivo reescrito é analisado novamente antes de ser gravado. Estes casos são listados e mantêm seu texto:
+
+- texto em arquivos `.ts` e scripts, porque `$t` não está disponível em todo lugar;
+- texto ao lado de marcação ou de uma interpolação, como `<p>Hello <b>world</b> today</p>`: meia frase não pode ser traduzida sozinha;
+- uma chave gerada que colidiria com outra, como pode acontecer entre uma página pai e sua filha;
+- uma chave conhecida que não pode ficar entre aspas.
+
+<Warning>
+
+Faça commit antes e revise o diff.
+
+</Warning>
+
+## Renomear uma chave {#rename-a-key}
+
+```bash
+i18n-micro rename --from common.save --to actions.save
+i18n-micro rename --from settings --to account.settings   # a whole namespace
+```
+
+`rename` edita a árvore sintática, então comentários e strings não relacionadas permanecem como estão, e aliases e `:keypath` são seguidos. O arquivo próprio de uma camada nunca é alterado. Ele avisa sobre o que não consegue reescrever, e deixa como está:
+
+- uma chave computada sob o nome antigo;
+- cada string simples igual a ela;
+- um template Pug;
+- um código-fonte em uma camada ou em uma pasta fora do projeto.
+
+`--to` precisa ser uma chave que possa ser escrita em código: sem aspas, sem barra invertida, sem segmento vazio, sem `__proto__`.
+
+## Trocar arquivos com tradutores {#exchange-files-with-translators}
+
+```bash
+i18n-micro export --format csv
+i18n-micro import --format csv --dryRun
+```
+
+**`export`** escreve todas as chaves de todos os locales, incluindo as não traduzidas, com o texto do locale padrão como origem: uma coluna `Source` no CSV, um comentário `#.` no PO.
+
+- Sem `--dir`, o PO vai para `pots` e o CSV para `csv_exports`.
+- Ele registra o que escreveu em `.i18n-export.json`, na pasta de saída. Ele para quando um arquivo mudou desde então e contém traduções que os arquivos de locale não têm, incluindo entradas PO fuzzy; `--force` as sobrescreve. Edições comuns dos arquivos de locale não o impedem.
+
+**`import`** mescla, ignora células vazias e ignora entradas PO marcadas como `fuzzy`.
+
+- Uma chave que sobrescreveria um valor, ou um valor sobre um grupo inteiro de chaves, é listado e deixado de fora, e o comando termina com `1`.
+- Ele para com saída `2` diante de um catálogo em um local inesperado, um catálogo de página que a última exportação não escreveu, uma aspa fora do lugar em um CSV, ou uma entrada de página com `disablePageLocales`.
+
+Para uma plataforma de tradução, use a CLI dela: a configuração do [Crowdin](/pt-BR/guide/crowdin) sincroniza os arquivos JSON, incluindo os arquivos de página.
+
+## Sincronizar com seu próprio endpoint {#sync-with-your-own-endpoint}
+
+`sync-remote` troca os arquivos de locale globais com um endpoint HTTP que você mantém. Os arquivos de página permanecem locais, e o comando avisa isso. Descreva o endpoint em `.i18n-remote.json`:
+
+```json .i18n-remote.json
+{ "url": "https://translations.example.com", "path": "translations" }
+```
+
+O endpoint responde a `GET` e `PUT` com um objeto `{ locale: messages }`. Autentique-se com `auth: { username, password }`, ou coloque um bearer token em `I18N_REMOTE_TOKEN`.
+
+| | Pull | Push |
+| --- | --- | --- |
+| O que é transferido | Preenche o que você não tem e mantém as chaves que só você tem | Envia as chaves do próprio projeto, não as de uma camada, e deixa de fora os seus valores em branco |
+| Conflitos | Uma chave que difere dos dois lados: nada é escrito, saída `1`; `--force` usa o valor remoto | Um PUT substitui o documento, então um push primeiro lê o endpoint e para com saída `1` quando ele contém texto que você não tem; `--force` o sobrescreve. Um endpoint que responde `404` não tem nada a perder |
+| `--dryRun` | Lê do endpoint, lista as alterações, não escreve nada | Diz o que seria enviado, sem contatar o endpoint |
+
+Um locale que você não configurou é ignorado, e um valor remoto em branco não apaga nada.
+
+## Vindo do nuxt-i18n-micro-cli {#moving-from-nuxt-i18n-micro-cli}
+
+| Comando antigo | Agora |
+| --- | --- |
+| `validate` | `check` |
+| `diff` | `check --only missing` |
+| `check-duplicates` | `check --only duplicates` |
+| `export-csv`, `import-csv` | `export --format csv`, `import --format csv` |
+| `--potsDir`, `--csvDir` | `--dir` |
+| `estimate` | `translate --dryRun` |
+| `glossary` | Edite `.i18n-glossary.json`; `translate` o lê sozinho |
+| `backup`, `restore` | Git, que já guarda seus arquivos de locale |
+| `init` | `nuxi init`, depois adicione `nuxt-i18n-micro` em `modules` |
+| `split` | Removido: o módulo não lê arquivos divididos |
+| `optimize` | `check --only duplicates` |
+| `replace-values` | Seu editor ou `sed` |
+| `stats --full` | `stats`; o [DevTools](/pt-BR/guide/devtools) tem os detalhes |
+| `search --hardcodedOnly` | `text-to-i18n --dryRun` |
+| `search --preferUnused`, `--onlyVue` | Removidos |
+| Regras de `lint` `no-html-tags`, `no-special-chars`, `no-mixed-case`, `no-missing-punctuation`, `no-inconsistent-pluralization` | Removidas: elas sinalizavam texto normal. Escreva uma entrada `customRegexRules` se precisar de uma |
+| `text-to-i18n --extractOnlyDirs`, `--extractOnlyPatterns`, `--verbose` | Removidos: o código nunca é reescrito |
+| `--logLevel verbose` | Removido: não fazia nada |
+
+**Serviços removidos:** `googlefree`, `yandex` (use `yandexcloud`), `ibm`, `lingvatranslate`, `modernmt`, `lilt`, `unbabel`, `reverso`, `baidu`, `papago`, `tencent`, `systran`, `mymemory`.
+
+**Tipos de `sync-remote` removidos:** `github`, `gitlab`, `crowdin`, `lokalise`, `tolgee`, `weblate`. Use a CLI da própria plataforma, ou `custom`, que não precisa mais de `type`.
+
+### Comportamento alterado {#changed-behaviour}
+
+- `extract` e `sync` não escrevem mais `''`. As chaves permanecem ausentes, e `check` as reporta. `extract` escreve uma chave apenas quando o código fornece seu texto.
+- `extract` escreve chaves de página em `locales/pages/<route name>/`, onde o módulo as lê, e varre `app/` no Nuxt 4. Mova o que estiver em diretórios como `pages/_about` e `pages/blog_`, e apague um `locales/pages/<locale>.json` perdido.
+- `translationDir` do `nuxt.config` é respeitado; antes, todo comando usava `locales` silenciosamente.
+- Sem `defaultLocale`, o padrão é `en`, como no módulo, e `DEFAULT_LOCALE` é respeitado. Antes era o primeiro locale.
+- `check` e `sync` usam o locale padrão como referência e verificam os arquivos de página. `"a.b"` e `a: { b }` contam como uma só chave.
+- `clean` mantém uma chave usada em qualquer lugar, em qualquer escopo, e para quando o uso não pode ser comprovado. `--include` e `--exclude` escolhem o que pode ser removido.
+- `sync` para da mesma forma, e quando o locale padrão não tem chaves com que comparar. `--force` contorna isso. Ele também para quando `DEFAULT_LOCALE` escolheu uma referência diferente da do `nuxt.config`.
+- Flags longas com um único hífen e argumentos soltos são erros: `clean -dryRun` não executa mais `clean`.
+- Um arquivo somente leitura, ou um arquivo que não é UTF-8, não pode ser salvo: o comando para antes de alterar qualquer coisa. Ler esse arquivo não tem problema. Uma chave repetida, uma chave chamada `__proto__` e um inteiro acima de 2^53 interrompem um comando, porque salvar os perderia.
+- Uma flag que precisa de um valor e é seguida por outra flag é um erro; escreva `--flag=--value` para um valor que começa com hífen. Uma flag booleana aceita apenas `true` ou `false`.
+- `export` para em vez de sobrescrever traduções que nunca foram importadas.
+- Os códigos de saída são `0`, `1` e `2`; antes, falhas eram `1`, e `diff` e `check-duplicates` sempre `0`.
+- `lint --fix` não deixa mais arquivos `.bak`.
+- Um salvamento mantém a indentação, as quebras de linha, a nova linha final, o symlink e o hard link de um arquivo, e não mexe em arquivos que não alterou.
+- Uma flag digitada errado ou removida agora é um erro, não é mais ignorada silenciosamente.
+- Caminhos como `--dir` são relativos ao projeto, não ao shell.
+- `ai` não carrega mais pacotes `@ai-sdk/*`: use `provider` `gateway`, `openai` ou `anthropic`, ou `baseUrl` para um servidor compatível com OpenAI.
+
+## Relacionados {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Comandos da CLI" icon="brackets-curly" href="/pt-BR/api/cli">
+
+</Card>
+
+<Card title="Arquivos de tradução" icon="book-open" href="/pt-BR/guide/translations">
+
+</Card>
+
+<Card title="Crowdin" icon="book-open" href="/pt-BR/guide/crowdin">
+
+</Card>
+
+<Card title="DevTools" icon="book-open" href="/pt-BR/guide/devtools">
+
+</Card>
+
+</CardGroup>

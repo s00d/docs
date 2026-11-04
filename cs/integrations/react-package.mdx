@@ -1,0 +1,291 @@
+---
+title: "React a Preact"
+description: "Překlady, přepínání locale a integrace s routerem pro aplikace React a Preact s @i18n-micro/react a @i18n-micro/preact."
+---
+
+`@i18n-micro/react` a `@i18n-micro/preact` obalují na frameworku nezávislý [runtime](/cs/integrations/runtime-package) do provideru, hooku `useI18n()` a čtyř komponent. Použijte je v aplikaci React nebo Preact, která není postavená na Nuxtu. Oba balíčky mají stejné API; blok [Preact](#preact) uvádí těch pár rozdílů a sdílený model je popsán ve [Frameworcích](/cs/integrations/overview).
+
+## Instalace {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add @i18n-micro/react
+```
+
+```bash npm
+npm install @i18n-micro/react
+```
+
+```bash yarn
+yarn add @i18n-micro/react
+```
+
+</CodeGroup>
+
+Peer závislosti: `react` `^18.0.0 || ^19.0.0`; `react-dom` (volitelné, pro vykreslování); `react-router-dom` `^6.0.0 || ^7.0.0` (volitelné, jen pro `@i18n-micro/react/router`). Testováno na React 19.3 a 18.3, React Router 7.18 a 6.30.
+
+## Nastavení {#setup}
+
+```tsx
+// src/main.tsx
+import { createRoot } from 'react-dom/client'
+import { createI18n, I18nProvider } from '@i18n-micro/react'
+import App from './App'
+import en from './locales/en.json'
+
+const locales = [
+  { code: 'en', iso: 'en-US', displayName: 'English' },
+  { code: 'de', iso: 'de-DE', displayName: 'Deutsch' },
+]
+
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', messages: { en } })
+
+createRoot(document.getElementById('root')!).render(
+  <I18nProvider i18n={i18n} locales={locales} defaultLocale="en">
+    <App />
+  </I18nProvider>,
+)
+```
+
+<Warning>
+
+Instanci vytvořte jednou, na úrovni modulu nebo v inicializátoru `useState`, nikdy v těle komponenty.
+
+</Warning>
+
+`<I18nProvider>` přijímá `i18n`, `locales`, `defaultLocale` a `routingStrategy`:
+
+- Vynechaný prop si ponechá hodnotu vnějšího provideru, včetně instance.
+- Pokud neexistuje žádná instance, sestaví ji z vedle uvedených možností `createI18n`, takže props zůstávají prostými daty: `<I18nProvider locale="de" messages={messages}>`.
+- Nový prop `locale` sestaví novou instanci s `messages` z daného vykreslení. Taková instance žije v komponentě: pokud něco nad ní během mountu suspenduje, React ji zahodí i se vším, co do ní bylo přidáno.
+
+Všechny možnosti `createI18n`, včetně `routeMessages`, jsou popsané v sekci [instance](/cs/integrations/overview#the-instance).
+
+## Překlad {#translate}
+
+```tsx
+import { useI18n } from '@i18n-micro/react'
+
+export function Greeting() {
+  const { t, tc, tn } = useI18n()
+  return (
+    <>
+      <h1>{t('greeting', { name: 'Ada' })}</h1> {/* Hello, Ada! */}
+      <p>{tc('apples', 3)}</p> {/* 3 apples */}
+      <p>{tn(1234.5)}</p>
+    </>
+  )
+}
+```
+
+`useI18n()` vrací:
+
+| Skupina | Členové |
+| --- | --- |
+| Překlad | `t`, `ts`, `tc`, `tn`, `td`, `tdr`, `has` |
+| Locale a routa | `locale`, `fallbackLocale`, `currentRoute`, `setLocale`, `setRoute`, `getRoute`, `getLocales`, `defaultLocale()`, `getLocaleName` |
+| Routování | `switchLocale`, `localePath`, `localeRoute` |
+| Slovníky | `addTranslations`, `addRouteTranslations`, `clearCache` |
+
+- Komponenta se znovu vykreslí, když se změní locale, routa nebo čitelný slovník, a když provider dostane nový objekt `locales` nebo `routingStrategy`. Slovník locale, které není aktivní ani záložní, nic nevykreslí.
+- `t` a ostatní překladové metody se mění jen spolu s úložištěm, takže jsou bezpečné v `memo` a v závislostech efektů.
+
+`useT` je jeden řetězec jako hodnota. Komponenta se vykreslí jen tehdy, když se tento řetězec změní, ať se s ostatními props provideru děje cokoli; `<I18nT>` na nich také nezávisí:
+
+```tsx
+const title = useT('page.title')
+```
+
+Další slovníky můžete načíst kdykoli:
+
+```tsx
+const { addTranslations, addRouteTranslations, setRoute } = useI18n()
+
+useEffect(() => {
+  import('./locales/de.json').then((m) => addTranslations('de', m.default))
+  addRouteTranslations('en', 'about', { title: 'About us' })
+  setRoute('about') // t('title') now reads the 'about' dictionary first
+}, [])
+```
+
+Samotná instance má také `loadFromUrl(url, { locale, routeName })` pro JSON přes `fetch`.
+
+## Přepnutí locale {#switch-locale}
+
+```tsx
+const { setLocale, switchLocale } = useI18n()
+
+setLocale('de') // only the locale
+switchLocale('de') // the locale, then the adapter's push to the localized current path
+```
+
+Přepnutí nic nenačítá; nejdřív přidejte slovník daného locale. Zápis do úložiště je pro React synchronní, i uvnitř `startTransition`, takže komponenta, která suspenduje kvůli chybějícímu slovníku, by zobrazila svůj fallback. `useLocaleSwitch` nejdřív načte a ponechá staré UI, dokud není slovník k dispozici:
+
+```tsx
+const [switchTo, pending] = useLocaleSwitch((locale) => i18n.loadFromUrl(`/locales/${locale}.json`, { locale }))
+
+<button disabled={pending} onClick={() => switchTo('de')}>Deutsch</button>
+```
+
+Vyhrává poslední volání. Neúspěšné načtení skončí zamítnutím a locale ponechá beze změny.
+
+`<I18nGroup>` předá potomkovi typu render-prop `t` s prefixem. `<I18nT>` a `t()` uvnitř něj prefix nemají:
+
+```tsx
+<I18nGroup prefix="profile">{({ t }) => <h2>{t('title')}</h2> /* profile.title */}</I18nGroup>
+```
+
+## Routování {#routing}
+
+Adaptér pro React Router je v samostatné podcestě, takže hlavní vstupní bod nikdy neimportuje `react-router-dom`. Potřebuje `useLocation()` a `useNavigate()`, proto ho vytvořte uvnitř komponenty pod routerem:
+
+```tsx
+// src/App.tsx
+import { useMemo } from 'react'
+import { BrowserRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
+import { I18nLink, I18nProvider, I18nSwitcher } from '@i18n-micro/react'
+import { createReactRouterAdapter } from '@i18n-micro/react/router'
+import { i18n, locales } from './i18n'
+import { About, Home } from './pages'
+
+function Localized() {
+  const location = useLocation()
+  const navigate = useNavigate()
+  // memoized: a new object on every render re-renders every `useI18n()` consumer
+  const routingStrategy = useMemo(() => createReactRouterAdapter(locales, 'en', location, navigate), [location, navigate])
+  return (
+    <I18nProvider i18n={i18n} locales={locales} defaultLocale="en" routingStrategy={routingStrategy}>
+      <I18nLink to="/about">About</I18nLink>
+      <I18nSwitcher />
+      <Routes>
+        <Route path="/:locale?" element={<Home />} />
+        <Route path="/:locale?/about" element={<About />} />
+      </Routes>
+    </I18nProvider>
+  )
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <Localized />
+    </BrowserRouter>
+  )
+}
+```
+
+Adaptér přidává prefix každému locale kromě výchozího (`/about`, `/de/about`) a vykresluje `<I18nLink>` jako `<Link>` z React Routeru. Locale z URL si nastavte sami (například z `useParams().locale` v efektu). Pro jakýkoli jiný router napište adaptér s `getCurrentPath`, `push` a `replace` (všechny povinné) — viz [Adaptér routeru](/cs/integrations/overview#router-adapter).
+
+## SSR {#ssr}
+
+`renderToString` funguje: `useI18n()` má serverový snapshot. Vytvořte jednu instanci na požadavek a před vykreslením do ní přidejte slovníky, aby požadavky v různých locale nesdílely stav, nebo provideru předejte prostá data.
+
+### Hydratace {#hydration}
+
+Čísla, množné tvary a text se hydratují tak, jak jsou. Datum závisí na časovém pásmu a relativní datum na hodinách: nastavte `timeZone` na serveru i v prohlížeči a pro `tdr` předejte prohlížeči čas serveru pomocí `now`. `<I18nT>` s `date` nebo `relativeDate` nastavuje `suppressHydrationWarning`, takže rozdíl hydrataci neshodí, ale text ze serveru zůstane, dokud se text nezmění. To platí jen o jednu úroveň: `children`, které obalují překlad do elementu, při rozdílu stále selžou, proto jim dejte stejné `timeZone`.
+
+### Server Components {#server-components}
+
+Balíček označuje svůj klientský kód pomocí `'use client'`. `@i18n-micro/react/server` obsahuje `createI18n` a `I18nT` bez hooků, který přijímá instanci jako prop, takže text zůstane mimo klientský bundle. Pod podmínkou `react-server`, jako v app routeru Next.js, se na něj rozpozná i hlavní vstupní bod, ale TypeScript to ve výchozím stavu neví: importujte z `/server`. `@i18n-micro/react/client` vždy vrací klientský vstupní bod.
+
+```tsx
+// app/[locale]/layout.tsx: a server component
+import { cache } from 'react'
+import { createI18n, I18nT } from '@i18n-micro/react/server'
+import { I18nProvider } from '@i18n-micro/react/client'
+import { loadMessages } from './messages'
+
+const getI18n = cache(async (locale: string) => createI18n({ locale, messages: await loadMessages(locale) }))
+
+export default async function Layout({ params, children }) {
+  const { locale } = await params
+  const i18n = await getI18n(locale)
+  return (
+    <I18nProvider locale={locale} messages={{ [locale]: i18n.resolveTranslations() }}>
+      <h1>
+        <I18nT i18n={i18n} keypath="title" />
+      </h1>
+      {children}
+    </I18nProvider>
+  )
+}
+```
+
+Vykresleno přes `react-server-dom-webpack`; samotná aplikace Next.js s tímto spuštěna nebyla.
+
+## API {#api}
+
+| Export | Vstupní bod |
+| --- | --- |
+| `createI18n`, `ReactI18n`, `I18nProvider`, `useI18n`, `useT`, `useLocaleSwitch` | `@i18n-micro/react` |
+| `I18nT`, `I18nLink`, `I18nSwitcher`, `I18nGroup` | `@i18n-micro/react` |
+| `I18nContext`, `I18nConfigContext`, `useI18nContext`, `useI18nLocales`, `useI18nDefaultLocale`, `useI18nRouter` | `@i18n-micro/react` |
+| `defaultPlural`, `FormatService`, `interpolate` | `@i18n-micro/react` |
+| Typy: `I18nRoutingStrategy`, `ReactI18nOptions`, `I18nProviderProps`, `UseI18nReturn`, props komponent, `TranslationKey`, `Locale`, `Translations`, `PluralFunc` | `@i18n-micro/react` |
+| `createReactRouterAdapter` | `@i18n-micro/react/router` |
+| `createI18n`, `ReactI18n`, `I18nT` (přijímá `i18n`) | `@i18n-micro/react/server` |
+
+Úplné signatury: [reference Reactu](/cs/api/packages/react).
+
+## Preact {#preact}
+
+`@i18n-micro/preact` je sestavený ze stejného zdrojového kódu, přímo nad Preactem, bez `preact/compat`: stejná instance, provider, hooky i komponenty. Rozdíly:
+
+| | React | Preact |
+| --- | --- | --- |
+| Peer závislost | `react` (+ volitelně `react-router-dom`) | `preact` `^10.0.0 \|\| ^11.0.0`, testováno na 10.29 a 11.1 |
+| Třída instance | `ReactI18n` | `PreactI18n` |
+| Adaptér routeru | `createReactRouterAdapter` z `/router` | `createBrowserHistoryAdapter(locales, defaultLocale, ssrUrl?)` z `/router` |
+| Překreslení | `useSyncExternalStore` | odběr v layout efektu, který znovu kontroluje úložiště |
+| Server Components | `/server`, `/client` | žádné |
+
+`createBrowserHistoryAdapter` funguje s jakýmkoli routerem nad History API (wouter, preact-router): `push` a `replace` volají `history.pushState` / `replaceState` a vyvolají `popstate` a `<I18nLink>` vykreslí obyčejné `<a>`, které naviguje přes `push`. Server nemá adresní řádek: předejte URL požadavku jako `ssrUrl`, jinak se odkazy a přepínač vykreslí jako na `/`. V prohlížeči má přednost adresní řádek.
+
+```tsx
+// src/main.tsx
+import { render } from 'preact'
+import { createI18n, I18nProvider } from '@i18n-micro/preact'
+import { createBrowserHistoryAdapter } from '@i18n-micro/preact/router'
+import { App } from './App'
+import en from './locales/en.json'
+
+const locales = [
+  { code: 'en', iso: 'en-US', displayName: 'English' },
+  { code: 'de', iso: 'de-DE', displayName: 'Deutsch' },
+]
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', messages: { en } })
+
+render(
+  <I18nProvider i18n={i18n} locales={locales} defaultLocale="en" routingStrategy={createBrowserHistoryAdapter(locales, 'en')}>
+    <App />
+  </I18nProvider>,
+  document.getElementById('app')!,
+)
+```
+
+Úplné signatury: [reference Preactu](/cs/api/packages/preact).
+
+## Související {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Frameworky" icon="book-open" href="/cs/integrations/overview">
+
+Možnosti instance, adaptér routeru, props komponent
+
+</Card>
+
+<Card title="Runtime" icon="book-open" href="/cs/integrations/runtime-package">
+
+Instance, na které tyto balíčky staví
+
+</Card>
+
+<Card title="Generátor typů" icon="book-open" href="/cs/integrations/types-generator">
+
+Automatické doplňování klíčů
+
+</Card>
+
+</CardGroup>

@@ -1,0 +1,261 @@
+---
+title: "Teljesítményhangolás"
+description: "A memóriát, a payload méretét és a gyorsítótárazást befolyásoló beállítások, és hogyan mérheted, mit szállít az alkalmazásod."
+---
+
+Az alapértelmezések egy tipikus alkalmazásra vannak hangolva: oldalanként és locale-onként egy JSON payload, a fordítások a HTML-en kívül tartva, korlátos gyorsítótárak a szerveren. Ez az oldal azt a néhány beállítást sorolja fel, amelyeket érdemes módosítani, ha a katalógus nagy, a szerver memóriája korlátozott, vagy a payloadok egy másik hostról érkeznek. A `@nuxtjs/i18n`-nel és a sima Nuxttal összevetett mért számokért lásd: [Benchmarkok](/hu/guide/performance-results).
+
+## Amit az alapértelmezések már elvégeznek {#what-the-defaults-already-do}
+
+- **Oldalanként egy payload.** A build a gyökér-, oldal- és fallback-locale kulcsokat a `/_locales/<page>/<locale>/data.json` fájlba fésüli össze, így egy oldal egyetlen fájlt tölt be, és a `$t` egyetlen keresés.
+- **Nincs szótár a HTML-ben.** Az SSR a fordításokat a szerver memóriájában tartja; a böngésző lekéri a payloadot ahelyett, hogy a `__NUXT_DATA__`-ból elemezné ki.
+- **Böngésző-gyorsítótár.** A `?v=` csak akkor változik, ha a fordítások változnak, így a böngésző megtartja a payloadjait azokon a telepítéseken át, amelyek nem érintették őket. Egy host statikus másolata 60 másodpercig friss, utána újraellenőrzésre kerül: egy ismételt betöltés egyetlen `304`-re vár. A szerverútvonal egy évre `immutable` választ ad ([Üzembe helyezés](/hu/guide/deployment#cache-headers-and-datebuild)).
+- **Korlátos szervermemória.** A szerver alapértelmezés szerint legfeljebb 1000 payloadot tárol gyorsítótárban, és a legrégebben használtat dobja el.
+
+## Fordítások felosztása oldalanként {#split-translations-by-page}
+
+Az egy oldalon használt kulcsok a `locales/pages/<page>/<locale>.json` fájlba valók, nem a gyökérfájlokba: a gyökérkulcsok minden oldal payloadjának részei. Lásd: [Fordítási fájlok](/hu/guide/translations).
+
+Két beállítás módosítja ezt a felosztást:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    // pages that show the same keys share one payload: /de/products/123 loads the products payload
+    routesLocaleLinks: { 'products-id': 'products' },
+    // or: no page files at all, every page loads only the root dictionary
+    // disablePageLocales: true,
+  },
+})
+```
+
+A [`routesLocaleLinks`](/hu/api/module-options#routeslocalelinks) megszünteti a kapcsolódó útvonalak duplikált payloadjait. A [`disablePageLocales`](/hu/api/module-options#disablepagelocales) olyan kis alkalmazásokhoz illik, ahol egyszerűbb a locale-onkénti egyetlen szótár.
+
+## Szervergyorsítótárak {#server-caches}
+
+| Beállítás | Alapértelmezés | Hatás |
+| --- | --- | --- |
+| [`cacheMaxSize`](/hu/api/module-options#cachemaxsize) | `0` | A payload-gyorsítótárak maximális bejegyzésszáma. `0` = nincs korlát a böngészőben, 1000 a szerveren. |
+| [`cacheTtl`](/hu/api/module-options#cachettl) | `0` | Másodpercek, amelyek után egy gyorsítótárazott bejegyzés újratöltődik. `0` = soha; akkor állítsd be, ha a payloadok az `apiBaseServerHost`-ról érkeznek, és újratelepítés nélkül változnak. |
+| `serverTranslationPreload` | `false` | Az `index` payload betöltése a Nitro middleware-ben minden oldalkérésnél, hogy a szerveroldali segédfüggvények és a kezdőlap újrahasznosítsák. |
+
+Csökkentsd a `cacheMaxSize` értékét egy kis példányon, ahol sok az oldal × locale. A helyben szerkesztett fordításoknak soha nincs szükségük TTL-re: fejlesztéskor a fájlok élőben olvasódnak, a production payloadok pedig csak telepítéssel változnak.
+
+## Memória Node szerveren {#memory-on-a-node-server}
+
+Tartós terhelés alatt egy Node szerver az élő heap körülbelül 12-szeresén is állhat, és ott is maradhat. Egy oldalanként 100 ezer kulcsos terheléses teszten egy 90 MB-os élő heap mellett körülbelül 1,1 GB RSS mérhető. Ez nem memóriaszivárgás. Egy túlméretes GC-ciklus után a V8 megemeli a heap-korlátját, és a felszabadított lapokat a terhelés idejére újrahasznosítás céljából egy poolban tartja. Körülbelül 8 másodperccel a terhelés megszűnése után a pool kiürül, és az RSS körülbelül 160 MB-ra esik vissza. A `global.gc()` nem adja vissza ezt a memóriát. A modul nélküli sima Nuxt ugyanígy viselkedik, a kisebb heapjéhez arányítva.
+
+Ez tartalékba kerül: ha a memóriakorlát ez alatt a szint alatt van, és nincs heap-korlát, a folyamatot leállíthatják. Állíts be olyan korlátot, amely belefér a limitedbe, és jóval az élő heap felett van:
+
+```bash
+NODE_OPTIONS=--max-old-space-size=512 node .output/server/index.mjs
+```
+
+| 100 ezer kulcs, 12 locale, 5–30 perc terhelés | Alapértelmezett | `--max-old-space-size=512` |
+| --- | --- | --- |
+| RSS terhelés alatt | körülbelül 1150 MB | 254-287 MB |
+| Kérés másodpercenként | 624 | 517-572 |
+
+A korlát tehát az áteresztőképesség 8–10%-át cseréli el a memóriáért. Egy szokásos méretű katalógusnak kisebb a heapje és kisebb a lépése. Ezek a futtatások macOS-en, Node 22-vel készültek, nem konténerben.
+
+## Elemzési idő és `dir` {#parse-time-and-dir}
+
+Egy locale-on a `dir: 'auto'` arra készteti a böngészőt, hogy elemzés közben a tartalomból állapítsa meg az irányt. Chromiumban 20 000 elemnél a DOMContentLoaded körülbelül 1,1 s volt `dir="auto"` mellett és 0,1 s nélküle, 5000 elemnél pedig körülbelül 130 ms szemben a 45 ms-mal. Hagyd a `dir`-t beállítatlanul, vagy állítsd `ltr` vagy `rtl` értékre ([Szövegirány](/hu/guide/seo#text-direction)).
+
+## Megosztott gyorsítótár több példányhoz {#shared-cache-for-several-instances}
+
+Egy build több példánya esetén a [`cacheStorage`](/hu/api/module-options#other) egyetlen szótár-gyorsítótárat ad nekik bármely Nitro tárolóban, azon a kapcsolaton, amelyet az alkalmazásod a `nitro.storage`-ban konfigurál. A modul nem ad hozzá sem connectort, sem függőséget.
+
+**Ez gyorsítótár, nem forrás.** A fordítások a beágyazott vagy nyilvános payloadokból, illetve az `apiBaseServerHost`-ról érkeznek. Csak az íródik ki, ami a forrásból jött, és a kulcsok tartalmazzák a buildet, így a kézzel feltöltött tárolót nem olvassa. Ha KV-ből vagy adatbázisból akarsz fordításokat kiszolgálni, tegyél egy kis útvonalat az `apiBaseServerHost` címre, amely onnan olvas.
+
+**Mikor segít.** Csak távoli `apiBaseServerHost` esetén. Három példány 39 szótárat bejárva nélküle 117, vele 48 kérést intézett a hosthoz. Lemezen lévő fájlokkal a tárolótalálat nem gyorsabb a fájlnál, és 12 oldal első bejárása az opció nélkül 280-296 ms-ig, feltöltött Redisszel 308-325 ms-ig tartott, ezért hagyd beállítatlanul. Szótárakat beágyazó preseten host nélkül semmit sem csinál, és ezt a build jelzi is.
+
+Hideg szótár, egy kliens, egy-egy bejárás, tehát durva becslés, és a nagy része a hosttól való távolság:
+
+| Tároló | A hostról | A tárolóból |
+| --- | --- | --- |
+| Cloudflare KV | körülbelül 300 ms | körülbelül 110 ms |
+| D1 | körülbelül 230 ms | körülbelül 115 ms |
+| Deno KV | körülbelül 430 ms | körülbelül 100 ms |
+| Upstash, Vercel serverless | körülbelül 445 ms | körülbelül 245 ms |
+| Upstash, Vercel Edge | körülbelül 505 ms | körülbelül 235 ms |
+
+### Redis {#redis}
+
+Szükséges hozzá az `ioredis` a projektedben.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      redis: { driver: 'redis', url: process.env.REDIS_URL },
+    },
+  },
+  i18n: {
+    cacheStorage: 'redis', // the mount name
+    apiBaseServerHost: 'https://translations.internal',
+    cacheTtl: 300,
+  },
+})
+```
+
+### Upstash Vercelen és Vercel Edge-en {#upstash-on-vercel-and-vercel-edge}
+
+Mindkettőn az `upstash` drivert használd: REST-en kommunikál, míg a `redis` drivernek TCP kell. Szükséges hozzá a `@upstash/redis` a projektedben, és a környezetből olvassa az `UPSTASH_REDIS_REST_URL` és `UPSTASH_REDIS_REST_TOKEN` változókat.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      upstash: { driver: 'upstash' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'upstash',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+### Cloudflare KV {#cloudflare-kv}
+
+Köss egy namespace-t a Workerhez `I18N_KV` néven (`kv_namespaces` a wrangler konfigurációjában).
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      kv: { driver: 'cloudflare-kv-binding', binding: 'I18N_KV' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'kv',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+Ha a host egy másik Worker ugyanazon a fiókon, szükség van a `global_fetch_strictly_public` kompatibilitási flagre, különben a fetch nem éri el.
+
+### Cloudflare D1 {#cloudflare-d1}
+
+A `nitro.storage` nem tud adatbázis-objektumot tárolni, ezért egy Nitro plugin csatolja a drivert. A csatolás az első használatkor ellenőrződik, így ez elég korai. Kösd be az adatbázist `I18N_DB` néven (`d1_databases`), és legyen `unstorage` a projektedben.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    experimental: { database: true },
+    database: {
+      default: { connector: 'cloudflare-d1', options: { bindingName: 'I18N_DB' } },
+    },
+  },
+  i18n: {
+    cacheStorage: 'd1',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+```ts
+// server/plugins/i18n-storage.ts
+import dbDriver from 'unstorage/drivers/db0'
+
+export default defineNitroPlugin(() => {
+  useStorage().mount('d1', dbDriver({ database: useDatabase() }))
+})
+```
+
+A `db0` driver kísérletiként van megjelölve, és figyelmen kívül hagyja a TTL-t: a régi buildek sorai addig maradnak, amíg ki nem törlöd őket.
+
+### Deno KV {#deno-kv}
+
+Deno Deployon hozz létre egy adatbázist (`deno deploy database provision <name> --kind denokv`), rendeld hozzá az alkalmazáshoz (`deno deploy database assign`), és használd a drivert:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  nitro: {
+    storage: {
+      kv: { driver: 'deno-kv' },
+    },
+  },
+  i18n: {
+    cacheStorage: 'kv',
+    apiBaseServerHost: 'https://translations.example.com',
+  },
+})
+```
+
+### Hogyan működik {#how-it-behaves}
+
+Egy szótárat először a példány saját gyorsítótárában keres, majd a megosztott tárolóban, végül a forrásánál. A példány saját gyorsítótára megmarad, mert a `$t` szinkron, és a fának a memóriában kell lennie: ez szétválasztja, ki kéri le és ki szolgálja ki, memóriát nem takarít meg.
+
+- **Ki kéri le.** Távoli host esetén szótáranként egy lekérés a backendtől, példányonkénti egy helyett. Az ugyanabban a pillanatban hibázó példányok mind lekérik, mert nincs zárolás.
+- **A saját szótár nélküli oldalak** nem tárolódnak, hogy kitalált oldalnevek ne adhassanak hozzá kulcsokat. Minden példány egyszer lekéri az ilyen oldalt a hostról, és Workereken, ahol az izolátumok jönnek-mennek, ez egy állandó csordogálás.
+- **A host nem elérhető.** A tárolt szótárral rendelkező oldalak működnek. Egy szótár nélküli oldal a tárolt gyökérszótárból renderelődik, a saját kulcsai nyersen jelennek meg, [olyan `503`-mal, amelyet egyetlen gyorsítótár sem tárol](/hu/guide/deployment#when-a-dictionary-cannot-be-read), és a `/_locales` `503`-mal válaszol rá, amíg a host vissza nem tér. A `useTranslationServerMiddleware` kulcsokkal válaszol egy olyan szótárnál, amelyet nem tud olvasni.
+- **A host** futásidőben a `NUXT_I18N_APP_BASE_SERVER_HOST`, egyébként a build `apiBaseServerHost` értéke, ugyanúgy, mint az opció nélkül. Szótárakat beágyazó preseten (Cloudflare, Vercel, Netlify, lásd: [Üzembe helyezés](/hu/guide/deployment#serverless-and-edge)) a réteg csak host mellett érvényes: az adat már a bundle-ben van, és egy KV-beli másolat hálózati olvasás lenne arra, amit a memória már tartalmaz.
+- **A kulcsok** `i18n-micro:<buildId>~<dateBuild>~<fallbackLocale>~<host>:<locale>:<page>` formájúak, így egy gördülő telepítés két buildje soha nem olvassa egymást, és egy artefaktum két backendje sem. Minden példánynak egyetlen buildből kell származnia (egy artefaktum, vagy rögzített Nuxt [`buildId`](https://nuxt.com/docs/api/nuxt-config#buildid)); a külön buildelt példányok egyszerűen nem osztoznak. Rögzített `buildId` és `dateBuild: 0` mellett két különböző build osztozik a kulcsokon. Csak az engedélyezett locale-okat keresi, és a 200 karakternél hosszabb oldalnevek kihagyják a réteget.
+- **Mi tárolódik.** Egy szótárat kiírás előtt összehasonlít a gyökérszótárral (`__root`), és csak akkor kerül be, ha minden gyökérkulcsot tartalmaz, és eltér a gyökértől. Így egy gyökérrel megválaszolt kitalált oldal nem ad hozzá kulcsot, és egy oldal 200-as hibatörzse sem. Minden példány egyszer olvassa az ilyen oldalt a forrásból. A hostnak az ismeretlen oldalakra a gyökérrel, üres objektummal vagy 404-gyel kell válaszolnia, és ki kell szolgálnia a `__root`-ot. Az a host, amelyiknek nincs `__root`-ja, vagy amelyik a gyökérkulcsok nélkül szolgálja ki az oldalakat, semmit sem oszt meg. Ha a host magára a `__root`-ra egy jól formázott hibával válaszol, az tárolódik: tartsd rövidre a `cacheTtl`-t, ha a backend ilyet tehet.
+- **Lejárat.** Egy bejegyzés a kiírása után `cacheTtl` másodperccel jár le, vagy egy nap után, ha a `cacheTtl` értéke `0`, így a régi buildek kulcsai nem halmozódhatnak fel. Egy érték még egy `cacheTtl`-nyi ideig maradhat a példány saját gyorsítótárában, és még egyig a renderelés chunk-gyorsítótárában: a backend változásai a `cacheTtl` háromszorosán belül megjelennek. A lejárat nélküli driverek (`fs`) a régi kulcsokat addig tartják, amíg el nem távolítod őket.
+- **Ha a tároló hibázik**, az oldal nem. Egy olvasás 1 másodpercig tarthat, ami lefedi a kapcsolódási kézfogást és egy olyan Cloudflare KV kulcsot, amely az adott helyen hideg. Hiba után a korlát 250 ms, amíg a tároló újra nem válaszol. Három egymást követő hiba 5 másodpercre lezárja a réteget. Amíg le van zárva, és amíg egy olvasás épp most hibázott, semmi sem íródik. Egy sikertelen írás semmit sem zár le, így egy csak olvasható replika továbbra is kiszolgálja az olvasásokat. Az a tároló, amelynek válaszai tovább tartanak ezeknél a korlátoknál, hibásnak számít: kihagyás, és a szótár a forrásából érkezik. Az ioredis esetén ez parancsonként 400 ms körül kezdődik, mert a kézfogása három oda-vissza utat igényel. A modul percenként egy figyelmeztetést naplóz; az ioredis ezen felül a saját hibáit is kiírja. Egy nem szótár érték kihagyásnak számít, és felülíródik. Egy ismeretlen csatolási név az első használatkor egyszer figyelmeztet; az alkalmazás ezután a réteg nélkül fut.
+- **Ha a forrás hibázik**, semmi sem őrzi meg a hibát. Egy sikertelen lekérés vagy egy olvashatatlan fájl egyetlen gyorsítótárba sem kerül be, sem ebbe, sem a példány sajátjába, és a következő kérés újra olvas. Lásd: [Üzembe helyezés](/hu/guide/deployment#when-a-dictionary-cannot-be-read).
+- **Ki van kapcsolva fejlesztéskor és prerenderkor**, amelyek a fájljaikat olvassák, és nem szabad, hogy a production Redisedre szükségük legyen.
+- **Érvénytelenítés.** Nincs purge hívás: egy új build új kulcsokat használ. Egy futó build azonnali frissítéséhez távolítsd el az `i18n-micro:` kulcsokat a tárolóból, és indítsd újra a példányokat. A `clearCache` és a HMR csak a folyamat állapotát érinti.
+- A futásidejű változtatások (`$mergeTranslations`, `$defineI18nRoute`) abban a renderelésben vagy böngészőben maradnak, amely létrehozta őket, és soha nem íródnak a tárolóba.
+
+## Payload méret {#payload-size}
+
+A build figyelmeztet, ha a payload kimenet túllépi a `translationPayloads.warnFileCount` (500 fájl) vagy a `warnSizeBytes` (10 MB) értéket. Ilyenkor:
+
+- helyezd át a csak egy oldalon használt kulcsokat a gyökérfájlokból;
+- kapcsold össze az ugyanazokat a kulcsokat mutató útvonalakat (`routesLocaleLinks`);
+- serverless vagy Edge környezetben használd a `translationPayloads.mode: 'source'` beállítást, hogy a szerver-bundle kompakt forrásokat ágyazzon be minden oldal × locale helyett ([Üzembe helyezés](/hu/guide/deployment#serverless-and-edge)). Egy Edge build magától is figyelmeztet, ha túllépi a platform korlátját ([Bundle-korlátok](/hu/guide/deployment#bundle-limits-on-edge));
+- engedélyezd a `nitro.compressPublicAssets` beállítást a statikus payloadok `.gz` / `.br` másolataihoz.
+
+## Mérés {#measuring}
+
+A repository a `pnpm run budget:payload` paranccsal követi, mit szállít a playground; a jelenlegi számok:
+
+A `playground` alapján mérve, a `/` és `/de` oldalakon:
+
+| Mérés | Méret |
+| --- | --- |
+| Fordítási források a lemezen | 7.8 MB |
+| Különálló payload-fájlokként kiszolgálva | 23.9 MB |
+| Legnagyobb inline `__NUXT_DATA__` | 0.4 KB |
+| Kliens assetek | 624.4 KB |
+
+A playground egy tesztpad legfeljebb 100 ezer kulcsos generált szótárakkal, így ezek nem olyan értékek, amelyekre egy valódi
+alkalmazásnál számítani kell — csupán egy rögzített viszonyítási pont a méréshez. A budget akkor bukik el, ha váratlanul megnőnek,
+így vehető észre, ha véletlenül megváltozik, mit szállít a payload.
+
+A benchmark-csomagot magad is lefuttathatod a `pnpm test:performance` paranccsal; a működéséről a [benchmark-módszertan](https://s00d.github.io/nuxt-i18n-micro/contributing/performance-methodology) oldal szól.
+
+## Kapcsolódó {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Benchmarkok" icon="book-open" href="/hu/guide/performance-results">
+
+</Card>
+
+<Card title="Üzembe helyezés" icon="book-open" href="/hu/guide/deployment">
+
+</Card>
+
+<Card title="Fordítási fájlok" icon="book-open" href="/hu/guide/translations">
+
+</Card>
+
+</CardGroup>

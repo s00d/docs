@@ -1,0 +1,440 @@
+---
+title: "Deployment"
+description: "Deploy ke server Node, serverless atau Edge, atau sebagai situs statis — ke mana payload terjemahan pergi, apa yang dibutuhkan setiap platform, proxy, dan caching."
+---
+
+Modul ini bekerja dengan preset Nitro apa pun tanpa konfigurasi tambahan: modul memilih lokasi file terjemahan berdasarkan preset yang Anda gunakan untuk build. Nilai default sudah tepat untuk sebagian besar aplikasi; baca bagian untuk platform Anda. Halaman ini menjelaskan:
+
+- apa yang berakhir di `.output/` dan header apa yang didapat payload;
+- apa yang perlu diubah untuk hosting statis, katalog besar, sub-path, proxy, atau CDN.
+
+<Note>
+
+Telah di-deploy dan diperiksa di host nyata: Cloudflare Workers dan Pages, Vercel dan Vercel Edge, Netlify dan Netlify Edge, Cloud Run dan Deno Deploy, masing-masing dengan apa yang tercantum di [Platform](#platforms). Preset lainnya di-build dan dijalankan secara lokal.
+
+</Note>
+
+## Bagaimana terjemahan dikirimkan {#how-translations-are-delivered}
+
+Saat build, modul mengubah `locales/` (semua layer digabung) menjadi **payload**: satu file JSON per halaman dan locale. Dua konsumen membacanya:
+
+- **SSR** memuat payload halaman yang dirender di dalam proses — tanpa permintaan HTTP, dan kamus tidak disematkan di HTML.
+- **Browser** mengambil `/_locales/<page>/<locale>/data.json?v=<dateBuild>` saat hidrasi dan saat navigasi.
+
+`_locales` adalah [`apiBaseUrl`](/id/api/module-options#apibaseurl). Rute server bawaan menjawab URL tersebut; salinan statis di `public/` menjawabnya tanpa server.
+
+## Server Node {#node-server}
+
+```bash
+npx nuxi build
+node .output/server/index.mjs
+```
+
+Dengan `node-server` (preset default), `node-cluster`, `bun`, `deno-server`, atau preset lain apa pun yang menyajikan `public/` dari disk, dengan `public/` di samping folder `server/`:
+
+- payload disalin ke `.output/public/_locales/<page>/<locale>/data.json`;
+- SSR membacanya dari folder tersebut dengan `fs` (tidak ada yang dibundel ke server);
+- browser mendapatkannya sebagai file statis, atau dari rute server.
+
+Deploy seluruh direktori `.output/`. Modul membutuhkan Node 20 atau lebih baru, dan Nuxt memiliki batas minimumnya sendiri: Nuxt 4.5 menyatakan `^22.19.0 || ^24.11.0 || >=26.0.0`.
+
+Proses di bawah beban stabil dapat menahan memori jauh lebih banyak daripada live heap-nya. Lihat [Memori di server Node](/id/guide/performance#memory-on-a-node-server) sebelum Anda menetapkan batas container.
+
+Dengan tata letak lain, modul menyematkan payload seperti yang dijelaskan di bagian berikutnya. Itu mencakup:
+
+- `nitro.output.publicDir` kustom, yang dibaca build sekali;
+- `serveStatic: true` pada preset yang menyimpan file statis di tempat lain.
+
+<Warning>
+
+Jika build membaca `public/` dan folder tersebut tidak sampai ke server, seperti pada `aws-lambda` dan `serveStatic: true`, server mencatat satu error dan halaman menampilkan key mentah. Atur `nitro.serveStatic: false` untuk menyematkan payload.
+
+</Warning>
+
+## Serverless dan Edge {#serverless-and-edge}
+
+Preset berikut tidak dapat membaca `public/` saat runtime:
+
+- preset fungsi yang mengirim `public/` ke CDN atau tidak menyajikannya: `vercel`, `netlify`, `aws-lambda`, `aws-amplify`, `azure-swa`, `firebase`, `stormkit`, `zeabur`, `node-listener`;
+- preset Edge tanpa sistem file: `cloudflare-module`, `cloudflare-pages`, `vercel-edge`, `netlify-edge`, `deno_deploy`;
+- `serveStatic: 'inline'`, seperti `winterjs`.
+
+Di sana modul menyematkan payload ke dalam bundle server sebagai server asset Nitro (`assets:i18n`) dan tetap menulis salinan publik untuk browser.
+
+Menyematkan seluruh matriks halaman × locale membuat bundle menjadi besar. Melewati batas platform Edge, build memberi peringatan dan menyebutkannya, lihat [Batas bundle](#bundle-limits-on-edge). Untuk katalog besar, beralihlah ke mode `source`, yang menyematkan file sumber yang ringkas dan menggabungkan terjemahan root, halaman, dan fallback saat runtime:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    translationPayloads: {
+      mode: 'source',
+    },
+  },
+})
+```
+
+Dalam mode `source`, browser selalu mengambil payload dari rute server, yang menggabungkannya saat diminta (salinan publik apa pun berisi pohon sumber ringkas yang hanya dibaca server). Itu membutuhkan server yang berjalan, jadi jangan gunakan `source` untuk situs yang murni statis.
+
+### Batas bundle di Edge {#bundle-limits-on-edge}
+
+| Platform           | Batas                                                                                  |
+| ------------------ | -------------------------------------------------------------------------------------- |
+| Cloudflare Workers | 64 MiB tanpa kompresi, pada Free dan Paid. Tanpa batas terkompresi. Startup 1 s, memori 128 MB |
+| Vercel Edge        | 1 MB gzip pada Hobby, 2 MB pada Pro, 4 MB pada Enterprise                              |
+| Netlify Edge       | 20 MB terkompresi                                                                      |
+
+Build menjumlahkan kamus yang disematkannya dan hanya memberi peringatan jika melewati batas terendah platform. Build hanya menghitung kamus, sehingga aplikasi menjadi tambahan di atasnya. Misalnya, 120 halaman × 4 locale dengan file root 60 KB menyematkan:
+
+| Mode | Tersemat | Muat di |
+| --- | --- | --- |
+| `premerged` | 34.9 MiB | Cloudflare; tidak di Vercel Edge atau Netlify Edge |
+| `source` | 5.7 MiB | Masih 3 MB gzip di Vercel Edge |
+
+Katalog sebesar itu di Vercel Edge membutuhkan [host payload](#app-baseurl-and-payload-hosts).
+
+`source` membayar satu penggabungan per halaman dan locale di setiap isolate, sekitar 1 ms dalam contoh tersebut dan 7 ms CPU pada isolate dingin. Biayanya bertambah seiring ukuran rantai fallback: sekitar 43 ms untuk 4 MB file rantai. Netlify Edge mengizinkan 50 ms CPU per permintaan dan paket Free Cloudflare 10 ms.
+
+### Tanggal di runtime Edge {#dates-on-edge-runtimes}
+
+`$td` menggunakan `Intl` milik runtime, dan data ICU-nya dapat berbeda dari milik browser. Di Netlify Edge, tanggal yang diformat dapat berisi U+202F (narrow no-break space) di tempat Chrome memiliki spasi biasa, sehingga Vue mencatat satu hydration mismatch dan teks memperbaiki dirinya saat hidrasi. Nuxt polos dengan `Intl` biasa berperilaku sama di sana; Deno Deploy tidak.
+
+<Tip>
+
+`<i18n-t>` dengan `date` atau `relativeDate` sudah mengizinkan mismatch tersebut. Untuk `$td` di template, tambahkan `data-allow-mismatch="text"` pada elemennya.
+
+</Tip>
+
+## Situs statis (nuxi generate) {#static-site-nuxi-generate}
+
+```bash
+npx nuxi generate
+```
+
+`nuxi build --preset <static preset>` melakukan hal yang sama.
+
+- Mode default `premerged` menulis setiap payload ke `.output/public/_locales/`, sehingga host statis apa pun dapat menyajikannya.
+- Halaman di-prerender untuk setiap locale: pada `prefix`, modul menyemai setiap root yang dilokalkan (`/en`, `/de`), dan `/` dipertahankan sebagai stub redirect.
+- Biarkan [`prerenderRoutes`](/id/api/module-options#translationpayloads) nonaktif: salinan publik sudah berisi file payload.
+- Dengan mode `source` atau `publicAssets: false`, tidak ada yang bisa dibaca browser, dan build memberi peringatan.
+
+<Note>
+
+Tidak ada server untuk membaca cookie atau `Accept-Language`, sehingga locale yang tersimpan tidak me-redirect `/` pada pemuatan pertama. Pada `no_prefix`, HTML berisi locale default, dan cookie yang tersimpan tidak diterapkan saat dimuat: `$switchLocale` tetap berfungsi di halaman yang terbuka.
+
+</Note>
+
+Untuk Cloudflare Pages, lihat [Cloudflare Pages](#cloudflare-pages).
+
+Untuk build dengan [domain locale](/id/guide/layers#multiple-domains), jalankan generate sekali per domain, dengan `NUXT_I18N_DOMAIN` sebagai host dari eksekusi tersebut. Setiap pohon kemudian berisi halaman dan payload domain itu. Nitro tidak memiliki variabel untuk folder output, jadi baca variabel Anda sendiri dari konfigurasi:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: { output: { publicDir: process.env.PUBLIC_DIR } },
+})
+```
+
+```bash
+NUXT_I18N_DOMAIN=example.de PUBLIC_DIR=sites/example.de npx nuxi generate
+NUXT_I18N_DOMAIN=example.com PUBLIC_DIR=sites/example.com npx nuxi generate
+```
+
+- Simpan folder di luar `.output`: setiap eksekusi mengosongkannya.
+- Tautan absolut ke domain lain tidak di-crawl.
+- Tanpa variabel tersebut, build dengan locale `baseUrl` memberi peringatan dan menghasilkan konfigurasi build, di mana locale-locale tersebut menjadi tautan dan tidak mendapat halaman.
+- Di server Node, variabel yang sama menyematkan proses ke satu domain, apa pun isi `Host`.
+
+Host statis menerapkan header-nya sendiri pada file-file ini; atur caching di konfigurasi host. Aturan `/_locales/*` milik modul memang sampai ke Cloudflare Pages melalui `_headers` dan ke Vercel melalui `config.json`, sebagai `public, max-age=60`. Untuk mengirim saudara `.gz` / `.br`, aktifkan `nitro.compressPublicAssets`: modul mengompresi salinan payload dengan pengaturan yang sama.
+
+## Header cache dan dateBuild {#cache-headers-and-datebuild}
+
+| Permintaan                                                                               | `Cache-Control`                                                                                                 |
+| ---------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Server Node atau rute, `?v=` sama dengan `dateBuild` saat ini, kamus tidak kosong        | `private, max-age=<httpCacheDuration>, immutable`                                                               |
+| Server Node atau rute, tanpa `?v=`, dengan nilai lama, atau kamus kosong                 | `public, max-age=0, must-revalidate`                                                                            |
+| Salinan `public/` milik host, `?v=` apa pun                                              | `public, max-age=60` ([`httpCacheControl`](/id/api/module-options#other)) |
+| Mode `source`, `cacheTtl`, atau `apiBaseServerHost`: kamus dapat berubah tanpa build     | header `httpCacheControl`, selalu                                                                               |
+| Rute server, kamus tidak dapat dibaca                                                    | `503`, `no-store`                                                                                               |
+| server dev                                                                               | tidak ada                                                                                                       |
+
+Mengapa tabelnya seperti ini:
+
+- URL dengan `v` saat ini dipatok seperti aset ber-hash, dan hanya yang melihat query yang dapat menyatakannya: rute server, dan server Node, yang mengatur header pada file statisnya.
+- Header ini `private`, sehingga CDN yang mengabaikan query tidak dapat menjawab `v` berikutnya dari respons ini.
+- File statis milik host mengambil header untuk seluruh path dari route rule `/_locales/**`, yang tidak dapat melihat query, sehingga tetap pendek; pemuatan berulang tetap tidak memblokir apa pun.
+- `v` lama tetap dapat disajikan, karena HTML yang di-cache menyebutnya.
+
+`httpCacheControl: false` mempertahankan setiap file statis pada `max-age=0, must-revalidate`. [`httpCacheDuration`](/id/api/module-options#httpcacheduration) default-nya satu tahun; `0` tidak mengirim header. `$clearCache()` memvalidasi ulang apa pun yang dimuatnya berikutnya.
+
+Safari meminta payload yang di-preload sekali lagi jika tidak boleh menggunakan ulang responsnya: dengan `no-cache` dan `ETag`, permintaan kedua berupa `304`; tanpa header cache maupun validator, permintaan kedua adalah unduhan penuh kedua. `max-age` di atas `0` menghasilkan satu permintaan. Hanya `httpCacheDuration: 0` di host yang tidak menambahkan validator yang menanggung biaya ini.
+
+[`dateBuild`](/id/api/module-options#datebuild) adalah nilai `?v=`. Secara default nilainya adalah hash dari file terjemahan Anda, sehingga hanya berubah saat terjemahan berubah, dan browser mempertahankan payload yang di-cache di seluruh deploy yang tidak menyentuhnya. Nilainya juga ikut berubah bersama rantai fallback.
+
+- Atur sendiri untuk mematok sebuah nilai.
+- Atur `0` atau `''` untuk menghapus `?v=` sepenuhnya; payload kemudian tidak pernah `immutable`.
+
+<Tip>
+
+Setelah mengganti kamus di tempat pada server Node, restart dengan `NUXT_I18N_DATE_BUILD=<new value>`: tidak ada hal lain yang mengubah `v` tanpa rebuild.
+
+</Tip>
+
+### File root dan delta {#root-and-delta-files}
+
+`premerged` menulis satu root per locale, `__root/<locale>/data.json`, dan di file setiap halaman hanya apa yang berbeda darinya.
+
+- File halaman menandai root yang menjadi dasar pembuatannya dengan key `__i18n_root`.
+- Browser mengambil keduanya, halaman tidak menampilkan apa pun sampai keduanya masuk, dan SSR menggabungkannya sekali per chunk.
+- File tanpa tanda adalah kamus utuh dan berdiri sendiri: dev, mode `source`, rute server, dan host yang masih menyimpan file lama semuanya menjawab dengan file seperti itu, tanpa pengaturan apa pun.
+
+Jadi siapa pun yang membaca `_locales/*/data.json` secara langsung membaca delta. Atur `translationPayloads.rootDelta: false` untuk mempertahankan file utuh.
+
+Tab yang terbuka melewati sebuah deploy dan meminta delta baru akan melihat bahwa delta itu dibuat berdasarkan root lain, lalu mengambil root tersebut sebelum menampilkannya.
+
+### Saat kamus tidak dapat dibaca {#when-a-dictionary-cannot-be-read}
+
+Pengambilan yang gagal dari host (apa pun selain 404), file yang tidak dapat dibaca atau rusak, atau 200 yang bukan objek JSON tidak masuk ke cache mana pun, dan permintaan berikutnya membaca lagi:
+
+- render halaman mencatat peringatan, menampilkan key mentah untuk kamus tersebut, dan menjawab `503` dengan `Cache-Control: no-store`, sama di setiap header CDN (`CDN-Cache-Control`, `Cloudflare-CDN-Cache-Control`, `Netlify-CDN-Cache-Control`, `Vercel-CDN-Cache-Control`, `Surrogate-Control`, menimpa apa pun dari route rule) dan `Retry-After: 60`;
+- `/_locales/...` menjawab `503` dengan `no-store`;
+- `useTranslationServerMiddleware` memberikan `t` yang menjawab dengan key atau nilai default.
+
+Apa yang terjadi selama gangguan:
+
+- **Pengunjung:** isi dari 503 tersebut adalah halaman itu sendiri. Saat hidrasi, browser membaca kamus lagi, dan teks muncul begitu host kembali, dengan satu error konsol Vue tentang hydration mismatch, karena HTML server berisi key.
+- **Crawler** diberi tahu untuk kembali nanti.
+- **Cache:** route rule `swr` atau `cache` tidak menyimpan apa pun dengan status 400 atau lebih, dan CDN mendapat `no-store`, sehingga tidak ada cache yang menyimpan key mentah dan permintaan pertama setelah pemulihan merender teks yang sebenarnya.
+- **Halaman yang sudah di-cache** oleh sebuah rule tetap seperti adanya: validasi ulang gagal dan tidak menyimpan apa pun. Di Vercel, validasi ulang `isr` yang gagal mempertahankan halaman terakhir dengan cara yang sama.
+
+Ini mencakup setiap chunk yang dimuat render, termasuk chunk halaman yang gagal dengan root-nya tersedia, dan chunk yang digabungkan belakangan dalam render. Halaman dengan kamus yang sehat, redirect, dan halaman error mempertahankan statusnya. [Component island](/id/guide/server-side-translations) adalah pengecualian: ia tetap 200, karena 503 akan mengeluarkannya dari halaman, sehingga halaman yang kamusnya sendiri berhasil dimuat dapat tetap menampilkan key mentah island. Setiap permintaan selama gangguan mencapai host, tanpa timeout dari modul sendiri selain 60 detik untuk header respons.
+
+404 dari host berarti host tidak memiliki file tersebut, yang bukan kegagalan. Render halaman menampilkan kamus root, seperti yang dilakukan browser, dan `/_locales/...` menjawab dengan 404 yang sama. Tidak ada cache yang menyimpan keduanya, sehingga file yang muncul akan dibaca pada permintaan berikutnya, dengan biaya satu permintaan ke host per render halaman seperti itu. Jika file root juga tidak ada, kamusnya kosong, dan [prerender](/id/guide/upgrade#server,-build-and-deployment) gagal.
+
+Server menyimpan payload yang dimuat dalam cache LRU di dalam proses hingga `cacheMaxSize` entri (default 1000) yang memuat ulang entri setelah `cacheTtl` jika diatur; [Penyetelan performa](/id/guide/performance) membahas keduanya, dan [`cacheStorage`](/id/guide/performance#shared-cache-for-several-instances) menambahkan cache yang dipakai bersama oleh beberapa instance. Jangan menambahkan route rule `cache` Nitro pada `/_locales/**` di atasnya: rule itu menggunakan URL lengkap sebagai key, termasuk query, dan menyimpan salinan ketiga.
+
+## App baseURL dan host payload {#app-baseurl-and-payload-hosts}
+
+**`app.baseURL`** tidak membutuhkan hal lain. Dengan `app.baseURL: '/shop/'`, browser mengambil `/shop/_locales/...`; salinannya tetap di `.output/public/_locales/`, yang disajikan Nitro di bawah base (host statis harus memasang output di `/shop/`). Prefiks locale dan [path yang dikecualikan](/id/guide/excluding-static-files) dicocokkan tanpa base.
+
+**`app.cdnURL`** juga memindahkan payload, jika payload berupa file di `public/`: browser mengambil dan me-preload `<cdnURL>/_locales/...`.
+
+- CDN harus menyimpan `_locales/` di samping `_nuxt/`, pada path tersebut.
+- CDN harus mengizinkan origin situs Anda (CORS), karena file tiba melalui `fetch`.
+- Kamus yang hanya dijawab oleh rute server (mode `source`, tanpa salinan publik) tetap berada di origin aplikasi.
+
+`NUXT_APP_BASE_URL` saat runtime pada `cloudflare-module` membutuhkan kompatibilitas Node (`nodejs_compat`). Dengan `nitro.cloudflare.nodeCompat` nonaktif, yang juga menjadi pilihan Nitro pada tanggal lama tanpa flag, variabel tersebut tidak terlihat dan `/` yang disajikan, termasuk pada Nuxt polos, sementara redirect locale tetap mengarah ke base. Atur `app.baseURL` saat build di sana.
+
+Untuk menyajikan payload dari origin lain, arahkan klien dan server ke sana dan matikan output lokal:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    apiBaseClientHost: 'https://cdn.example.com',
+    apiBaseServerHost: 'https://cdn.example.com',
+    translationPayloads: {
+      serverHandler: false,
+      publicAssets: false,
+      serverAssets: false,
+    },
+  },
+})
+```
+
+- Di Node, `serverAssets` menulis salinan yang sama untuk pembacaan server sendiri, dan file itu menjawab `/_locales`: opsi ini juga harus dimatikan, juga jika Anda mempertahankan rute server untuk browser, yang tidak akan pernah dicapainya.
+- Host harus menyajikan tata letak `<apiBaseUrl>/<page>/<locale>/data.json` yang sama.
+- Build memberi peringatan jika setiap output lokal dimatikan dan host tidak ada.
+
+Nilai yang sama dapat berasal dari `NUXT_I18N_APP_BASE_URL`, `NUXT_I18N_APP_BASE_CLIENT_HOST`, dan `NUXT_I18N_APP_BASE_SERVER_HOST` saat build. `NUXT_I18N_APP_BASE_SERVER_HOST` juga berfungsi saat runtime dan mengalahkan nilai build. Lihat [`apiBaseServerHost`](/id/api/module-options#apibaseserverhost) untuk detailnya.
+
+## Platform {#platforms}
+
+Hanya yang dibutuhkan modul atau output-nya. Akun, region, dan login CLI ada di dokumentasi platform.
+
+### Cloudflare Workers {#cloudflare-workers}
+
+Preset `cloudflare_module`. `wrangler deploy` membundel output Nitro untuk kedua kalinya dengan esbuild, dan setelah itu `defineAsyncComponent(() => import('./X.vue'))` mentah dirender kosong di server. Halaman error default Nuxt adalah salah satunya, sehingga 404 memiliki body kosong dan browser mencatat hydration mismatch. Klien kemudian merender halaman dan status tetap 404, tetapi tanpa JavaScript halamannya kosong. Ini adalah [nuxt#33270](https://github.com/nuxt/nuxt/issues/33270): Nuxt polos tanpa modul juga berperilaku sama. Rute halaman tidak terpengaruh.
+
+Matikan bundle kedua:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: {
+    preset: 'cloudflare_module',
+    cloudflare: {
+      deployConfig: true, // `wrangler` below applies only with it
+      wrangler: {
+        no_bundle: true,
+        find_additional_modules: true,
+        rules: [{ type: 'ESModule', globs: ['**/*.mjs'] }],
+      },
+    },
+  },
+})
+```
+
+```bash
+npx nuxi build
+cd .output/server && npx wrangler deploy -c wrangler.json
+```
+
+Atur `compatibilityDate` ke `2024-09-19` atau yang lebih baru: tanggal yang lebih lama memilih preset lama, yang tidak menulis `wrangler.json` dan tidak memberikan error. 404 kemudian dirender, dan unggahan menjadi lebih kecil: 190 KiB gzip dibanding 246 KiB pada aplikasi uji. `error.vue` Anda sendiri adalah jalan keluar lainnya, tetapi hanya mencakup halaman error.
+
+Modul itu sendiri tidak membutuhkan `nodejs_compat`. Untuk batasannya, lihat [Batas bundle](#bundle-limits-on-edge).
+
+### Cloudflare Pages {#cloudflare-pages}
+
+Gunakan preset `cloudflare-pages-static`. `nuxi generate --preset cloudflare-pages` adalah build server tanpa `index.html`.
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  nitro: {
+    preset: 'cloudflare-pages-static',
+    prerender: { autoSubfolderIndex: false },
+  },
+})
+```
+
+```bash
+npx nuxi generate
+npx wrangler pages project create my-site --production-branch main --force
+npx wrangler pages deploy dist --project-name my-site --branch main
+```
+
+- **Output.** Preset menulis ke `dist/`, bukan `.output/public`.
+- **`--force`.** Tanpanya, wrangler versi baru (4.156 di sini) menyerahkan `pages project create` ke Workers. Dengan opsi ini Anda mendapatkan proyek Pages klasik. Opsi ini dibutuhkan sekali, untuk pembuatan.
+- **`autoSubfolderIndex: false`.** Pages menjawab `/de` dengan 308 ke `/de/` sementara canonical dan `hreflang` menyebut `/de`, sehingga keduanya menunjuk ke redirect. Dengan opsi ini file-nya adalah `de.html`, dan redirect hilang.
+- **`NUXT_E1005` di konsol pada 404** adalah 404 normal. Nuxt melaporkannya seperti itu karena `404.html` dimulai di klien, sebelum aplikasi di-mount. Halaman berfungsi, dan Nuxt polos mencetak baris yang sama.
+
+### Vercel dan Vercel Edge {#vercel-and-vercel-edge}
+
+Preset `vercel` dan `vercel_edge`, tanpa perubahan pada aplikasi. Tag berfungsi tanpa `metaBaseUrl`, dari header yang diteruskan platform. Vercel Edge memiliki batas bundle yang kecil: lihat [Batas bundle](#bundle-limits-on-edge). Untuk cache bersama, gunakan [driver `upstash`](/id/guide/performance#upstash-on-vercel-and-vercel-edge).
+
+### Netlify {#netlify}
+
+Preset `netlify` dan `netlify_edge`.
+
+```bash
+npx nuxi build --preset netlify
+npx netlify deploy --prod --no-build --dir dist --functions .netlify/functions-internal
+```
+
+- **Biarkan `nitro.output` tidak diatur.** Preset menulis `.netlify/` dan `dist/` sendiri.
+- **Simpan `package.json` di folder tempat Anda melakukan deploy.** Tanpanya, CLI melihat folder induk dan tidak men-deploy fungsi apa pun, tanpa error.
+- **Netlify Edge** di-deploy hanya dengan `--dir dist`. Lihat [Tanggal di runtime Edge](#dates-on-edge-runtimes).
+
+### Cloud Run {#cloud-run}
+
+Gunakan build `node-server` default. `gcloud run deploy --source` membutuhkan `Dockerfile` di folder output jika docker tidak berjalan secara lokal:
+
+```dockerfile
+# .output/Dockerfile
+FROM node:22-slim
+WORKDIR /app
+COPY . .
+ENV NODE_ENV=production
+CMD ["node", "server/index.mjs"]
+```
+
+```bash
+cd .output && gcloud run deploy my-app --source .
+```
+
+Tag berfungsi tanpa `metaBaseUrl`, dari header yang diteruskan platform.
+
+### Deno Deploy {#deno-deploy}
+
+Preset `deno_deploy`. `deno deploy` menggantikan `deployctl`. Buat aplikasi dinamis dengan entrypoint `server/index.ts`, dan deploy dari folder output.
+
+### Firebase {#firebase}
+
+| Produk | Penyiapan |
+| --- | --- |
+| App Hosting | Menjalankan build Node: gunakan preset default atau `firebase-app-hosting`, dan Node 20+ |
+| Cloud Functions | Preset `firebase` menyematkan payload dan membutuhkan `firebase-functions` |
+| Hosting (statis) | Menyajikan `.output/public` sebagai file, sehingga `/_locales/**` mendapat header dari Hosting |
+
+Di Hosting statis, jika JSON dikembalikan dengan `Content-Type` atau caching yang salah, tambahkan entri `headers` untuk `/_locales/**` di `firebase.json`. Header `routeRules` Nuxt tidak berlaku untuk file yang disajikan Hosting sendiri; rute payload mengatur `Content-Type` dan `Cache-Control`-nya sendiri pada respons yang memang sampai ke server.
+
+### AWS Amplify {#aws-amplify}
+
+`aws-amplify` menyimpan file statis di samping folder compute-nya, bukan di samping server, sehingga payload disematkan seperti pada platform fungsi.
+
+### Beberapa instance dari satu build {#several-instances-of-one-build}
+
+Satu artefak dapat berjalan dengan locale default atau locale nonaktif yang berbeda per instance melalui variabel lingkungan: lihat [Penimpaan runtime](/id/guide/runtime-overrides). Locale yang hanya dinonaktifkan saat runtime tetap memiliki file statisnya di `public/`; nonaktifkan saat build jika file tersebut tidak boleh dapat dijangkau.
+
+Instance yang memuat kamus dari host jarak jauh dapat berbagi kamus di Redis, Upstash, Cloudflare KV atau D1, Deno KV, atau storage Nitro lainnya, sehingga backend mendapat satu permintaan alih-alih satu per instance. Ini adalah cache, bukan sumber terjemahan: lihat [Cache bersama untuk beberapa instance](/id/guide/performance#shared-cache-for-several-instances).
+
+## Di belakang proxy atau CDN {#behind-a-proxy-or-cdn}
+
+Aplikasi harus mengetahui host publik dan skema dari permintaan.
+
+| Proxy mengirimkan                            | Build biasa                                      | Build dengan `baseUrl` pada locale                                                |
+| -------------------------------------------- | ------------------------------------------------ | --------------------------------------------------------------------------------- |
+| `Host` yang sebenarnya                       | Tidak ada yang perlu diatur                      | Tidak ada yang perlu diatur                                                       |
+| `Host` milik origin, ditambah `X-Forwarded-Host` | Tidak ada yang perlu diatur                  | [`trustForwardedHost: true`](/id/api/module-options#trustforwardedhost)              |
+| Tidak keduanya                               | [`metaBaseUrl`](/id/api/module-options#metabaseurl) | Tidak ada pengaturan yang membantu: setiap permintaan terlihat seperti host origin, jadi ubah proxy-nya |
+
+- **Rute di bawah `swr` atau `cache`.** Tabel di atas tidak berlaku di sana: lihat [Caching HTML](#caching-html). Atur `metaBaseUrl` atau `site.url`.
+- **`X-Forwarded-Proto`.** Kirimkan, atau URL canonical akan berbunyi `http://` di belakang proxy HTTPS. `metaBaseUrl` juga memperbaiki hal ini.
+- **Dalam build domain**, domain menentukan base URL dari tag. `metaTrustForwardedHost` tidak memilih domain di sana, hanya `trustForwardedHost` yang melakukannya.
+- **Redirect bersifat relatif dan cookie locale tidak memiliki `Domain`,** sehingga keduanya tetap berada di host publik.
+
+<Warning>
+
+**Patok `metaBaseUrl` jika origin tetap dapat dijangkau** — Pada build biasa tanpa `metaBaseUrl` atau `site.url`, canonical, `hreflang`, dan `og:url` mengambil host-nya dari permintaan. [`metaTrustForwardedHost`](/id/api/module-options#metatrustforwardedhost) aktif secara default, sehingga permintaan langsung dengan `X-Forwarded-Host: evil.example` mendapat `https://evil.example` di tag-tag tersebut, dan cache di depannya menyebarkan halaman itu. Host platform seperti `*.workers.dev` adalah origin semacam itu. `metaBaseUrl` juga menutup celah ini untuk `Host`. Host yang dikenal dari build domain mempertahankan `baseUrl`-nya sendiri. Dengan `trustForwardedHost: true`, klien langsung dapat memilih halaman domain lain, jadi aktifkan hanya di belakang proxy yang menimpa header tersebut.
+
+</Warning>
+
+## Caching HTML {#caching-html}
+
+Sebagian besar URL aman untuk di-cache, karena URL tersebut menyebut locale-nya. URL berikut bergantung pada pengunjung:
+
+| Penyiapan                      | URL                                               |
+| ------------------------------ | ------------------------------------------------- |
+| Default, `autoDetectPath: '/'` | `/`                                               |
+| `prefix`                       | `/` dan setiap URL tanpa prefiks, yang hanya me-redirect |
+| `autoDetectPath: '*'`          | Setiap URL                                        |
+| `no_prefix`                    | Setiap halaman                                    |
+
+- **`Vary`.** Respons tersebut membawa `Vary` dengan `Cookie` jika [`localeCookie`](/id/api/module-options#localecookie) diatur dan `Accept-Language` jika `autoDetectLanguage` aktif. Cache yang menghormatinya menjaga jawaban-jawaban tersebut terpisah.
+- **Cache yang mengabaikan `Vary`,** seperti "cache semuanya berdasarkan URL", harus melewati URL tersebut. Jika tidak, `302 /de` milik satu pengunjung sampai ke pengunjung berikutnya, dan halaman default yang tersimpan menghilangkan redirect untuk semua orang. Pada `/` Anda juga dapat mengatur `redirects: false`. Cache rute Nitro menggunakan path dan daftar `varies`-nya sebagai key, jadi jauhkan juga `/` dari rule `swr` dan `cache`.
+- **`Set-Cookie`.** Dengan `localeCookie` diatur, setiap halaman yang dirender server di bawah prefiks membawa `Set-Cookie`, dan CDN yang benar tidak akan menyimpannya. Untuk HTML yang di-cache, biarkan `localeCookie` nonaktif, atau hapus header tersebut di edge.
+- **Rule `swr` dan `cache` membutuhkan `metaBaseUrl` atau `site.url`.** Nitro merender rute seperti itu hanya dengan header di `cache.varies`, sehingga `Host`, `X-Forwarded-Host`, dan `X-Forwarded-Proto` hilang dan URL permintaan berbunyi `http://localhost`. Tanpa origin tetap, canonical, `hreflang`, dan `og:url` pada rute tersebut menunjuk ke `http://localhost`, di setiap platform. `useRequestURL()` milik Nuxt polos membaca hal yang sama di sana. Mengambil host dari pengunjung justru akan memasukkan `X-Forwarded-Host` milik satu pengunjung ke halaman yang didapat setiap pengunjung. Build domain tidak terpengaruh: tag-nya menggunakan `baseUrl` dari locale.
+
+  Jika satu build menyajikan beberapa host dan tidak ada satu origin yang cocok, biarkan rule melihat header dan simpan satu salinan per nilai: `'/blog/**': { swr: 60, cache: { varies: ['host', 'x-forwarded-host', 'x-forwarded-proto'] } }`. Setiap nilai berbeda adalah entri cache baru, sehingga klien yang mengirim header buatan akan memenuhi cache: letakkan origin di belakang proxy yang mengatur header tersebut.
+- **Rule `swr` dan `cache` pada build domain.** Modul menambahkan `host` ke `cache.varies` dari setiap rule seperti itu, dan `x-forwarded-host` dengan `trustForwardedHost`, sehingga satu domain tidak menyajikan halamannya ke domain lain. Rule dengan `cache: false` tetap seperti yang ditulis. `isr` adalah cache milik platform: periksa bahwa cache tersebut menggunakan host sebagai key. Dengan host di dalam key, klien yang mengirim host buatan menambah entri cache.
+
+Untuk file payload, lihat [Header cache dan dateBuild](#cache-headers-and-datebuild).
+
+## Terkait {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Penyetelan performa" icon="book-open" href="/id/guide/performance">
+
+</Card>
+
+<Card title="Penimpaan runtime" icon="book-open" href="/id/guide/runtime-overrides">
+
+</Card>
+
+<Card title="Referensi translationPayloads" icon="brackets-curly" href="/id/api/module-options#translationpayloads">
+
+</Card>
+
+<Card title="Layer dan domain" icon="book-open" href="/id/guide/layers">
+
+</Card>
+
+<Card title="SEO" icon="book-open" href="/id/guide/seo">
+
+</Card>
+
+</CardGroup>

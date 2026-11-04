@@ -1,0 +1,111 @@
+---
+title: "Mukautettu kielen tunnistus"
+description: "Valitse kieli itse — verkkotunnuksen, otsakkeen tai käyttäjäprofiilin perusteella — palvelinliitännäisellä ja useI18nLocale().setLocale()-kutsulla."
+---
+
+Sisäänrakennettu tunnistus lukee URL-osoitteen, evästeen ja `Accept-Language`-otsakkeen. Kun kieli riippuu jostakin muusta — verkkotunnuksesta, CDN:n asettamasta geo-otsakkeesta tai käyttäjäprofiilista — aseta se itse liitännäisessä, joka suoritetaan ennen i18n-liitännäistä. Moduuli lataa sitten kyseisen kielen käännökset ja käyttää sitä uudelleenohjauksissa täsmälleen kuin olisi itse tunnistanut sen. Säännöt siitä, milloin valittu kieli voittaa URL-osoitteen, ovat sivulla [Kielen tunnistus](/fi/guide/locale-detection); tämä sivu näyttää, miten liität oman lähteesi.
+
+## Aseta kieli palvelinliitännäisessä {#set-the-locale-in-a-server-plugin}
+
+```ts
+// plugins/i18n-locale.server.ts
+export default defineNuxtPlugin({
+  name: 'i18n-custom-locale',
+  enforce: 'pre',
+  order: -10, // before the i18n plugin (order -5)
+  setup() {
+    const { setLocale } = useI18nLocale()
+    const host = (useRequestHeaders(['host']).host ?? '').split(':')[0]! // without the port
+
+    if (host.endsWith('.de')) setLocale('de')
+    else if (host.endsWith('.fr')) setLocale('fr')
+  },
+})
+```
+
+`setLocale(code)` kirjoittaa kielitilan (`useState('i18n-locale')`) ja, kun kielieväste on määritetty, myös evästeen. Käytä sitä sen sijaan, että kirjoittaisit `useState`- tai `useCookie`-arvoja itse. Välitä vain käytössä olevia kielikoodeja.
+
+Pidä liitännäinen `.server.ts`-muotoisena, kun se lukee pyyntöotsakkeita: niitä ei ole selaimessa. `.client.ts`-liitännäinen on oikea paikka vain selaimessa oleville lähteille, kuten `localStorage`.
+
+## Poista sisäänrakennettu Accept-Language-vaihe käytöstä {#turn-off-the-built-in-accept-language-step}
+
+Liitännäisesi ja `Accept-Language` voivat olla eri mieltä. Jos haluat, että vain koodisi (sekä URL ja eväste) ratkaisee, kytke otsake pois päältä:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    autoDetectLanguage: false,
+  },
+})
+```
+
+[`autoDetectLanguage`](/fi/api/module-options#autodetectlanguage) ohjaa vain otsakevaihetta. URL ja kelvollinen eväste otetaan edelleen huomioon.
+
+## Mitä tapahtuu seuraavaksi {#what-happens-next}
+
+`setLocale`-kutsun vaikutus riippuu [strategiasta](/fi/guide/strategy):
+
+| Strategia | `setLocale('de')`-kutsun vaikutus liitännäisessä |
+| --- | --- |
+| `no_prefix` | Sivu renderöidään saksaksi; URL ei muutu. |
+| `prefix`, `prefix_except_default` | Etuliitteettömällä polulla, jolla [`autoDetectPath`](/fi/api/module-options#autodetectpath) sallii uudelleenohjaukset (oletuksena vain `/`), palvelin vastaa `302`-uudelleenohjauksella saksankieliseen URL-osoitteeseen. Kielietuliitteellinen URL säilyttää etuliitteensä. |
+| `prefix_and_default` | Ei uudelleenohjausta: etuliitteetön URL on kelvollinen oletuskielen sivu. |
+
+Etuliitestrategioissa URL-osoitteen kieli on käyttäjän valinta, eikä liitännäisesi ohita sitä. `autoDetectPath: '*'` on poikkeus: silloin palvelin siirtää etuliitteellisiä URL-osoitteita evästeen ja `Accept-Language`-otsakkeen perusteella ja jättää tilan huomiotta, mutta `setLocale()` kirjoittaa myös evästeen, kun se on määritetty, joten seuraavasta pyynnöstä alkaen liitännäisesi valinta voi ohjata etuliitteellisen URL-osoitteen uudelleen. Pidä arvo `'/'` tai käytä `'no_prefix'`-strategiaa, kun eksplisiittisten kieli-URL-osoitteiden on voitettava. Käytä liitännäistäsi valitsemaan, mihin vierailija saapuu, älä kirjoittamaan uudelleen linkkejä, joita hän on seurannut.
+
+## Kunnioita käyttäjän valitsemaa kieltä {#respect-a-locale-the-user-picked}
+
+Kun käyttäjä vaihtaa kieltä, vaihto kirjoittaa evästeen. Ohita oma tunnistuksesi, kun kelvollinen valinta on jo olemassa:
+
+```ts
+// plugins/i18n-locale.server.ts
+import { detectLocaleFromAcceptLanguage } from '@i18n-micro/utils/accept-language'
+
+export default defineNuxtPlugin({
+  name: 'i18n-custom-locale',
+  enforce: 'pre',
+  order: -10,
+  setup() {
+    const { getPreferredLocale, setLocale, validLocales } = useI18nLocale()
+    if (getPreferredLocale()) return // valid state or cookie: keep it
+
+    const country = useRequestHeaders(['x-country'])['x-country']
+    if (country === 'JP') return setLocale('ja')
+
+    const header = useRequestHeaders(['accept-language'])['accept-language']
+    setLocale(detectLocaleFromAcceptLanguage(header, validLocales))
+  },
+})
+```
+
+`getPreferredLocale()` palauttaa tilan tai evästeen vain, kun se on käytössä oleva kieli, joten vanhentunut eväste ei estä tunnistusta. `detectLocaleFromAcceptLanguage` on q-arvot huomioiva vertailija, jota moduuli itsekin käyttää (asenna `@i18n-micro/utils` tuodaksesi sen); `setLocale(null)` ei tee mitään.
+
+## Yksi verkkotunnus kieltä kohden {#one-domain-per-locale}
+
+Jos kunkin verkkotunnuksen pitää palvella omia kieliään, et tarvitse liitännäistä: anna jokaiselle kielelle `baseUrl`, aseta `baseDefault: true` kunkin verkkotunnuksen oletuskielelle ja käännä kerran (staattinen sivusto ajaa silti `nuxi generate` -komennon verkkotunnuskohtaisesti). Katso [Kerrokset ja verkkotunnukset](/fi/guide/layers#multiple-domains).
+
+## Aiheeseen liittyvää {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Kielen tunnistus" icon="book-open" href="/fi/guide/locale-detection">
+
+Täydelliset etusija- ja uudelleenohjaussäännöt
+
+</Card>
+
+<Card title="useI18nLocale" icon="brackets-curly" href="/fi/composables/useI18nLocale">
+
+</Card>
+
+<Card title="Reititysstrategiat" icon="book-open" href="/fi/guide/strategy">
+
+</Card>
+
+<Card title="Kerrokset ja verkkotunnukset" icon="book-open" href="/fi/guide/layers">
+
+</Card>
+
+</CardGroup>

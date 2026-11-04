@@ -1,0 +1,291 @@
+---
+title: "React và Preact"
+description: "Bản dịch, chuyển đổi locale và tích hợp router cho app React và Preact với @i18n-micro/react và @i18n-micro/preact."
+---
+
+`@i18n-micro/react` và `@i18n-micro/preact` bọc [runtime](/vi/integrations/runtime-package) độc lập với framework trong một provider, một hook `useI18n()` và bốn component. Hãy dùng chúng trong app React hoặc Preact không được build bằng Nuxt. Cả hai package có cùng API; phần [Preact](#preact) liệt kê vài điểm khác biệt, và mô hình chung có tại [Frameworks](/vi/integrations/overview).
+
+## Cài đặt {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add @i18n-micro/react
+```
+
+```bash npm
+npm install @i18n-micro/react
+```
+
+```bash yarn
+yarn add @i18n-micro/react
+```
+
+</CodeGroup>
+
+Peer dependency: `react` `^18.0.0 || ^19.0.0`; `react-dom` (tùy chọn, để render); `react-router-dom` `^6.0.0 || ^7.0.0` (tùy chọn, chỉ cho `@i18n-micro/react/router`). Đã kiểm thử trên React 19.3 và 18.3, React Router 7.18 và 6.30.
+
+## Thiết lập {#setup}
+
+```tsx
+// src/main.tsx
+import { createRoot } from 'react-dom/client'
+import { createI18n, I18nProvider } from '@i18n-micro/react'
+import App from './App'
+import en from './locales/en.json'
+
+const locales = [
+  { code: 'en', iso: 'en-US', displayName: 'English' },
+  { code: 'de', iso: 'de-DE', displayName: 'Deutsch' },
+]
+
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', messages: { en } })
+
+createRoot(document.getElementById('root')!).render(
+  <I18nProvider i18n={i18n} locales={locales} defaultLocale="en">
+    <App />
+  </I18nProvider>,
+)
+```
+
+<Warning>
+
+Hãy tạo instance một lần, ở cấp module hoặc trong initializer của `useState`, không bao giờ trong thân component.
+
+</Warning>
+
+`<I18nProvider>` nhận `i18n`, `locales`, `defaultLocale` và `routingStrategy`:
+
+- Prop bị bỏ qua sẽ giữ giá trị của provider bên ngoài, kể cả instance.
+- Khi hoàn toàn không có instance, nó tạo một instance từ các tùy chọn `createI18n` đặt cạnh đó, nên các prop vẫn là dữ liệu thuần: `<I18nProvider locale="de" messages={messages}>`.
+- Một prop `locale` mới tạo một instance mới với `messages` của lần render đó. Instance như vậy sống trong component: nếu thứ gì đó phía trên nó suspend trong khi mount, React sẽ bỏ nó đi, cùng với mọi thứ đã được thêm vào nó.
+
+Tất cả tùy chọn của `createI18n`, bao gồm `routeMessages`, có tại [instance](/vi/integrations/overview#the-instance).
+
+## Dịch {#translate}
+
+```tsx
+import { useI18n } from '@i18n-micro/react'
+
+export function Greeting() {
+  const { t, tc, tn } = useI18n()
+  return (
+    <>
+      <h1>{t('greeting', { name: 'Ada' })}</h1> {/* Hello, Ada! */}
+      <p>{tc('apples', 3)}</p> {/* 3 apples */}
+      <p>{tn(1234.5)}</p>
+    </>
+  )
+}
+```
+
+`useI18n()` trả về:
+
+| Nhóm | Thành viên |
+| --- | --- |
+| Dịch | `t`, `ts`, `tc`, `tn`, `td`, `tdr`, `has` |
+| Locale và route | `locale`, `fallbackLocale`, `currentRoute`, `setLocale`, `setRoute`, `getRoute`, `getLocales`, `defaultLocale()`, `getLocaleName` |
+| Định tuyến | `switchLocale`, `localePath`, `localeRoute` |
+| Từ điển | `addTranslations`, `addRouteTranslations`, `clearCache` |
+
+- Component render lại khi locale, route hoặc một từ điển có thể đọc thay đổi, và khi provider nhận một đối tượng `locales` hoặc `routingStrategy` mới. Từ điển của một locale không phải locale đang hoạt động cũng không phải locale dự phòng sẽ không gây render.
+- `t` và các phương thức dịch khác chỉ thay đổi theo store, nên chúng an toàn trong `memo` và dependency của effect.
+
+`useT` là một chuỗi dưới dạng giá trị. Component chỉ render khi chuỗi đó thay đổi, bất kể điều gì xảy ra với các prop khác của provider; `<I18nT>` cũng không phụ thuộc vào chúng:
+
+```tsx
+const title = useT('page.title')
+```
+
+Tải thêm từ điển bất cứ lúc nào:
+
+```tsx
+const { addTranslations, addRouteTranslations, setRoute } = useI18n()
+
+useEffect(() => {
+  import('./locales/de.json').then((m) => addTranslations('de', m.default))
+  addRouteTranslations('en', 'about', { title: 'About us' })
+  setRoute('about') // t('title') now reads the 'about' dictionary first
+}, [])
+```
+
+Bản thân instance cũng có `loadFromUrl(url, { locale, routeName })` để tải JSON qua `fetch`.
+
+## Chuyển locale {#switch-locale}
+
+```tsx
+const { setLocale, switchLocale } = useI18n()
+
+setLocale('de') // only the locale
+switchLocale('de') // the locale, then the adapter's push to the localized current path
+```
+
+Việc chuyển đổi không tải gì cả; hãy thêm từ điển của locale trước. Thao tác ghi vào store là đồng bộ đối với React, kể cả bên trong `startTransition`, nên một component suspend vì thiếu từ điển sẽ hiển thị fallback của nó. `useLocaleSwitch` tải trước và giữ UI cũ cho tới khi từ điển được nạp:
+
+```tsx
+const [switchTo, pending] = useLocaleSwitch((locale) => i18n.loadFromUrl(`/locales/${locale}.json`, { locale }))
+
+<button disabled={pending} onClick={() => switchTo('de')}>Deutsch</button>
+```
+
+Lời gọi cuối cùng được ưu tiên. Lần tải thất bại sẽ reject và giữ nguyên locale.
+
+`<I18nGroup>` truyền một `t` có tiền tố cho một render-prop child. `<I18nT>` và `t()` bên trong nó không có tiền tố:
+
+```tsx
+<I18nGroup prefix="profile">{({ t }) => <h2>{t('title')}</h2> /* profile.title */}</I18nGroup>
+```
+
+## Định tuyến {#routing}
+
+Adapter cho React Router nằm trong một subpath để entry chính không bao giờ import `react-router-dom`. Nó cần `useLocation()` và `useNavigate()`, nên hãy tạo nó bên trong một component nằm dưới router:
+
+```tsx
+// src/App.tsx
+import { useMemo } from 'react'
+import { BrowserRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
+import { I18nLink, I18nProvider, I18nSwitcher } from '@i18n-micro/react'
+import { createReactRouterAdapter } from '@i18n-micro/react/router'
+import { i18n, locales } from './i18n'
+import { About, Home } from './pages'
+
+function Localized() {
+  const location = useLocation()
+  const navigate = useNavigate()
+  // memoized: a new object on every render re-renders every `useI18n()` consumer
+  const routingStrategy = useMemo(() => createReactRouterAdapter(locales, 'en', location, navigate), [location, navigate])
+  return (
+    <I18nProvider i18n={i18n} locales={locales} defaultLocale="en" routingStrategy={routingStrategy}>
+      <I18nLink to="/about">About</I18nLink>
+      <I18nSwitcher />
+      <Routes>
+        <Route path="/:locale?" element={<Home />} />
+        <Route path="/:locale?/about" element={<About />} />
+      </Routes>
+    </I18nProvider>
+  )
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <Localized />
+    </BrowserRouter>
+  )
+}
+```
+
+Adapter thêm tiền tố cho mọi locale trừ locale mặc định (`/about`, `/de/about`) và render `<I18nLink>` thành `<Link>` của React Router. Bạn tự đặt locale từ URL (ví dụ từ `useParams().locale` trong một effect). Với bất kỳ router nào khác, hãy viết adapter có `getCurrentPath`, `push` và `replace` (đều bắt buộc) — xem [Router adapter](/vi/integrations/overview#router-adapter).
+
+## SSR {#ssr}
+
+`renderToString` hoạt động: `useI18n()` có server snapshot. Hãy tạo một instance cho mỗi yêu cầu và thêm từ điển của nó trước khi render, để các yêu cầu ở các locale khác nhau không chia sẻ trạng thái, hoặc truyền dữ liệu thuần cho provider.
+
+### Hydration {#hydration}
+
+Số, dạng số nhiều và văn bản hydrate nguyên trạng. Ngày phụ thuộc vào múi giờ và ngày tương đối phụ thuộc vào đồng hồ: hãy đặt `timeZone` trên máy chủ và trong trình duyệt, và với `tdr` hãy truyền cho trình duyệt thời gian của máy chủ bằng `now`. `<I18nT>` với `date` hoặc `relativeDate` đặt `suppressHydrationWarning`, nên sự khác biệt không làm hydration thất bại, nhưng văn bản của máy chủ được giữ cho tới khi văn bản thay đổi. Điều đó chỉ có tác dụng ở một cấp: `children` bọc bản dịch trong một phần tử vẫn thất bại khi có khác biệt, nên hãy cho chúng cùng `timeZone`.
+
+### Server Components {#server-components}
+
+Package đánh dấu code phía client bằng `'use client'`. `@i18n-micro/react/server` có `createI18n` và một `I18nT` không dùng hook, nhận instance qua prop, nên văn bản nằm ngoài bundle client. Với điều kiện `react-server`, như trong Next.js app router, entry chính cũng phân giải tới nó, nhưng TypeScript mặc định không biết điều đó: hãy import từ `/server`. `@i18n-micro/react/client` luôn cho entry phía client.
+
+```tsx
+// app/[locale]/layout.tsx: a server component
+import { cache } from 'react'
+import { createI18n, I18nT } from '@i18n-micro/react/server'
+import { I18nProvider } from '@i18n-micro/react/client'
+import { loadMessages } from './messages'
+
+const getI18n = cache(async (locale: string) => createI18n({ locale, messages: await loadMessages(locale) }))
+
+export default async function Layout({ params, children }) {
+  const { locale } = await params
+  const i18n = await getI18n(locale)
+  return (
+    <I18nProvider locale={locale} messages={{ [locale]: i18n.resolveTranslations() }}>
+      <h1>
+        <I18nT i18n={i18n} keypath="title" />
+      </h1>
+      {children}
+    </I18nProvider>
+  )
+}
+```
+
+Được render qua `react-server-dom-webpack`; bản thân một app Next.js chưa được chạy thử với điều này.
+
+## API {#api}
+
+| Export | Entry |
+| --- | --- |
+| `createI18n`, `ReactI18n`, `I18nProvider`, `useI18n`, `useT`, `useLocaleSwitch` | `@i18n-micro/react` |
+| `I18nT`, `I18nLink`, `I18nSwitcher`, `I18nGroup` | `@i18n-micro/react` |
+| `I18nContext`, `I18nConfigContext`, `useI18nContext`, `useI18nLocales`, `useI18nDefaultLocale`, `useI18nRouter` | `@i18n-micro/react` |
+| `defaultPlural`, `FormatService`, `interpolate` | `@i18n-micro/react` |
+| Kiểu: `I18nRoutingStrategy`, `ReactI18nOptions`, `I18nProviderProps`, `UseI18nReturn`, props của component, `TranslationKey`, `Locale`, `Translations`, `PluralFunc` | `@i18n-micro/react` |
+| `createReactRouterAdapter` | `@i18n-micro/react/router` |
+| `createI18n`, `ReactI18n`, `I18nT` (nhận `i18n`) | `@i18n-micro/react/server` |
+
+Chữ ký đầy đủ: [tham chiếu React](/vi/api/packages/react).
+
+## Preact {#preact}
+
+`@i18n-micro/preact` được build từ cùng mã nguồn, trên chính Preact, không dùng `preact/compat`: cùng instance, provider, hook và component. Các điểm khác biệt:
+
+| | React | Preact |
+| --- | --- | --- |
+| Peer dependency | `react` (+ `react-router-dom` tùy chọn) | `preact` `^10.0.0 \|\| ^11.0.0`, đã kiểm thử trên 10.29 và 11.1 |
+| Lớp instance | `ReactI18n` | `PreactI18n` |
+| Router adapter | `createReactRouterAdapter` từ `/router` | `createBrowserHistoryAdapter(locales, defaultLocale, ssrUrl?)` từ `/router` |
+| Render lại | `useSyncExternalStore` | một subscription trong layout effect kiểm tra lại store |
+| Server Components | `/server`, `/client` | không có |
+
+`createBrowserHistoryAdapter` hoạt động với bất kỳ router nào dùng History API (wouter, preact-router): `push` và `replace` gọi `history.pushState` / `replaceState` và phát sự kiện `popstate`, và `<I18nLink>` render một thẻ `<a>` thông thường điều hướng qua `push`. Máy chủ không có thanh địa chỉ: hãy truyền URL của yêu cầu làm `ssrUrl`, nếu không liên kết và bộ chuyển đổi sẽ render như trên `/`. Trong trình duyệt, thanh địa chỉ được ưu tiên.
+
+```tsx
+// src/main.tsx
+import { render } from 'preact'
+import { createI18n, I18nProvider } from '@i18n-micro/preact'
+import { createBrowserHistoryAdapter } from '@i18n-micro/preact/router'
+import { App } from './App'
+import en from './locales/en.json'
+
+const locales = [
+  { code: 'en', iso: 'en-US', displayName: 'English' },
+  { code: 'de', iso: 'de-DE', displayName: 'Deutsch' },
+]
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', messages: { en } })
+
+render(
+  <I18nProvider i18n={i18n} locales={locales} defaultLocale="en" routingStrategy={createBrowserHistoryAdapter(locales, 'en')}>
+    <App />
+  </I18nProvider>,
+  document.getElementById('app')!,
+)
+```
+
+Chữ ký đầy đủ: [tham chiếu Preact](/vi/api/packages/preact).
+
+## Liên quan {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Frameworks" icon="book-open" href="/vi/integrations/overview">
+
+Tùy chọn instance, router adapter, props của component
+
+</Card>
+
+<Card title="Runtime" icon="book-open" href="/vi/integrations/runtime-package">
+
+Instance mà các package này xây dựng dựa trên
+
+</Card>
+
+<Card title="Trình tạo kiểu" icon="book-open" href="/vi/integrations/types-generator">
+
+Tự động hoàn thành cho khóa
+
+</Card>
+
+</CardGroup>

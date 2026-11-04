@@ -1,0 +1,128 @@
+---
+title: "层与域名"
+description: "通过 Nuxt 层共享 i18n 配置和翻译文件，并在各自的域名上提供不同的语言环境。"
+---
+
+一个 Nuxt 层可以为多个应用携带 i18n 配置和 `locales/` 文件夹，每个应用再按需添加或覆盖。本页演示这种用法，以及如何用一次构建服务多个域名。
+
+## 共享配置与翻译 {#share-config-and-translations}
+
+```ts
+// base/nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    locales: [
+      { code: 'en', iso: 'en-US' },
+      { code: 'de', iso: 'de-DE' },
+      { code: 'fr', iso: 'fr-FR' },
+    ],
+    defaultLocale: 'en',
+  },
+})
+```
+
+```ts
+// shop/nuxt.config.ts
+export default defineNuxtConfig({
+  extends: ['../base'], // a layer directory or package, not a nuxt.config file
+  i18n: {
+    locales: [
+      { code: 'es', iso: 'es-ES' }, // added
+      { code: 'fr', disabled: true }, // the base layer's fr, switched off here
+    ],
+  },
+})
+```
+
+- **配置：** 应用中的标量选项会替换层中的选项。所有层的 `locales` 数组会被合并，`code` 相同的条目会合并为一个，且以应用的字段为准，因此应用可以添加语言环境，或在继承的语言环境上设置 `disabled: true` 等字段。
+- **翻译：** 每个层的 `locales/` 会按键逐一合并，先合并层、最后合并应用，因此 `shop/locales/en.json` 中的键会覆盖 `base/locales/en.json` 中的同名键。页面文件（`locales/pages/<page>/`）也以相同方式合并。
+- **页面：** 会从每个层的页面中读取 `$defineI18nRoute`。
+
+如需合并不属于任何层的文件夹，请将它们列在 [`additionalTranslationDirs`](/zh-CN/api/module-options#additionaltranslationdirs) 中。
+
+## 多域名 {#multiple-domains}
+
+一次构建即可服务所有域名。为每个语言环境列出其域名；`baseDefault` 会使其成为该主机的默认语言环境：
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    strategy: 'prefix_except_default',
+    defaultLocale: 'en',
+    locales: [
+      { code: 'en', iso: 'en-US', baseUrl: 'https://example.com', baseDefault: true },
+      { code: 'de', iso: 'de-DE', baseUrl: 'https://example.de', baseDefault: true },
+      { code: 'nl', iso: 'nl-NL', baseUrl: 'https://example.de' },
+      { code: 'fr', iso: 'fr-FR' },
+    ],
+  },
+})
+```
+
+将两个域名都指向同一台服务器。其余部分由请求的主机决定：
+
+- **默认语言环境：** 该主机的 `baseDefault` 语言环境。如果没有，则在该主机提供构建默认语言环境时使用它，否则使用该主机的第一个语言环境。
+- **提供的语言环境：** 该主机的语言环境，以及所有没有 `baseUrl` 的语言环境。在 `example.de` 上即为 `de`、`nl` 和 `fr`。
+- **其他域名的语言环境** 是链接目标。`$localePath`、`$localeRoute`、`$switchLocalePath`、`<i18n-switcher>` 和 `hreflang` 会给出指向其 `baseUrl` 的绝对 URL，`$switchLocale` 会导航到那里。在当前主机上它们的 URL 返回 404，cookie 或 `Accept-Language` 也无法选中它们。
+- **指向其他域名的链接** 需通过 `$localePath` 或 `<i18n-link>`：`<NuxtLink :to="$localePath('/contact', 'de')">`、`<i18n-link :to="$localeRoute('/contact', 'de')">`。路由器不接受绝对地址对象，因此 `<NuxtLink :to="$localeRoute(...)">` 和 `router.push($localeRoute(...))` 会停留在当前源上。在 `localhost` 或预览主机上，每个带 `baseUrl` 的语言环境都是这样的链接，当前语言环境也不例外。在代码中请使用 `navigateTo($localePath('/contact', 'de'), { external: true })` 或 `$switchRoute`。
+- **其他任何主机** 都会获得构建配置，所有带 `baseUrl` 的语言环境都作为链接目标。不会回显请求中的任何内容：canonical 和 `hreflang` 使用 `metaBaseUrl`，否则使用构建默认语言环境的 `baseUrl`（没有 `baseUrl` 的默认语言环境需要 `metaBaseUrl` 或 `site.url`，参见 [SEO](/zh-CN/guide/seo#set-the-public-origin)）。
+- **`public/` 中的数据包文件** 是静态的：任何主机都会返回任何语言环境的文件。按域名进行 [generate](/zh-CN/guide/deployment#static-site-(nuxi-generate)) 只会发布该域名的文件。
+
+`example.de` 在各策略下的表现，其中 `de: '/kontakt'` 是 `contact` 的自定义路径：
+
+| 策略 | `/` | 默认语言环境的页面 | 其他 URL |
+| --- | --- | --- | --- |
+| `prefix_except_default` | `de` | `/kontakt` | `/de/kontakt` 和 `/en/contact` 返回 404，`/contact` 重定向到 `/kontakt` |
+| `prefix_and_default` | `de` | `/kontakt` 和 `/de/kontakt`，链接使用 `/kontakt` | `/en/contact` 和 `/contact` 返回 404 |
+| `prefix` | 重定向到 `/de` | `/de/kontakt` | `/kontakt` 重定向到 `/de/kontakt`，`/en/contact` 返回 404 |
+| `no_prefix` | `de` | `/kontakt` | 其他域名上语言环境的自定义路径返回 404 |
+
+在 `prefix` 下，来自其他域名的链接会保留前缀，因为无前缀的 URL 只会被重定向。在 `no_prefix` 下，指向其他域名的链接会落到该主机的默认语言环境：URL 无法指定第二个语言环境。
+
+需要注意的事项：
+
+- **位于代理之后** 时，主机取自 `Host`。如果代理将公共主机放在 `X-Forwarded-Host` 中，请设置 [`trustForwardedHost`](/zh-CN/api/module-options#trustforwardedhost)，且仅在代理会覆写该请求头时才这样做。两者都不发送的代理无法支持域名构建。参见[位于代理或 CDN 之后](/zh-CN/guide/deployment#behind-a-proxy-or-cdn)。
+- **`app.baseURL`** 也要写进 `baseUrl`：`baseUrl: 'https://example.de/shop'` 搭配 `app.baseURL: '/shop'`。
+- **主机严格匹配。** `www.example.de` 是另一个主机：请在边缘层重定向它，或将该 `baseUrl` 设置到语言环境上。每个语言环境只能有一个主机。
+- **缓存必须以主机作为键。** CDN 通常会这样做。Nitro 的路由缓存以路径为键，因此在域名构建中，模块会在每条 `swr` 和 `cache` 规则的 `cache.varies` 中添加 `host`，启用 `trustForwardedHost` 时还会添加 `x-forwarded-host`。带有 `cache: false` 的规则保持原样。`isr` 使用平台的缓存：请确认它以主机为键。
+- **两个主机默认语言环境的自定义路径不能冲突。** 无前缀的记录共享同一个路由器，因此 `/x` 不能在 `example.de` 上是一个页面，而在 `example.com` 上是另一个页面。
+- **预渲染页面：** `nuxt build` 中的 `prerender: true` 路由规则只会在没有主机的情况下渲染一次，生成的文件会响应所有域名。请将因域名而异的页面交给服务器处理，或[按域名 generate](/zh-CN/guide/deployment#static-site-(nuxi-generate))。
+- **`noPrefixRedirect`** 在每个主机上都依据主机和访客的语言环境进行处理。
+- **`hashMode`：** 主机按上述方式选择渲染内容，指向其他域名的链接会将路由放在 hash 中（`https://example.com/#/contact`）。
+- **`ssr: false`：** 浏览器从 `location.host` 读取域名，因此没有服务器的主机依然能够正确解析。
+- **[运行时覆盖](/zh-CN/guide/runtime-overrides)** 最先应用。运行时的 `disabledLocales` 在每个主机上都生效，只有一个例外：在 `prefix_except_default` 和 `prefix_and_default` 下，主机的默认语言环境在其主机上保持启用，因为它的页面就是无前缀的记录。在 `prefix` 和 `no_prefix` 下，主机会退而使用它提供的下一个语言环境。运行时的 `defaultLocale` 仅适用于未知主机。
+
+对于[静态站点](/zh-CN/guide/deployment#static-site-(nuxi-generate))，请为每个域名分别 generate 一次。
+
+### 每个域名一个应用 {#one-app-per-domain}
+
+当各域名需要不同的页面或模块时，使用共享层并为每个域名配一个小应用的方式依然可行。每个应用在同一个 `locales` 列表之上设置自己的 `defaultLocale`。如上所述，其他域名上的语言环境在该应用中返回 404。
+
+### 在代码中选择语言环境 {#choosing-the-locale-in-code}
+
+如果希望单个实例响应所有域名，并在 SEO 标签中使用请求自身的源，请参见 [SEO](/zh-CN/guide/seo#set-the-public-origin)；如需在代码中根据主机选择语言环境，请参见[自定义语言环境检测](/zh-CN/guide/custom-auto-detect)。
+
+## 相关内容 {#related}
+
+<CardGroup cols={2}>
+
+<Card title="翻译文件" icon="book-open" href="/zh-CN/guide/translations">
+
+</Card>
+
+<Card title="运行时覆盖" icon="book-open" href="/zh-CN/guide/runtime-overrides">
+
+</Card>
+
+<Card title="SEO" icon="book-open" href="/zh-CN/guide/seo">
+
+</Card>
+
+<Card title="Nuxt 层" icon="arrow-up-right-from-square" href="https://nuxt.com/docs/getting-started/layers">
+
+</Card>
+
+</CardGroup>

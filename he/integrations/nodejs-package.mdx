@@ -1,0 +1,131 @@
+---
+title: "Node.js"
+description: "טענו קובצי תרגום מהדיסק ותרגמו בשרתי Node.js, סקריפטים ו-CLIs עם @i18n-micro/node."
+---
+
+`@i18n-micro/node` הוא מופע ה-[runtime](/he/integrations/runtime-package) בתוספת loader שקורא תיקיית תרגומים מהדיסק. השתמשו בו בשרת Express או Fastify, ב-CLI, במחולל דוא"ל או PDF, או בכל סקריפט שזקוק לאותם קובצי JSON כמו אפליקציית ה-Nuxt שלכם. אתם טוענים את הקבצים פעם אחת ומתרגמים לכל בקשה בלי לשתף מצב משתנה בין בקשות.
+
+## התקנה {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add @i18n-micro/node @i18n-micro/utils
+```
+
+```bash npm
+npm install @i18n-micro/node @i18n-micro/utils
+```
+
+```bash yarn
+yarn add @i18n-micro/node @i18n-micro/utils
+```
+
+</CodeGroup>
+
+אין תלויות peer; Node.js `>=20`. `@i18n-micro/utils` נדרש רק עבור פונקציית העזר של `Accept-Language` שלהלן.
+
+## הגדרה {#setup}
+
+ה-loader קורא את [מבנה התיקיות של Nuxt](/he/guide/translations): `locales/en.json` הוא מילון שורש, `locales/pages/blog/post/en.json` שייך ל-route `blog-post`.
+
+```ts
+import { createI18n } from '@i18n-micro/node'
+
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', translationDir: './locales' })
+await i18n.loadTranslations()
+
+i18n.t('greeting', { name: 'Ada' }) // 'Hello, Ada!'
+i18n.t('title', undefined, undefined, 'blog-post') // from locales/pages/blog/post/en.json
+```
+
+האפשרויות הן אלה של ה-runtime (ראו [המופע](/he/integrations/overview#the-instance)) בתוספת `translationDir` ו-`disablePageLocales` (התייחסות לקובצי `pages/**` כמילוני שורש). `i18n.reload()` מנקה כל מילון וקורא את התיקייה מחדש, עבור file watcher בפיתוח.
+
+`loadTranslations(dir, disablePageLocales?)` מיוצא גם בפני עצמו ומחזיר `{ root, routes }`:
+
+```ts
+import { loadTranslations } from '@i18n-micro/node'
+
+const { root, routes } = await loadTranslations('./locales')
+// root:   { en: {...}, de: {...} }
+// routes: { 'blog-post': { en: {...}, de: {...} } }
+```
+
+## לכל בקשה {#per-request}
+
+מופע מחזיק locale אחד ו-route אחד. החלפת `i18n.locale` במופע משותף בתוך handler של בקשה יוצרת מרוץ עם בקשות מקבילות. `run` נותן לבקשה מופע משלה:
+
+```ts
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', translationDir: './locales' })
+await i18n.loadTranslations()
+
+// `() => next()`: `run` hands its callback the fork, and Express reads an argument of `next` as an error
+app.use((req, res, next) => i18n.run(pickLocale(req), () => next()))
+
+app.get('/', (req, res) => {
+  res.send(i18n.t('greeting')) // the request's locale, in everything it awaits
+})
+```
+
+בתוך `run` המופע המשותף קורא ומגדיר את ה-locale וה-route של הבקשה (`AsyncLocalStorage`); ה-fork מתחיל ב-route הנוכחי, ו-`i18n.setRoute(...)` בתוך ה-callback משנה את ה-route של אותה בקשה. ה-callback מקבל גם את ה-fork של הבקשה: מילונים שנכתבים אליו נשארים בבקשה, מילונים שנכתבים למופע המשותף מגיעים לכולם.
+
+ללא `AsyncLocalStorage`, `i18n.fork(locale)` מחזיר אותו סוג של מופע להעברה הלאה.
+
+`reload()` קורא את התיקייה מחדש; המילונים הישנים עונים עד שהחדשים נטענים.
+
+## בחירת ה-locale {#pick-the-locale}
+
+`detectLocaleFromAcceptLanguage(header, locales)` מכבד משקלי `q` ומתאים את `de-DE` ל-locale `de` (ואת `de` ל-`de-DE`). הוא מחזיר `null` כאשר אין התאמה.
+
+```ts
+import express from 'express'
+import { detectLocaleFromAcceptLanguage } from '@i18n-micro/utils/accept-language'
+
+const app = express()
+
+app.get('/hello', (req, res) => {
+  const locale = detectLocaleFromAcceptLanguage(req.headers['accept-language'], locales) ?? 'en'
+  const i18n = byLocale.get(locale)!
+  res.json({ message: i18n.t('greeting', { name: 'Ada' }) })
+})
+```
+
+עבור קידומת URL, cookie וכותרת יחד, `resolveLocale({ defaultLocale, validLocales, url, cookie, acceptLanguage, autoDetectLanguage: true })` מתוך `@i18n-micro/utils/resolve-locale` מחיל את סדר הקדימות של המודול: URL, אחר כך cookie, אחר כך `Accept-Language`, ואז ברירת המחדל. ערכים לא תקינים מדולגים.
+
+בתוך אפליקציית Nuxt אינכם צריכים את החבילה הזו בשרת: השתמשו ב-[תרגומים בצד השרת](/he/guide/server-side-translations) של המודול.
+
+## API {#api}
+
+| ייצוא | הערות |
+| --- | --- |
+| `createI18n(options)`, `I18n` | מופע runtime + `translationDir`, `loadTranslations(dir?)`, `reload()` |
+| `loadTranslations(dir, disablePageLocales?)` | `{ root, routes }` |
+| `loadRootTranslations(dir, disablePageLocales?)` | `root` בלבד |
+| `FormatService`, `interpolate` | מ-core |
+| טיפוסים: `I18nOptions`, `LoadedTranslations`, `Translations`, `Locale`, `PluralFunc`, `Params` | |
+
+מתודות המופע מפורטות ב-[Runtime](/he/integrations/runtime-package#api). חתימות מלאות: [מדריך החבילה](/he/api/packages/node).
+
+## קשור {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Runtime" icon="book-open" href="/he/integrations/runtime-package">
+
+המופע ללא `fs`
+
+</Card>
+
+<Card title="תרגומים" icon="book-open" href="/he/guide/translations">
+
+מבנה התיקיות
+
+</Card>
+
+<Card title="זיהוי locale" icon="book-open" href="/he/guide/locale-detection">
+
+סדר הקדימות במודול Nuxt
+
+</Card>
+
+</CardGroup>

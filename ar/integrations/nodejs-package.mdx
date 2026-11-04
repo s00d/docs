@@ -1,0 +1,131 @@
+---
+title: "Node.js"
+description: "حمّل ملفات الترجمة من القرص وترجم في خوادم Node.js والسكربتات وأدوات CLI باستخدام @i18n-micro/node."
+---
+
+`@i18n-micro/node` هي نسخة [وقت التشغيل](/ar/integrations/runtime-package) بالإضافة إلى محمِّل يقرأ مجلد ترجمة من القرص. استخدمها في خادم Express أو Fastify، أو أداة CLI، أو مولِّد بريد إلكتروني أو PDF، أو أي سكربت يحتاج إلى ملفات JSON نفسها التي يستخدمها تطبيق Nuxt الخاص بك. تحمّل الملفات مرة واحدة وتترجم لكل طلب دون مشاركة حالة قابلة للتغيير بين الطلبات.
+
+## التثبيت {#install}
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add @i18n-micro/node @i18n-micro/utils
+```
+
+```bash npm
+npm install @i18n-micro/node @i18n-micro/utils
+```
+
+```bash yarn
+yarn add @i18n-micro/node @i18n-micro/utils
+```
+
+</CodeGroup>
+
+لا توجد تبعيات نظيرة؛ Node.js `>=20`. لا حاجة إلى `@i18n-micro/utils` إلا للدالة المساعدة الخاصة بـ `Accept-Language` أدناه.
+
+## الإعداد {#setup}
+
+يقرأ المحمِّل [تخطيط مجلدات Nuxt](/ar/guide/translations): `locales/en.json` قاموس جذر، و`locales/pages/blog/post/en.json` ينتمي إلى المسار `blog-post`.
+
+```ts
+import { createI18n } from '@i18n-micro/node'
+
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', translationDir: './locales' })
+await i18n.loadTranslations()
+
+i18n.t('greeting', { name: 'Ada' }) // 'Hello, Ada!'
+i18n.t('title', undefined, undefined, 'blog-post') // from locales/pages/blog/post/en.json
+```
+
+الخيارات هي خيارات وقت التشغيل (راجع [النسخة](/ar/integrations/overview#the-instance)) بالإضافة إلى `translationDir` و`disablePageLocales` (التعامل مع ملفات `pages/**` كقواميس جذر). تمسح `i18n.reload()` كل القواميس وتقرأ المجلد من جديد، لمراقب ملفات أثناء التطوير.
+
+تُصدَّر `loadTranslations(dir, disablePageLocales?)` أيضًا بمفردها وتعيد `{ root, routes }`:
+
+```ts
+import { loadTranslations } from '@i18n-micro/node'
+
+const { root, routes } = await loadTranslations('./locales')
+// root:   { en: {...}, de: {...} }
+// routes: { 'blog-post': { en: {...}, de: {...} } }
+```
+
+## لكل طلب {#per-request}
+
+تحتفظ النسخة بـ locale واحد ومسار واحد. تبديل `i18n.locale` على نسخة مشتركة داخل معالج طلب يتسابق مع الطلبات المتزامنة. تمنح `run` كل طلب نسخته الخاصة:
+
+```ts
+const i18n = createI18n({ locale: 'en', fallbackLocale: 'en', translationDir: './locales' })
+await i18n.loadTranslations()
+
+// `() => next()`: `run` hands its callback the fork, and Express reads an argument of `next` as an error
+app.use((req, res, next) => i18n.run(pickLocale(req), () => next()))
+
+app.get('/', (req, res) => {
+  res.send(i18n.t('greeting')) // the request's locale, in everything it awaits
+})
+```
+
+داخل `run` تقرأ النسخة المشتركة locale الطلب ومساره وتضبطهما (`AsyncLocalStorage`)؛ تبدأ النسخة المتفرعة على المسار الحالي، وتغيّر `i18n.setRoute(...)` داخل الـ callback مسار ذلك الطلب. يحصل الـ callback أيضًا على النسخة المتفرعة للطلب: القواميس المكتوبة فيها تبقى داخل الطلب، والقواميس المكتوبة في النسخة المشتركة تصل إلى الجميع.
+
+بدون `AsyncLocalStorage`، تعيد `i18n.fork(locale)` النوع نفسه من النسخ لتمريره.
+
+تقرأ `reload()` المجلد من جديد؛ وتجيب القواميس القديمة حتى تصبح الجديدة جاهزة.
+
+## اختر الـ locale {#pick-the-locale}
+
+تراعي `detectLocaleFromAcceptLanguage(header, locales)` أوزان `q` وتطابق `de-DE` مع locale `de` (و`de` مع `de-DE`). وتعيد `null` عندما لا يتطابق شيء.
+
+```ts
+import express from 'express'
+import { detectLocaleFromAcceptLanguage } from '@i18n-micro/utils/accept-language'
+
+const app = express()
+
+app.get('/hello', (req, res) => {
+  const locale = detectLocaleFromAcceptLanguage(req.headers['accept-language'], locales) ?? 'en'
+  const i18n = byLocale.get(locale)!
+  res.json({ message: i18n.t('greeting', { name: 'Ada' }) })
+})
+```
+
+لبادئة URL وملف تعريف الارتباط والترويسة معًا، تطبّق `resolveLocale({ defaultLocale, validLocales, url, cookie, acceptLanguage, autoDetectLanguage: true })` من `@i18n-micro/utils/resolve-locale` أولوية الوحدة: عنوان URL، ثم ملف تعريف الارتباط، ثم `Accept-Language`، ثم الافتراضي. تُتخطى القيم غير الصالحة.
+
+داخل تطبيق Nuxt لا تحتاج إلى هذه الحزمة على الخادم: استخدم [الترجمات على جانب الخادم](/ar/guide/server-side-translations) الخاصة بالوحدة.
+
+## API {#api}
+
+| التصدير | ملاحظات |
+| --- | --- |
+| `createI18n(options)`, `I18n` | نسخة وقت التشغيل + `translationDir`, `loadTranslations(dir?)`, `reload()` |
+| `loadTranslations(dir, disablePageLocales?)` | `{ root, routes }` |
+| `loadRootTranslations(dir, disablePageLocales?)` | `root` فقط |
+| `FormatService`, `interpolate` | من core |
+| الأنواع: `I18nOptions`, `LoadedTranslations`, `Translations`, `Locale`, `PluralFunc`, `Params` | |
+
+دوال النسخة مدرجة في [وقت التشغيل](/ar/integrations/runtime-package#api). التواقيع الكاملة: [مرجع الحزمة](/ar/api/packages/node).
+
+## ذات صلة {#related}
+
+<CardGroup cols={2}>
+
+<Card title="وقت التشغيل" icon="book-open" href="/ar/integrations/runtime-package">
+
+النسخة بدون `fs`
+
+</Card>
+
+<Card title="الترجمات" icon="book-open" href="/ar/guide/translations">
+
+تخطيط المجلدات
+
+</Card>
+
+<Card title="اكتشاف الـ locale" icon="book-open" href="/ar/guide/locale-detection">
+
+الأولوية في وحدة Nuxt
+
+</Card>
+
+</CardGroup>

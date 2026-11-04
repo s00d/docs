@@ -1,0 +1,128 @@
+---
+title: "Layers 與網域"
+description: "透過 Nuxt layers 共用 i18n 設定與翻譯檔案，並在各自的網域上提供 locale。"
+---
+
+一個 Nuxt layer 可以為多個 app 攜帶 i18n 設定與 `locales/` 資料夾，每個 app 再新增或覆寫它所需要的部分。本頁說明這種做法，以及如何以一次建置服務多個網域。
+
+## 共用設定與翻譯 {#share-config-and-translations}
+
+```ts
+// base/nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    locales: [
+      { code: 'en', iso: 'en-US' },
+      { code: 'de', iso: 'de-DE' },
+      { code: 'fr', iso: 'fr-FR' },
+    ],
+    defaultLocale: 'en',
+  },
+})
+```
+
+```ts
+// shop/nuxt.config.ts
+export default defineNuxtConfig({
+  extends: ['../base'], // a layer directory or package, not a nuxt.config file
+  i18n: {
+    locales: [
+      { code: 'es', iso: 'es-ES' }, // added
+      { code: 'fr', disabled: true }, // the base layer's fr, switched off here
+    ],
+  },
+})
+```
+
+- **設定：** app 中的純量選項會取代 layer 的選項。所有 layer 的 `locales` 陣列會被合併，`code` 相同的項目會合併為一個，並以 app 的欄位為準，因此 app 可以新增 locale，或在繼承的 locale 上設定 `disabled: true` 等欄位。
+- **翻譯：** 每個 layer 的 `locales/` 會逐鍵合併，layer 在前、app 在後，因此 `shop/locales/en.json` 中的鍵會覆寫 `base/locales/en.json` 中的同一個鍵。頁面檔案（`locales/pages/<page>/`）也以相同方式合併。
+- **頁面：** 會從每個 layer 的頁面讀取 `$defineI18nRoute`。
+
+若要合併不屬於任何 layer 的資料夾，請將它們列在 [`additionalTranslationDirs`](/zh-TW/api/module-options#additionaltranslationdirs) 中。
+
+## 多個網域 {#multiple-domains}
+
+一次建置即可服務所有網域。列出每個 locale 及其網域；`baseDefault` 會讓它成為該主機的預設 locale：
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    strategy: 'prefix_except_default',
+    defaultLocale: 'en',
+    locales: [
+      { code: 'en', iso: 'en-US', baseUrl: 'https://example.com', baseDefault: true },
+      { code: 'de', iso: 'de-DE', baseUrl: 'https://example.de', baseDefault: true },
+      { code: 'nl', iso: 'nl-NL', baseUrl: 'https://example.de' },
+      { code: 'fr', iso: 'fr-FR' },
+    ],
+  },
+})
+```
+
+將兩個網域都指向同一台伺服器。其餘由請求的主機決定：
+
+- **預設：** 主機的 `baseDefault` locale。若沒有，則在主機有提供建置預設 locale 時使用它，否則使用主機的第一個 locale。
+- **提供的 locale：** 該主機的 locale，加上所有沒有 `baseUrl` 的 locale。在 `example.de` 上即為 `de`、`nl` 與 `fr`。
+- **其他網域的 locale** 是連結目標。`$localePath`、`$localeRoute`、`$switchLocalePath`、`<i18n-switcher>` 與 `hreflang` 會產生位於其 `baseUrl` 的絕對 URL，而 `$switchLocale` 會導覽到那裡。在此主機上，它們的 URL 會回傳 404，cookie 或 `Accept-Language` 也無法選到它們。
+- **連到其他網域的連結** 要透過 `$localePath` 或 `<i18n-link>`：`<NuxtLink :to="$localePath('/contact', 'de')">`、`<i18n-link :to="$localeRoute('/contact', 'de')">`。路由器不接受絕對路徑物件，因此 `<NuxtLink :to="$localeRoute(...)">` 與 `router.push($localeRoute(...))` 會停留在此 origin。在 `localhost` 或預覽主機上，每個帶有 `baseUrl` 的 locale 都是這種連結，包括目前的 locale。在程式碼中請使用 `navigateTo($localePath('/contact', 'de'), { external: true })` 或 `$switchRoute`。
+- **其他任何主機** 會取得建置設定，並將每個帶有 `baseUrl` 的 locale 視為連結目標。不會回傳請求中的任何內容：canonical 與 `hreflang` 會使用 `metaBaseUrl`，否則使用建置預設 locale 的 `baseUrl`（沒有 `baseUrl` 的預設 locale 需要 `metaBaseUrl` 或 `site.url`，請參閱 [SEO](/zh-TW/guide/seo#set-the-public-origin)）。
+- **Payload 檔案** 位於 `public/` 中，屬於靜態檔案：任何主機都會回傳任何 locale 的檔案。依網域執行的 [generate](/zh-TW/guide/deployment#static-site-(nuxi-generate)) 只會發佈該網域的檔案。
+
+`example.de` 在各策略下的情況，其中 `de: '/kontakt'` 是 `contact` 的自訂路徑：
+
+| 策略 | `/` | 預設 locale 的頁面 | 其他 URL |
+| --- | --- | --- | --- |
+| `prefix_except_default` | `de` | `/kontakt` | `/de/kontakt` 與 `/en/contact` 回傳 404，`/contact` 重新導向至 `/kontakt` |
+| `prefix_and_default` | `de` | `/kontakt` 與 `/de/kontakt`，連結使用 `/kontakt` | `/en/contact` 與 `/contact` 回傳 404 |
+| `prefix` | 重新導向至 `/de` | `/de/kontakt` | `/kontakt` 重新導向至 `/de/kontakt`，`/en/contact` 回傳 404 |
+| `no_prefix` | `de` | `/kontakt` | 其他網域上 locale 的自訂路徑回傳 404 |
+
+在 `prefix` 下，來自其他網域的連結會保留前綴，因為無前綴的 URL 只會被重新導向。在 `no_prefix` 下，連到其他網域的連結會落在該主機的預設 locale：URL 無法指定第二個 locale。
+
+需要知道的事項：
+
+- **在 proxy 後方** 時，主機取自 `Host`。如果 proxy 改將公開主機放在 `X-Forwarded-Host` 中，請設定 [`trustForwardedHost`](/zh-TW/api/module-options#trustforwardedhost)，且只在 proxy 會覆寫該標頭時才設定。兩者都不傳送的 proxy 無法服務網域建置。請參閱[在 proxy 或 CDN 後方](/zh-TW/guide/deployment#behind-a-proxy-or-cdn)。
+- **`app.baseURL`** 也要放進 `baseUrl`：`baseUrl: 'https://example.de/shop'` 搭配 `app.baseURL: '/shop'`。
+- **主機必須完全相符。** `www.example.de` 是另一個主機：請在邊緣將它重新導向，或在 locale 上設定該 `baseUrl`。每個 locale 只能有一個主機。
+- **快取必須以主機作為鍵。** CDN 通常會這麼做。Nitro 的路由快取以路徑作為鍵，因此在網域建置中，模組會將 `host` 加入每條 `swr` 與 `cache` 規則的 `cache.varies`，若有 `trustForwardedHost` 則加入 `x-forwarded-host`。帶有 `cache: false` 的規則維持原樣。`isr` 是平台的快取：請確認它以主機作為鍵。
+- **兩個主機預設 locale 的自訂路徑不得衝突。** 無前綴的紀錄共用同一個路由器，因此 `/x` 不能在 `example.de` 上是一個頁面、在 `example.com` 上又是另一個頁面。
+- **預先渲染的頁面：** 在 `nuxt build` 中，`prerender: true` 路由規則只會在沒有主機的情況下渲染一次，而產出的檔案會回應所有網域。請將因網域而異的頁面交給伺服器處理，或[依網域執行 generate](/zh-TW/guide/deployment#static-site-(nuxi-generate))。
+- **`noPrefixRedirect`** 在每個主機上都會依據主機與訪客的 locale 運作。
+- **`hashMode`：** 主機會如上所述決定渲染內容，連到其他網域的連結會將路由帶在 hash 中（`https://example.com/#/contact`）。
+- **`ssr: false`：** 瀏覽器會從 `location.host` 讀取網域，因此沒有伺服器的主機仍能解析。
+- **[執行階段覆寫](/zh-TW/guide/runtime-overrides)** 會最先套用。執行階段的 `disabledLocales` 在每個主機上都有效，只有一個例外：在 `prefix_except_default` 與 `prefix_and_default` 下，主機的預設 locale 在其主機上仍保持啟用，因為它的頁面就是無前綴的紀錄。在 `prefix` 與 `no_prefix` 下，主機會改用它提供的下一個 locale。執行階段的 `defaultLocale` 僅適用於未知的主機。
+
+若為[靜態網站](/zh-TW/guide/deployment#static-site-(nuxi-generate))，請為每個網域各執行一次 generate。
+
+### 每個網域一個 app {#one-app-per-domain}
+
+當各網域需要不同的頁面或模組時，使用共用 layer 搭配每個網域一個小型 app 的做法仍然可行。每個 app 在相同的 `locales` 清單之上設定自己的 `defaultLocale`。如上所述，其他網域上的 locale 在該 app 中會回傳 404。
+
+### 在程式碼中選擇 locale {#choosing-the-locale-in-code}
+
+若要以單一實例回應所有網域，並在 SEO 標籤中使用請求本身的 origin，請參閱 [SEO](/zh-TW/guide/seo#set-the-public-origin)；若要在程式碼中依主機選擇 locale，請參閱[自訂 locale 偵測](/zh-TW/guide/custom-auto-detect)。
+
+## 相關內容 {#related}
+
+<CardGroup cols={2}>
+
+<Card title="翻譯檔案" icon="book-open" href="/zh-TW/guide/translations">
+
+</Card>
+
+<Card title="執行階段覆寫" icon="book-open" href="/zh-TW/guide/runtime-overrides">
+
+</Card>
+
+<Card title="SEO" icon="book-open" href="/zh-TW/guide/seo">
+
+</Card>
+
+<Card title="Nuxt layers" icon="arrow-up-right-from-square" href="https://nuxt.com/docs/getting-started/layers">
+
+</Card>
+
+</CardGroup>

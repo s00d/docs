@@ -1,0 +1,128 @@
+---
+title: "Layers und Domains"
+description: "Teilen Sie i18n-Konfiguration und Übersetzungsdateien über Nuxt-Layers und liefern Sie Locales auf eigenen Domains aus."
+---
+
+Ein Nuxt-Layer kann die i18n-Konfiguration und den Ordner `locales/` für mehrere Apps bereitstellen, und jede App ergänzt oder überschreibt, was sie benötigt. Diese Seite zeigt das und erklärt, wie ein Build mehrere Domains bedient.
+
+## Konfiguration und Übersetzungen teilen {#share-config-and-translations}
+
+```ts
+// base/nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    locales: [
+      { code: 'en', iso: 'en-US' },
+      { code: 'de', iso: 'de-DE' },
+      { code: 'fr', iso: 'fr-FR' },
+    ],
+    defaultLocale: 'en',
+  },
+})
+```
+
+```ts
+// shop/nuxt.config.ts
+export default defineNuxtConfig({
+  extends: ['../base'], // a layer directory or package, not a nuxt.config file
+  i18n: {
+    locales: [
+      { code: 'es', iso: 'es-ES' }, // added
+      { code: 'fr', disabled: true }, // the base layer's fr, switched off here
+    ],
+  },
+})
+```
+
+- **Konfiguration:** Skalare Optionen in der App ersetzen die des Layers. `locales`-Arrays aller Layers werden kombiniert, und Einträge mit demselben `code` werden zu einem zusammengeführt, wobei die Felder der App gewinnen. So kann eine App eine Locale hinzufügen oder Felder wie `disabled: true` an einer geerbten setzen.
+- **Übersetzungen:** Die `locales/` jedes Layers werden Schlüssel für Schlüssel zusammengeführt, zuerst der Layer und zuletzt die App, sodass ein Schlüssel in `shop/locales/en.json` denselben Schlüssel in `base/locales/en.json` überschreibt. Seitendateien (`locales/pages/<page>/`) werden auf dieselbe Weise zusammengeführt.
+- **Seiten:** `$defineI18nRoute` wird aus den Seiten jedes Layers gelesen.
+
+Um Ordner zusammenzuführen, die nicht Teil eines Layers sind, führen Sie sie in [`additionalTranslationDirs`](/de/api/module-options#additionaltranslationdirs) auf.
+
+## Mehrere Domains {#multiple-domains}
+
+Ein Build bedient jede Domain. Führen Sie jede Locale mit ihrer Domain auf; `baseDefault` macht sie zum Standard dieses Hosts:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-i18n-micro'],
+  i18n: {
+    strategy: 'prefix_except_default',
+    defaultLocale: 'en',
+    locales: [
+      { code: 'en', iso: 'en-US', baseUrl: 'https://example.com', baseDefault: true },
+      { code: 'de', iso: 'de-DE', baseUrl: 'https://example.de', baseDefault: true },
+      { code: 'nl', iso: 'nl-NL', baseUrl: 'https://example.de' },
+      { code: 'fr', iso: 'fr-FR' },
+    ],
+  },
+})
+```
+
+Richten Sie beide Domains auf denselben Server. Der Host der Anfrage entscheidet den Rest:
+
+- **Standard:** die `baseDefault`-Locale des Hosts. Ohne eine solche der Build-Standard, sofern der Host ihn bedient, sonst die erste Locale des Hosts.
+- **Bediente Locales:** die Locales dieses Hosts plus jede Locale ohne `baseUrl`. Auf `example.de` sind das `de`, `nl` und `fr`.
+- **Locales anderer Domains** sind Link-Ziele. `$localePath`, `$localeRoute`, `$switchLocalePath`, `<i18n-switcher>` und `hreflang` liefern absolute URLs auf deren `baseUrl`, und `$switchLocale` navigiert dorthin. Auf diesem Host ergeben ihre URLs einen 404, und weder ein Cookie noch `Accept-Language` kann sie auswählen.
+- **Ein Link zu einer anderen Domain** läuft über `$localePath` oder `<i18n-link>`: `<NuxtLink :to="$localePath('/contact', 'de')">`, `<i18n-link :to="$localeRoute('/contact', 'de')">`. Der Router akzeptiert kein absolutes Objekt, daher bleiben `<NuxtLink :to="$localeRoute(...)">` und `router.push($localeRoute(...))` auf diesem Origin. Auf `localhost` oder einem Preview-Host ist jede Locale mit `baseUrl` ein solcher Link, auch die aktuelle. Im Code verwenden Sie `navigateTo($localePath('/contact', 'de'), { external: true })` oder `$switchRoute`.
+- **Jeder andere Host** erhält die Build-Konfiguration, mit jeder `baseUrl`-Locale als Link-Ziel. Nichts aus der Anfrage wird übernommen: Canonical und `hreflang` verwenden `metaBaseUrl`, sonst die `baseUrl` des Build-Standards (ein Standard ohne `baseUrl` benötigt `metaBaseUrl` oder `site.url`, siehe [SEO](/de/guide/seo#set-the-public-origin)).
+- **Payload-Dateien** in `public/` sind statisch: Jeder Host liefert die Datei jeder Locale aus. Ein [Generate](/de/guide/deployment#static-site-(nuxi-generate)) pro Domain veröffentlicht nur die Dateien dieser Domain.
+
+`example.de` unter jeder Strategie, mit `de: '/kontakt'` als benutzerdefiniertem Pfad von `contact`:
+
+| Strategie | `/` | Seite der Standard-Locale | Andere URLs |
+| --- | --- | --- | --- |
+| `prefix_except_default` | `de` | `/kontakt` | `/de/kontakt` und `/en/contact` ergeben 404, `/contact` leitet auf `/kontakt` weiter |
+| `prefix_and_default` | `de` | `/kontakt` und `/de/kontakt`, Links verwenden `/kontakt` | `/en/contact` und `/contact` ergeben 404 |
+| `prefix` | leitet auf `/de` weiter | `/de/kontakt` | `/kontakt` leitet auf `/de/kontakt` weiter, `/en/contact` ergibt 404 |
+| `no_prefix` | `de` | `/kontakt` | ein benutzerdefinierter Pfad einer Locale auf einer anderen Domain ergibt 404 |
+
+Bei `prefix` behält ein Link von einer anderen Domain das Präfix, da die URL ohne Präfix nur weiterleiten würde. Bei `no_prefix` landet ein Link zu einer anderen Domain auf der Standard-Locale dieses Hosts: Die URL kann keine zweite benennen.
+
+Wissenswertes:
+
+- **Hinter einem Proxy** stammt der Host aus `Host`. Wenn der Proxy den öffentlichen Host stattdessen in `X-Forwarded-Host` setzt, setzen Sie [`trustForwardedHost`](/de/api/module-options#trustforwardedhost), und zwar nur, wenn der Proxy diesen Header überschreibt. Ein Proxy, der keinen von beiden sendet, kann keinen Domain-Build bedienen. Siehe [Hinter einem Proxy oder CDN](/de/guide/deployment#behind-a-proxy-or-cdn).
+- **`app.baseURL`** gehört ebenfalls in `baseUrl`: `baseUrl: 'https://example.de/shop'` mit `app.baseURL: '/shop'`.
+- **Hosts werden exakt abgeglichen.** `www.example.de` ist ein anderer Host: Leiten Sie ihn am Edge weiter oder setzen Sie diese `baseUrl` an der Locale. Nur ein Host pro Locale.
+- **Caches müssen den Host als Schlüssel verwenden.** Ein CDN tut das normalerweise. Nitros Route-Cache verwendet den Pfad als Schlüssel, daher fügt das Modul in einem Domain-Build `host` zu `cache.varies` jeder `swr`- und `cache`-Regel hinzu, sowie `x-forwarded-host` mit `trustForwardedHost`. Eine Regel mit `cache: false` bleibt wie geschrieben. `isr` ist der Cache der Plattform: Prüfen Sie, dass er den Host als Schlüssel verwendet.
+- **Benutzerdefinierte Pfade zweier Host-Standards dürfen nicht kollidieren.** Die Einträge ohne Präfix teilen sich einen Router, daher kann `/x` nicht auf `example.de` eine Seite und auf `example.com` eine andere sein.
+- **Vorgerenderte Seiten:** Eine Route-Regel `prerender: true` in `nuxt build` rendert einmal, ohne Host, und die Datei beantwortet jede Domain. Überlassen Sie Seiten, die sich pro Domain unterscheiden, dem Server, oder [generieren Sie pro Domain](/de/guide/deployment#static-site-(nuxi-generate)).
+- **`noPrefixRedirect`** richtet sich auf jedem Host nach der Locale des Hosts und des Besuchers.
+- **`hashMode`:** Der Host wählt das Rendering wie oben, Links zu einer anderen Domain tragen die Route im Hash (`https://example.com/#/contact`).
+- **`ssr: false`:** Der Browser liest die Domain aus `location.host`, sodass auch ein Host ohne Server aufgelöst wird.
+- **[Laufzeit-Overrides](/de/guide/runtime-overrides)** werden zuerst angewendet. Ein Laufzeit-`disabledLocales` gilt auf jedem Host, mit einer Ausnahme: Bei `prefix_except_default` und `prefix_and_default` bleibt der Standard eines Hosts auf seinem Host aktiviert, da seine Seiten die Einträge ohne Präfix sind. Bei `prefix` und `no_prefix` fällt der Host auf die nächste von ihm bediente Locale zurück. Ein Laufzeit-`defaultLocale` gilt nur für unbekannte Hosts.
+
+Für eine [statische Website](/de/guide/deployment#static-site-(nuxi-generate)) generieren Sie einmal pro Domain.
+
+### Eine App pro Domain {#one-app-per-domain}
+
+Ein gemeinsamer Layer mit einer kleinen App pro Domain funktioniert weiterhin, wenn die Domains unterschiedliche Seiten oder Module benötigen. Jede App setzt ihre eigene `defaultLocale` auf Basis derselben `locales`-Liste. Eine Locale auf einer anderen Domain ergibt in dieser App einen 404, wie oben.
+
+### Die Locale im Code wählen {#choosing-the-locale-in-code}
+
+Für eine einzelne Instanz, die jede Domain mit dem eigenen Origin der Anfrage in SEO-Tags beantwortet, siehe [SEO](/de/guide/seo#set-the-public-origin); um die Locale im Code anhand des Hosts zu wählen, siehe [Benutzerdefinierte Locale-Erkennung](/de/guide/custom-auto-detect).
+
+## Verwandte Themen {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Übersetzungsdateien" icon="book-open" href="/de/guide/translations">
+
+</Card>
+
+<Card title="Laufzeit-Overrides" icon="book-open" href="/de/guide/runtime-overrides">
+
+</Card>
+
+<Card title="SEO" icon="book-open" href="/de/guide/seo">
+
+</Card>
+
+<Card title="Nuxt-Layers" icon="arrow-up-right-from-square" href="https://nuxt.com/docs/getting-started/layers">
+
+</Card>
+
+</CardGroup>

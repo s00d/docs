@@ -1,0 +1,327 @@
+---
+title: "CLI"
+description: "Kontrolujte překlady v CI, hledejte nepoužívané klíče, doplňujte chybějící přes překladovou službu a vyměňujte soubory s překladateli z příkazové řádky."
+---
+
+`@i18n-micro/cli` spravuje soubory locale projektu Nuxt. Čte `locales`, `defaultLocale`, `translationDir` a vaše vrstvy z `nuxt.config`, takže nepotřebuje žádnou vlastní konfiguraci.
+
+![Terminál se spuštěným i18n-micro check, který vypíše jeden chybějící, jeden nedefinovaný a čtyři nepoužívané klíče a selže, poté extract, který přidá nedefinovaný klíč, a poté clean --dryRun, který vypíše čtyři klíče, jež by odstranil](/images/cli/demo.gif)
+
+| Příkaz | Použijte ho k |
+| --- | --- |
+| `check` | Shození buildu při jakékoli chybě v souborech locale |
+| `translate` | Doplnění chybějících klíčů přes překladovou službu |
+| `clean` | Odstranění klíčů, které nic nepoužívá |
+| `rename` | Přesunutí klíče nebo celého jmenného prostoru všude najednou |
+
+```bash
+npm install -D @i18n-micro/cli
+npx i18n-micro --help
+```
+
+Spouštějte ho z kořene aplikace, nebo na něj ukažte pomocí `--cwd`. Všechny přepínače všech příkazů najdete v [referenci příkazů](/cs/api/cli).
+
+<Tip>
+
+**Přecházíte z nuxt-i18n-micro-cli?** `@i18n-micro/cli` ho nahrazuje; binárky `i18n-micro` a `i18n-micro-cli` zůstávají. Viz [tabulka starých příkazů](#moving-from-nuxt-i18n-micro-cli).
+
+</Tip>
+
+## Použití v CI {#use-it-in-ci}
+
+```bash
+i18n-micro check
+```
+
+`check` je brána. Hlásí:
+
+| Kontrola | Význam |
+| --- | --- |
+| `missing` | Klíč výchozího locale v některém locale chybí |
+| `empty` | Hodnota je `''`. Aplikace zobrazí prázdné místo, ne záložní text |
+| `extra` | Locale má klíč, který výchozí locale nemá |
+| `placeholders` | `{name}` se ztratil nebo přibyl, nebo množné číslo ztratilo své tvary |
+| `undefined` | Kód používá klíč, který výchozí locale nemá |
+| `unused` | Klíč v projektu nic nepoužívá |
+| `duplicates` | Stejný text pod různými klíči. Ve výchozím stavu vypnuto: předejte `--duplicates` |
+
+- `--only missing,placeholders` spustí jen některé kontroly; kontrola uvedená v `--only`, kterou nebylo možné spustit, selže.
+- `--json` vrátí report pro nástroje.
+- `--ignore` přeskočí zdrojové soubory.
+- Pokud se klíče počítají za běhu, `unused` se přeskočí a report uvede proč.
+
+Každý příkaz skončí jedním ze tří kódů, takže pipeline rozliší problém s vašimi překlady od problému s nástrojem:
+
+| Návratový kód | Význam |
+| --- | --- |
+| `0` | Nic k nahlášení |
+| `1` | Nálezy |
+| `2` | Příkaz nemohl proběhnout: chyba použití, poškozený soubor, neúspěšný požadavek |
+
+Další příkazy, které stojí za krok v CI:
+
+```bash
+i18n-micro format --check      # fails if a file is not formatted
+i18n-micro lint                # stray spaces, empty values, your own regex rules
+i18n-micro stats --baseRef main
+```
+
+## Udržování locale v souladu {#keep-locales-in-step}
+
+| Příkaz | Co dělá |
+| --- | --- |
+| `extract` | Vypíše klíče, které kód používá a které zatím nemají text. Výchozí text, jako v `$t('key', {}, 'Welcome')`, jde do výchozího locale. |
+| `sync` | Odstraní klíče, které výchozí locale nemá. Nejdřív zkuste `--dryRun`. |
+| `clean` | Odstraní klíče, které nic nepoužívá. Nejdřív zkuste `--dryRun`. |
+| `search` | Najde klíče a hodnoty a ukáže, kde se který klíč používá. |
+| `stats` | Úplnost pro každé locale; `--baseRef main` porovná s git referencí. |
+
+`sync` se zastaví stejně jako `clean`, když by odstranil klíč, u kterého nedokáže prokázat, že se nepoužívá, a také když výchozí locale nemá s čím porovnávat. Když není co odstranit, nikdy se nezastaví, takže samotné `$t(item.label)` není důvod pro `--force`.
+
+<Note>
+
+`extract` a `sync` nikdy nezapisují `''` pro klíč bez překladu. Klíč zůstane chybět, takže za běhu se uplatní `fallbackLocale` a `check` ho nahlásí. Prázdný řetězec by byl definovanou hodnotou a zobrazil by prázdné místo.
+
+</Note>
+
+### Co příkazy čtou {#what-the-commands-read}
+
+`check`, `extract`, `sync`, `clean`, `search` a `rename` čtou zdrojový kód v celém projektu, ne pevný seznam složek:
+
+- **Čte se:** šablony a skripty přes parser, `.html` a Pug jako text, každá vrstva a složky mimo kořen, na které ukazuje alias nebo `components`.
+- **Přeskakuje se:** `node_modules`, výstup buildu a soubory locale. Vlastní přidáte pomocí `--ignore 'legacy/**,*.stories.ts'`.
+- **Testovací kód** se počítá jako použití, takže `clean` a `check --only unused` ponechají klíč, který čte jen test. Nikdy klíč nepřidá: `extract` takové klíče přeskočí a `check` je nehlásí jako nedefinované.
+
+Testovacím kódem se rozumí kořenové složky `tests`, `test`, `__tests__`, `e2e`, `cypress` a `playwright` a k tomu soubory JavaScript a TypeScript s `.spec` a `.test` (`.ts`, `.tsx`, `.mts`, `.js`, `.jsx`, `.mjs` a podobné) kdekoli. Z níže uvedených pochybností jsou vyjmuté jen kořenové složky: `pages/tests/[id].vue` je stránka jako každá jiná, stejně jako `public/` a minifikované soubory, jejichž kód není součástí aplikace.
+
+Příkazy rozpoznávají:
+
+- `$t`, `$ts`, `$tc`, `$has` a `$_t(route)`;
+- `t()` z `useI18n()` a `useTranslationServerMiddleware()`;
+- `<i18n-t keypath>` v šablonách a JSX a `<i18n-group prefix>`;
+- aliasy jako `const { t: tr } = useI18n()`.
+
+### Jak `clean` rozhoduje {#how-clean-decides}
+
+`clean` raději ponechá mrtvý klíč, než by odstranil živý. Klíč zůstane, pokud platí cokoli z tohoto:
+
+- používá ho nějaké volání, nebo klíč pod ním či nad ním;
+- nějaký řetězec v kódu se mu rovná: `const key = 'menu.home'`, `<Item label="menu.home" />`;
+- obsahuje ho soubor JSON, YAML nebo Markdown v projektu;
+- počítaný klíč má statický začátek, který ho pokrývá: `` $t(`status.${state}`) `` ponechá vše pod `status.`;
+- definuje ho některá vrstva.
+
+`clean` se zastaví bez jakékoli změny, když to nemůže vědět, a vypíše proč:
+
+- klíč je celý počítaný, jako v `$t(name)`, `<i18n-t :keypath="name" />` nebo `<i18n-t v-bind="props" />`;
+- `$t` se předává jako hodnota, jako v `items.map($t)`;
+- funkce s názvem `t` dostane počítaný argument a pochází z parametru, importu nebo volání: může jít o obal skutečné funkce. Funkce definovaná ve stejném souboru se nepočítá, protože obal by uvnitř měl vlastní volání;
+- zdrojový soubor nejde naparsovat;
+- žádný soubor nepoužívá vůbec žádný klíč, což obvykle znamená, že hledá na špatném místě;
+- soubor locale je symlink mimo projekt, takže ho může číst jiná aplikace.
+
+<Steps>
+
+<Step title="Náhled">
+
+Spusťte `i18n-micro clean --dryRun` a projděte, co vypíše.
+
+</Step>
+
+<Step title="Ochrana klíčů">
+
+Klíče, které jen vypadají nepoužívaně, ochraňte pomocí `--exclude '^errors\.'`.
+
+</Step>
+
+<Step title="Odstranění">
+
+Spusťte ho znovu s `--force`.
+
+</Step>
+
+</Steps>
+
+## Překlad chybějících klíčů {#translate-missing-keys}
+
+```bash
+i18n-micro translate --dryRun                     # keys and characters per locale, nothing sent
+export I18N_TRANSLATE_TOKEN=...                   # or put it in .env
+i18n-micro translate --service deepl --locale de,fr
+```
+
+- `translate` doplní klíče, které chybí nebo jsou prázdné; `--replace` přeloží vše znovu.
+- Zástupné symboly a množné tvary jsou chráněné. Překlad, který ztratil zástupný symbol, se nezapíše: klíč se vypíše a příkaz skončí s kódem `1`.
+- Každá dávka se uloží dříve, než odejde další požadavek, takže selhání stojí jen ten požadavek, který selhal.
+
+| `--service` | Služba | `--token` | Užitečné `--options` |
+| --- | --- | --- | --- |
+| `ai` | Vercel AI Gateway, OpenAI, Anthropic nebo jakýkoli server kompatibilní s OpenAI | API klíč, nebo `AI_GATEWAY_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` | `provider`, `model`, `baseUrl`, `maxTokens` |
+| `azure` | Azure Translator | Klíč předplatného | `region` |
+| `deepl` | DeepL, včetně Free klíčů | Autentizační klíč | `formality`, `glossaryId`, `context` |
+| `google` | Google Cloud Translation v2 | API klíč | `model` |
+| `libretranslate` | LibreTranslate | Volitelné | `baseUrl` |
+| `yandexcloud` | Yandex Cloud Translate | API klíč, nebo IAM token s `authScheme:Bearer` | `folderId`, `model` |
+
+Možnosti jsou dvojice `key:value`: `--options provider:openai,model:gpt-4o-mini`. Všechny služby přijímají také `baseUrl`, `retries`, `retryDelayMs` a `timeoutMs`. Požadavek na překlad už může být zpoplatněný, proto se opakuje jen po `429` nebo `503`, a ne tehdy, když služba žádá čekání delší než minutu.
+
+<Warning>
+
+Přepínače jsou vidět v historii shellu a v seznamech procesů, proto token předávejte přes proměnnou prostředí. CLI maskuje vše, o čem ví, že je tajné, kdekoli to vypisuje, včetně `--debug`: tokeny, klíče poskytovatelů, Basic přihlašovací údaje a query a přihlašovací údaje v URL, kterou jste nakonfigurovali. Server, který klíč před vypsáním přeformátuje, je mimo jeho dosah, proto s logy neúspěšného běhu zacházejte opatrně.
+
+</Warning>
+
+Služba `ai` se řídí glosářem. Pokud existuje `.i18n-glossary.json`, použije se bez přepínače; `--glossaryFile` vybere jiný soubor.
+
+```json .i18n-glossary.json
+{ "entries": [{ "source": "Cart", "target": "Warenkorb", "to": "de" }] }
+```
+
+## Převod napevno zapsaného textu na klíče {#turn-hardcoded-text-into-keys}
+
+```bash
+i18n-micro text-to-i18n --dryRun   # list what would change
+i18n-micro text-to-i18n            # rewrite the templates
+```
+
+```vue
+<!-- before -->
+<h1>Welcome to our site</h1>
+<!-- after -->
+<h1>{{ $t('pages.index.welcome-to-our') }}</h1>
+```
+
+Přepisují se jen šablony `.vue` samotného projektu, ne šablony vrstvy nebo cíle aliasu. Každý přepsaný soubor se před zápisem znovu naparsuje. Tyto případy se vypíšou a ponechají si svůj text:
+
+- text v souborech `.ts` a ve skriptech, protože `$t` není dostupné všude;
+- text vedle markupu nebo interpolace, jako `<p>Hello <b>world</b> today</p>`: polovinu věty nelze přeložit samostatně;
+- vygenerovaný klíč, který by kolidoval s jiným, jak se to může stát nadřazené stránce a jejímu potomkovi;
+- známý klíč, který nemůže stát mezi uvozovkami.
+
+<Warning>
+
+Nejdřív commitněte a zkontrolujte diff.
+
+</Warning>
+
+## Přejmenování klíče {#rename-a-key}
+
+```bash
+i18n-micro rename --from common.save --to actions.save
+i18n-micro rename --from settings --to account.settings   # a whole namespace
+```
+
+`rename` upravuje syntaktický strom, takže komentáře a nesouvisející řetězce zůstanou, jak jsou, a sledují se aliasy i `:keypath`. Vlastní soubor vrstvy se nikdy nemění. Varuje před tím, co nedokáže přepsat, a nechá to být:
+
+- počítaný klíč pod starým názvem;
+- každý obyčejný řetězec, který se mu rovná;
+- šablonu Pug;
+- zdroj ve vrstvě nebo ve složce mimo projekt.
+
+`--to` musí být klíč, který lze zapsat v kódu: žádné uvozovky, žádné zpětné lomítko, žádný prázdný segment, žádné `__proto__`.
+
+## Výměna souborů s překladateli {#exchange-files-with-translators}
+
+```bash
+i18n-micro export --format csv
+i18n-micro import --format csv --dryRun
+```
+
+**`export`** zapíše každý klíč každého locale, včetně nepřeložených, s textem výchozího locale jako zdrojem: sloupec `Source` v CSV, komentář `#.` v PO.
+
+- Bez `--dir` jde PO do `pots` a CSV do `csv_exports`.
+- To, co zapsal, si zaznamená do `.i18n-export.json` ve výstupní složce. Zastaví se, když se soubor od té doby změnil a obsahuje překlady, které soubory locale nemají, včetně fuzzy položek PO; `--force` je přepíše. Běžné úpravy souborů locale ho nezastaví.
+
+**`import`** slučuje, přeskakuje prázdné buňky a přeskakuje položky PO označené `fuzzy`.
+
+- Klíč, který by přepsal hodnotu, nebo hodnota nad celou skupinou klíčů se vypíše a vynechá a příkaz skončí s kódem `1`.
+- Zastaví se s kódem `2` u katalogu na neočekávaném místě, katalogu stránky, který poslední export nezapsal, uvozovky na špatném místě v CSV nebo položky stránky při `disablePageLocales`.
+
+Pro překladovou platformu použijte její vlastní CLI: nastavení [Crowdin](/cs/guide/crowdin) synchronizuje JSON soubory včetně souborů stránek.
+
+## Synchronizace s vlastním endpointem {#sync-with-your-own-endpoint}
+
+`sync-remote` vyměňuje globální soubory locale s HTTP endpointem, který provozujete. Soubory stránek zůstávají lokálně a příkaz to oznámí. Endpoint popište v `.i18n-remote.json`:
+
+```json .i18n-remote.json
+{ "url": "https://translations.example.com", "path": "translations" }
+```
+
+Endpoint odpovídá na `GET` a `PUT` objektem `{ locale: messages }`. Autentizujte se pomocí `auth: { username, password }`, nebo vložte bearer token do `I18N_REMOTE_TOKEN`.
+
+| | Pull | Push |
+| --- | --- | --- |
+| Co se přenáší | Doplní, co nemáte, a ponechá klíče, které máte jen vy | Odešle vlastní klíče projektu, ne klíče vrstvy, a vynechá vaše prázdné hodnoty |
+| Konflikty | Klíč, který se na obou stranách liší: nic se nezapíše, kód `1`; `--force` vezme vzdálenou hodnotu | PUT nahradí celý dokument, takže push nejdřív přečte endpoint a zastaví se s kódem `1`, když obsahuje text, který nemáte; `--force` ho přepíše. Endpoint, který odpoví `404`, nemá co ztratit |
+| `--dryRun` | Čte z endpointu, vypíše změny, nic nezapíše | Řekne, co by se odeslalo, bez kontaktování endpointu |
+
+Locale, které nemáte nakonfigurované, se přeskočí, a prázdná vzdálená hodnota nic nevymaže.
+
+## Přechod z nuxt-i18n-micro-cli {#moving-from-nuxt-i18n-micro-cli}
+
+| Starý příkaz | Nyní |
+| --- | --- |
+| `validate` | `check` |
+| `diff` | `check --only missing` |
+| `check-duplicates` | `check --only duplicates` |
+| `export-csv`, `import-csv` | `export --format csv`, `import --format csv` |
+| `--potsDir`, `--csvDir` | `--dir` |
+| `estimate` | `translate --dryRun` |
+| `glossary` | Upravte `.i18n-glossary.json`; `translate` ho čte sám |
+| `backup`, `restore` | Git, který už vaše soubory locale uchovává |
+| `init` | `nuxi init`, pak přidejte `nuxt-i18n-micro` do `modules` |
+| `split` | Odstraněno: modul rozdělené soubory nečte |
+| `optimize` | `check --only duplicates` |
+| `replace-values` | Váš editor nebo `sed` |
+| `stats --full` | `stats`; podrobnosti má [DevTools](/cs/guide/devtools) |
+| `search --hardcodedOnly` | `text-to-i18n --dryRun` |
+| `search --preferUnused`, `--onlyVue` | Odstraněno |
+| pravidla `lint` `no-html-tags`, `no-special-chars`, `no-mixed-case`, `no-missing-punctuation`, `no-inconsistent-pluralization` | Odstraněno: označovala běžný text. Pokud nějaké potřebujete, napište položku `customRegexRules` |
+| `text-to-i18n --extractOnlyDirs`, `--extractOnlyPatterns`, `--verbose` | Odstraněno: kód se nikdy nepřepisuje |
+| `--logLevel verbose` | Odstraněno: nic nedělal |
+
+**Odstraněné služby:** `googlefree`, `yandex` (použijte `yandexcloud`), `ibm`, `lingvatranslate`, `modernmt`, `lilt`, `unbabel`, `reverso`, `baidu`, `papago`, `tencent`, `systran`, `mymemory`.
+
+**Odstraněné typy `sync-remote`:** `github`, `gitlab`, `crowdin`, `lokalise`, `tolgee`, `weblate`. Použijte vlastní CLI platformy, nebo `custom`, které už nepotřebuje `type`.
+
+### Změněné chování {#changed-behaviour}
+
+- `extract` a `sync` už nezapisují `''`. Klíče zůstanou chybět a `check` je nahlásí. `extract` zapíše klíč jen tehdy, když kód uvádí jeho text.
+- `extract` zapisuje klíče stránek do `locales/pages/<route name>/`, odkud je modul čte, a na Nuxt 4 prochází `app/`. Přesuňte vše z adresářů jako `pages/_about` a `pages/blog_` a smažte zatoulaný `locales/pages/<locale>.json`.
+- `translationDir` z `nuxt.config` se respektuje; dříve všechny příkazy potichu používaly `locales`.
+- Bez `defaultLocale` je výchozí `en`, stejně jako v modulu, a respektuje se `DEFAULT_LOCALE`. Dříve to bylo první locale.
+- `check` a `sync` používají jako referenci výchozí locale a kontrolují soubory stránek. `"a.b"` a `a: { b }` se počítají jako jeden klíč.
+- `clean` ponechá klíč použitý kdekoli, v jakémkoli rozsahu, a zastaví se, když použití nelze prokázat. `--include` a `--exclude` určují, co smí být odstraněno.
+- `sync` se zastavuje stejně a také tehdy, když výchozí locale nemá klíče k porovnání. `--force` to přebije. Zastaví se také, když `DEFAULT_LOCALE` zvolilo jinou referenci než `nuxt.config`.
+- Dlouhé přepínače s jednou pomlčkou a zatoulané argumenty jsou chyby: `clean -dryRun` už nespustí `clean`.
+- Soubor pouze pro čtení nebo soubor, který není v UTF-8, nelze uložit: příkaz se zastaví dříve, než cokoli změní. Čtení takového souboru je v pořádku. Opakovaný klíč, klíč s názvem `__proto__` a celé číslo nad 2^53 příkaz zastaví, protože uložení by je ztratilo.
+- Přepínač, který potřebuje hodnotu a následuje po něm jiný přepínač, je chyba; pro hodnotu začínající pomlčkou pište `--flag=--value`. Booleovský přepínač přijímá jen `true` nebo `false`.
+- `export` se raději zastaví, než by přepsal překlady, které nikdy nebyly importovány.
+- Návratové kódy jsou `0`, `1` a `2`; selhání dříve vracela `1` a `diff` a `check-duplicates` vždy `0`.
+- `lint --fix` už nenechává soubory `.bak`.
+- Uložení zachová odsazení souboru, konce řádků, závěrečný nový řádek, symlink i hard link a soubory, které nezměnilo, nechá být.
+- Překlep v přepínači nebo odstraněný přepínač je nyní chyba, ne potichu ignorován.
+- Cesty jako `--dir` jsou relativní k projektu, ne k shellu.
+- `ai` už nenačítá balíčky `@ai-sdk/*`: použijte `provider` `gateway`, `openai` nebo `anthropic`, nebo `baseUrl` pro server kompatibilní s OpenAI.
+
+## Související {#related}
+
+<CardGroup cols={2}>
+
+<Card title="Příkazy CLI" icon="brackets-curly" href="/cs/api/cli">
+
+</Card>
+
+<Card title="Soubory překladů" icon="book-open" href="/cs/guide/translations">
+
+</Card>
+
+<Card title="Crowdin" icon="book-open" href="/cs/guide/crowdin">
+
+</Card>
+
+<Card title="DevTools" icon="book-open" href="/cs/guide/devtools">
+
+</Card>
+
+</CardGroup>
